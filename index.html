@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Love Letter 💌</title>
+
+  <style>
+    *{
+      margin:0;
+      padding:0;
+      box-sizing:border-box;
+      font-family: "Poppins", sans-serif;
+    }
+
+    body{
+      height:100vh;
+      display:flex;
+      justify-content:center;
+      align-items:center;
+      background: linear-gradient(135deg,#ff9ecf,#ff69b4,#ffc0cb);
+      overflow:hidden;
+    }
+
+    .hearts{
+      position:absolute;
+      width:100%;
+      height:100%;
+      overflow:hidden;
+      z-index:1;
+    }
+
+    .heart{
+      position:absolute;
+      color:#fff;
+      font-size:20px;
+      animation: float 6s linear infinite;
+      opacity:0.8;
+    }
+
+    @keyframes float{
+      0%{
+        transform: translateY(100vh) scale(0.5);
+        opacity:0;
+      }
+      50%{
+        opacity:1;
+      }
+      100%{
+        transform: translateY(-10vh) scale(1.2);
+        opacity:0;
+      }
+    }
+
+    .letter-box{
+      position:relative;
+      z-index:2;
+      width:350px;
+      background:rgba(255,255,255,0.15);
+      backdrop-filter: blur(12px);
+      border:2px solid rgba(255,255,255,0.3);
+      border-radius:25px;
+      padding:30px;
+      text-align:center;
+      color:white;
+      box-shadow:0 10px 30px rgba(0,0,0,0.2);
+      animation: glow 2s infinite alternate;
+    }
+
+    @keyframes glow{
+      from{
+        box-shadow:0 0 20px #ffb6d9;
+      }
+      to{
+        box-shadow:0 0 35px #ff69b4;
+      }
+    }
+
+    .title{
+      font-size:28px;
+      margin-bottom:10px;
+      font-weight:bold;
+    }
+
+    .name{
+      color:#ffe6f2;
+      font-size:22px;
+      margin-bottom:20px;
+    }
+
+    .message{
+      font-size:16px;
+      line-height:1.8;
+      color:#fff;
+    }
+
+    .love{
+      margin-top:25px;
+      font-size:20px;
+      color:#fff0f7;
+      animation: pulse 1.5s infinite;
+    }
+
+    @keyframes pulse{
+      0%{ transform: scale(1);}
+      50%{ transform: scale(1.08);}
+      100%{ transform: scale(1);}
+    }
+
+    .btn{
+      margin-top:25px;
+      padding:12px 25px;
+      border:none;
+      border-radius:30px;
+      background:white;
+      color:#ff4f9a;
+      font-size:16px;
+      cursor:pointer;
+      transition:0.3s;
+      font-weight:bold;
+    }
+
+    .btn:hover{
+      background:#ff4f9a;
+      color:white;
+      transform:scale(1.05);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="hearts"></div>
+
+  <div class="letter-box">
+    <div class="title">💌 Purpose Letter</div>
+
+    <div class="name">
+      Anshika
+    </div>
+
+    <div class="message">
+      From the moment I saw you,  
+      my world became softer, sweeter, and brighter. 💖  
+      Your smile feels like moonlight in my darkest nights. 🌙  
+
+      I just want to say...  
+      You are truly special to me. 💕
+    </div>
+
+    <div class="love">
+      Will You Be Mine? 💗
+    </div>
+
+    <button class="btn" onclick="showLove()">
+      Open My Heart 💞
+    </button>
+  </div>
+
+  <script>
+    function showLove(){
+      alert("💖 I Really Like You, Anshika 💖");
+    }
+
+    const heartsContainer = document.querySelector(".hearts");
+
+    function createHeart(){
+      const heart = document.createElement("div");
+      heart.classList.add("heart");
+      heart.innerHTML = "💗";
+
+      heart.style.left = Math.random() * 100 + "vw";
+      heart.style.animationDuration = (Math.random() * 3 + 3) + "s";
+      heart.style.fontSize = (Math.random() * 20 + 15) + "px";
+
+      heartsContainer.appendChild(heart);
+
+      setTimeout(()=>{
+        heart.remove();
+      },6000);
+    }
+
+    setInterval(createHeart,300);
+  </script>
+
+</body>
+</html>
