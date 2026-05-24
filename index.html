@@ -6,101 +6,199 @@
   <title>Real Coin Flip Game</title>
 
   <style>
-    body {
-      margin: 0;
-      height: 100vh;
-      background: linear-gradient(to bottom, #111, #222);
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      font-family: Arial, sans-serif;
-      color: white;
-      overflow: hidden;
+
+    *{
+      margin:0;
+      padding:0;
+      box-sizing:border-box;
     }
 
-    .container {
-      text-align: center;
+    body{
+      height:100vh;
+      display:flex;
+      justify-content:center;
+      align-items:center;
+      background:
+      radial-gradient(circle at top,#333,#111);
+      font-family:Arial, sans-serif;
+      overflow:hidden;
+      perspective:1400px;
+      color:white;
     }
 
-    h1 {
-      margin-bottom: 30px;
-      font-size: 40px;
+    .container{
+      text-align:center;
     }
 
-    .coin {
-      width: 180px;
-      height: 180px;
-      margin: auto;
-      position: relative;
-      transform-style: preserve-3d;
+    h1{
+      font-size:42px;
+      margin-bottom:40px;
+      text-shadow:0 0 15px gold;
     }
 
-    .coin img {
-      width: 100%;
-      height: 100%;
-      border-radius: 50%;
-      position: absolute;
-      backface-visibility: hidden;
+    /* COIN */
+
+    .coin-box{
+      width:220px;
+      height:220px;
+      margin:auto;
+      position:relative;
     }
 
-    .tails {
-      transform: rotateY(180deg);
+    .coin{
+      width:100%;
+      height:100%;
+      position:relative;
+      transform-style:preserve-3d;
     }
 
-    .flip-heads {
-      animation: flipHeads 2s forwards;
+    .coin img{
+      width:100%;
+      height:100%;
+      position:absolute;
+      border-radius:50%;
+      backface-visibility:hidden;
+      box-shadow:
+      0 0 20px rgba(255,215,0,0.6),
+      0 0 40px rgba(255,215,0,0.3);
     }
 
-    .flip-tails {
-      animation: flipTails 2s forwards;
+    /* BACK SIDE */
+
+    .tails{
+      transform:rotateX(180deg);
     }
 
-    @keyframes flipHeads {
-      from {
-        transform: rotateY(0);
+    /* REAL FLIP */
+
+    .flip-heads{
+      animation:flipHeads 3s ease-out forwards;
+    }
+
+    .flip-tails{
+      animation:flipTails 3s ease-out forwards;
+    }
+
+    @keyframes flipHeads{
+
+      0%{
+        transform:
+        rotateX(0deg)
+        translateY(0px);
       }
-      to {
-        transform: rotateY(1800deg);
+
+      20%{
+        transform:
+        rotateX(720deg)
+        translateY(-120px);
+      }
+
+      40%{
+        transform:
+        rotateX(1440deg)
+        translateY(-180px);
+      }
+
+      60%{
+        transform:
+        rotateX(2160deg)
+        translateY(-120px);
+      }
+
+      80%{
+        transform:
+        rotateX(2880deg)
+        translateY(-60px);
+      }
+
+      100%{
+        transform:
+        rotateX(3600deg)
+        translateY(0px);
       }
     }
 
-    @keyframes flipTails {
-      from {
-        transform: rotateY(0);
+    @keyframes flipTails{
+
+      0%{
+        transform:
+        rotateX(0deg)
+        translateY(0px);
       }
-      to {
-        transform: rotateY(1980deg);
+
+      20%{
+        transform:
+        rotateX(900deg)
+        translateY(-120px);
+      }
+
+      40%{
+        transform:
+        rotateX(1800deg)
+        translateY(-180px);
+      }
+
+      60%{
+        transform:
+        rotateX(2700deg)
+        translateY(-120px);
+      }
+
+      80%{
+        transform:
+        rotateX(3420deg)
+        translateY(-60px);
+      }
+
+      100%{
+        transform:
+        rotateX(3780deg)
+        translateY(0px);
       }
     }
 
-    button {
-      margin-top: 40px;
-      padding: 14px 28px;
-      font-size: 18px;
-      border: none;
-      border-radius: 10px;
-      cursor: pointer;
-      background: gold;
-      color: black;
-      font-weight: bold;
-      transition: 0.3s;
+    /* BUTTON */
+
+    button{
+      margin-top:50px;
+      padding:15px 35px;
+      border:none;
+      border-radius:12px;
+      background:gold;
+      color:black;
+      font-size:20px;
+      font-weight:bold;
+      cursor:pointer;
+      transition:0.3s;
+      box-shadow:
+      0 0 15px rgba(255,215,0,0.5);
     }
 
-    button:hover {
-      transform: scale(1.05);
+    button:hover{
+      transform:scale(1.08);
     }
 
-    #result {
-      margin-top: 25px;
-      font-size: 28px;
-      font-weight: bold;
-      opacity: 0;
-      transition: 0.5s;
+    button:active{
+      transform:scale(0.95);
     }
 
-    #result.show {
-      opacity: 1;
+    /* RESULT */
+
+    #result{
+      margin-top:30px;
+      font-size:32px;
+      font-weight:bold;
+      opacity:0;
+      transform:translateY(20px);
+      transition:0.5s;
+      text-shadow:0 0 10px gold;
     }
+
+    #result.show{
+      opacity:1;
+      transform:translateY(0px);
+    }
+
   </style>
 </head>
 
@@ -110,55 +208,110 @@
 
     <h1>🪙 Real Coin Flip</h1>
 
-    <div class="coin" id="coin">
+    <div class="coin-box">
 
-      <!-- HEAD -->
-      <img src="https://i.imgur.com/7D7I6dI.png" alt="Heads">
+      <div class="coin" id="coin">
 
-      <!-- TAIL -->
-      <img src="https://i.imgur.com/9R7sQjK.png" class="tails" alt="Tails">
+        <!-- HEAD -->
+        <img
+        src="https://i.imgur.com/7D7I6dI.png"
+        alt="Heads">
+
+        <!-- TAIL -->
+        <img
+        src="https://i.imgur.com/9R7sQjK.png"
+        class="tails"
+        alt="Tails">
+
+      </div>
 
     </div>
 
-    <button onclick="flipCoin()">Flip Coin</button>
+    <button onclick="flipCoin()">
+      Flip Coin
+    </button>
 
-    <div id="result">Click Flip</div>
+    <div id="result">
+      Click Flip
+    </div>
 
   </div>
 
+  <!-- FLIP SOUND -->
+  <audio id="flipSound">
+    <source src="https://assets.mixkit.co/active_storage/sfx/2003/2003-preview.mp3" type="audio/mpeg">
+  </audio>
+
   <script>
-    function flipCoin() {
 
-      const coin = document.getElementById("coin");
-      const result = document.getElementById("result");
+    function flipCoin(){
 
-      const random = Math.random();
+      const coin =
+      document.getElementById("coin");
 
-      coin.classList.remove("flip-heads");
-      coin.classList.remove("flip-tails");
+      const result =
+      document.getElementById("result");
+
+      const sound =
+      document.getElementById("flipSound");
+
+      const random =
+      Math.random();
+
+      /* RESET */
+
+      coin.classList.remove(
+      "flip-heads",
+      "flip-tails"
+      );
 
       void coin.offsetWidth;
 
       result.classList.remove("show");
 
+      /* PLAY SOUND */
+
+      sound.currentTime = 0;
+      sound.play();
+
+      /* RANDOM RESULT */
+
       if(random < 0.5){
-        coin.classList.add("flip-heads");
 
-        setTimeout(() => {
-          result.innerText = "🟡 Heads!";
-          result.classList.add("show");
-        }, 2000);
+        coin.classList.add(
+        "flip-heads"
+        );
 
-      } else {
+        setTimeout(()=>{
 
-        coin.classList.add("flip-tails");
+          result.innerText =
+          "🟡 Heads!";
 
-        setTimeout(() => {
-          result.innerText = "🟠 Tails!";
-          result.classList.add("show");
-        }, 2000);
+          result.classList.add(
+          "show"
+          );
+
+        },3000);
+
+      }else{
+
+        coin.classList.add(
+        "flip-tails"
+        );
+
+        setTimeout(()=>{
+
+          result.innerText =
+          "🟠 Tails!";
+
+          result.classList.add(
+          "show"
+          );
+
+        },3000);
       }
     }
+
   </script>
 
 </body>
