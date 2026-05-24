@@ -1,6 +1,5 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
@@ -16,27 +15,29 @@
     }
 
     body{
-      width:100%;
-      height:100vh;
+      min-height:100vh;
 
       display:flex;
       justify-content:center;
       align-items:center;
 
-      overflow:hidden;
+      padding:20px;
 
-      font-family:Arial,sans-serif;
+      overflow:hidden;
 
       background:
       radial-gradient(circle at top,#444,#111);
 
-      perspective:1600px;
+      font-family:Arial,sans-serif;
+
+      perspective:1800px;
 
       color:white;
     }
 
     .container{
       width:100%;
+      max-width:420px;
 
       display:flex;
       flex-direction:column;
@@ -48,28 +49,30 @@
     }
 
     h1{
-      font-size:45px;
+      font-size:42px;
 
-      margin-bottom:40px;
+      margin-bottom:35px;
 
       color:gold;
 
       text-shadow:
-      0 0 10px gold,
-      0 0 25px rgba(255,215,0,0.5);
+      0 0 12px gold,
+      0 0 30px rgba(255,215,0,0.5);
     }
 
     /* COIN AREA */
 
     .coin-box{
-      width:240px;
-      height:240px;
+      width:min(65vw,240px);
+      height:min(65vw,240px);
 
       display:flex;
       justify-content:center;
       align-items:center;
 
       position:relative;
+
+      margin:auto;
     }
 
     .coin{
@@ -77,6 +80,10 @@
       height:100%;
 
       position:relative;
+
+      display:flex;
+      justify-content:center;
+      align-items:center;
 
       transform-style:preserve-3d;
     }
@@ -89,36 +96,32 @@
 
       border-radius:50%;
 
-      backface-visibility:hidden;
-
       object-fit:contain;
+
+      backface-visibility:hidden;
 
       mix-blend-mode:screen;
 
       filter:
       drop-shadow(0 0 12px gold)
-      drop-shadow(0 0 35px rgba(255,215,0,0.5));
+      drop-shadow(0 0 30px rgba(255,215,0,0.5));
     }
 
-    /* BACK SIDE */
+    /* BACK */
 
     .tails{
       transform:rotateX(180deg);
     }
 
-    /* HEADS */
+    /* ANIMATION */
 
     .flip-heads{
       animation:flipHeads 3s ease-out forwards;
     }
 
-    /* TAILS */
-
     .flip-tails{
       animation:flipTails 3s ease-out forwards;
     }
-
-    /* ANIMATION */
 
     @keyframes flipHeads{
 
@@ -131,13 +134,13 @@
       25%{
         transform:
         rotateX(900deg)
-        translateY(-150px);
+        translateY(-140px);
       }
 
       50%{
         transform:
         rotateX(1800deg)
-        translateY(-240px);
+        translateY(-230px);
       }
 
       75%{
@@ -164,13 +167,13 @@
       25%{
         transform:
         rotateX(1080deg)
-        translateY(-150px);
+        translateY(-140px);
       }
 
       50%{
         transform:
         rotateX(2160deg)
-        translateY(-240px);
+        translateY(-230px);
       }
 
       75%{
@@ -189,9 +192,9 @@
     /* BUTTON */
 
     button{
-      margin-top:55px;
+      margin-top:45px;
 
-      padding:15px 42px;
+      padding:15px 40px;
 
       border:none;
       border-radius:14px;
@@ -212,24 +215,24 @@
     }
 
     button:hover{
-      transform:scale(1.08);
+      transform:scale(1.06);
     }
 
     button:active{
-      transform:scale(0.96);
+      transform:scale(0.95);
     }
 
     /* RESULT */
 
     #result{
-      margin-top:35px;
+      margin-top:30px;
 
-      font-size:34px;
+      font-size:32px;
       font-weight:bold;
 
       opacity:0;
 
-      transform:translateY(20px);
+      transform:translateY(15px);
 
       transition:0.5s;
 
@@ -240,6 +243,24 @@
     #result.show{
       opacity:1;
       transform:translateY(0px);
+    }
+
+    /* MOBILE */
+
+    @media(max-width:600px){
+
+      h1{
+        font-size:34px;
+      }
+
+      button{
+        font-size:18px;
+        padding:14px 28px;
+      }
+
+      #result{
+        font-size:26px;
+      }
     }
 
   </style>
