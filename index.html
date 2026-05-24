@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 
-  <title>Real Coin Flip</title>
+  <title>Coin Toss Betting Game</title>
 
   <style>
 
@@ -12,6 +12,7 @@
       margin:0;
       padding:0;
       box-sizing:border-box;
+      font-family:Arial,sans-serif;
     }
 
     body{
@@ -21,58 +22,74 @@
       justify-content:center;
       align-items:center;
 
-      padding:20px;
-
       overflow:hidden;
 
       background:
-      radial-gradient(circle at top,#444,#111);
-
-      font-family:Arial,sans-serif;
-
-      perspective:1800px;
+      radial-gradient(circle at top,#3b3b3b,#111);
 
       color:white;
+
+      perspective:1400px;
+    }
+
+    /* WALLET */
+
+    .wallet{
+      position:fixed;
+
+      top:20px;
+      right:20px;
+
+      background:#1d1d1d;
+
+      border:2px solid gold;
+
+      padding:12px 20px;
+
+      border-radius:14px;
+
+      font-size:20px;
+      font-weight:bold;
+
+      color:gold;
+
+      box-shadow:
+      0 0 15px rgba(255,215,0,0.5);
     }
 
     .container{
       width:100%;
-      max-width:420px;
-
-      display:flex;
-      flex-direction:column;
-
-      justify-content:center;
-      align-items:center;
+      max-width:450px;
 
       text-align:center;
+
+      padding:20px;
     }
 
     h1{
-      font-size:42px;
+      font-size:40px;
 
       margin-bottom:35px;
 
       color:gold;
 
       text-shadow:
-      0 0 12px gold,
-      0 0 30px rgba(255,215,0,0.5);
+      0 0 10px gold;
     }
 
-    /* COIN AREA */
+    /* COIN */
 
     .coin-box{
-      width:min(65vw,240px);
-      height:min(65vw,240px);
+      width:220px;
+      height:220px;
+
+      margin:auto;
 
       display:flex;
       justify-content:center;
       align-items:center;
 
       position:relative;
-
-      margin:auto;
     }
 
     .coin{
@@ -80,10 +97,6 @@
       height:100%;
 
       position:relative;
-
-      display:flex;
-      justify-content:center;
-      align-items:center;
 
       transform-style:preserve-3d;
     }
@@ -100,122 +113,135 @@
 
       backface-visibility:hidden;
 
-      mix-blend-mode:screen;
-
       filter:
       drop-shadow(0 0 12px gold)
-      drop-shadow(0 0 30px rgba(255,215,0,0.5));
+      drop-shadow(0 0 25px rgba(255,215,0,0.4));
     }
-
-    /* BACK */
 
     .tails{
       transform:rotateX(180deg);
     }
 
-    /* ANIMATION */
+    /* REALISTIC TOSS */
 
     .flip-heads{
-      animation:flipHeads 3s ease-out forwards;
+      animation:realHeads 2s ease-out forwards;
     }
 
     .flip-tails{
-      animation:flipTails 3s ease-out forwards;
+      animation:realTails 2s ease-out forwards;
     }
 
-    @keyframes flipHeads{
+    @keyframes realHeads{
 
       0%{
         transform:
         rotateX(0deg)
-        translateY(0px);
+        translateY(0);
       }
 
-      25%{
+      30%{
         transform:
-        rotateX(900deg)
-        translateY(-140px);
+        rotateX(720deg)
+        translateY(-120px);
       }
 
-      50%{
+      60%{
+        transform:
+        rotateX(1260deg)
+        translateY(-180px);
+      }
+
+      100%{
         transform:
         rotateX(1800deg)
-        translateY(-230px);
-      }
-
-      75%{
-        transform:
-        rotateX(2700deg)
-        translateY(-120px);
-      }
-
-      100%{
-        transform:
-        rotateX(3600deg)
-        translateY(0px);
+        translateY(0);
       }
     }
 
-    @keyframes flipTails{
+    @keyframes realTails{
 
       0%{
         transform:
         rotateX(0deg)
-        translateY(0px);
+        translateY(0);
       }
 
-      25%{
+      30%{
         transform:
-        rotateX(1080deg)
-        translateY(-140px);
-      }
-
-      50%{
-        transform:
-        rotateX(2160deg)
-        translateY(-230px);
-      }
-
-      75%{
-        transform:
-        rotateX(3240deg)
+        rotateX(900deg)
         translateY(-120px);
+      }
+
+      60%{
+        transform:
+        rotateX(1620deg)
+        translateY(-180px);
       }
 
       100%{
         transform:
-        rotateX(3780deg)
-        translateY(0px);
+        rotateX(1980deg)
+        translateY(0);
       }
     }
 
-    /* BUTTON */
+    /* BET BOX */
 
-    button{
-      margin-top:45px;
+    .bet-box{
+      margin-top:40px;
+    }
 
-      padding:15px 40px;
+    input{
+      width:220px;
+
+      padding:14px;
 
       border:none;
-      border-radius:14px;
+      outline:none;
+
+      border-radius:12px;
+
+      font-size:18px;
+
+      text-align:center;
+
+      background:#222;
+
+      color:white;
+
+      border:2px solid gold;
+    }
+
+    .buttons{
+      margin-top:20px;
+
+      display:flex;
+      justify-content:center;
+      gap:15px;
+    }
+
+    button{
+      padding:14px 28px;
+
+      border:none;
+
+      border-radius:12px;
 
       background:gold;
 
       color:black;
 
-      font-size:22px;
+      font-size:18px;
       font-weight:bold;
 
       cursor:pointer;
 
       transition:0.3s;
-
-      box-shadow:
-      0 0 15px rgba(255,215,0,0.6);
     }
 
     button:hover{
-      transform:scale(1.06);
+      transform:scale(1.05);
     }
 
     button:active{
@@ -225,24 +251,18 @@
     /* RESULT */
 
     #result{
-      margin-top:30px;
+      margin-top:35px;
 
-      font-size:32px;
+      font-size:30px;
       font-weight:bold;
 
       opacity:0;
 
-      transform:translateY(15px);
-
-      transition:0.5s;
-
-      text-shadow:
-      0 0 10px gold;
+      transition:0.4s;
     }
 
     #result.show{
       opacity:1;
-      transform:translateY(0px);
     }
 
     /* MOBILE */
@@ -250,16 +270,29 @@
     @media(max-width:600px){
 
       h1{
-        font-size:34px;
+        font-size:32px;
+      }
+
+      .coin-box{
+        width:180px;
+        height:180px;
+      }
+
+      input{
+        width:180px;
       }
 
       button{
-        font-size:18px;
-        padding:14px 28px;
+        padding:12px 20px;
+        font-size:16px;
       }
 
       #result{
-        font-size:26px;
+        font-size:24px;
+      }
+
+      .wallet{
+        font-size:16px;
       }
     }
 
@@ -268,21 +301,26 @@
 
 <body>
 
+  <!-- WALLET -->
+
+  <div class="wallet">
+    🪙 Wallet:
+    <span id="wallet">5000</span>
+  </div>
+
   <div class="container">
 
-    <h1>🪙 Real Coin Flip</h1>
+    <h1>🪙 Coin Toss</h1>
+
+    <!-- COIN -->
 
     <div class="coin-box">
 
       <div class="coin" id="coin">
 
-        <!-- HEAD -->
-
         <img
         src="https://files.catbox.moe/7ft64i.png"
         alt="Heads">
-
-        <!-- TAIL -->
 
         <img
         src="https://files.catbox.moe/qmv8dp.png"
@@ -293,16 +331,33 @@
 
     </div>
 
-    <!-- BUTTON -->
+    <!-- BET -->
 
-    <button onclick="flipCoin()">
-      Flip Coin
-    </button>
+    <div class="bet-box">
+
+      <input
+      type="number"
+      id="betAmount"
+      placeholder="Enter Bet (10 - 10000)">
+
+      <div class="buttons">
+
+        <button onclick="flipCoin('Heads')">
+          Heads
+        </button>
+
+        <button onclick="flipCoin('Tails')">
+          Tails
+        </button>
+
+      </div>
+
+    </div>
 
     <!-- RESULT -->
 
     <div id="result">
-      Click Flip
+      Place Your Bet
     </div>
 
   </div>
@@ -319,19 +374,61 @@
 
   <script>
 
-    function flipCoin(){
+    let wallet = 5000;
+
+    function flipCoin(choice){
+
+      const bet =
+      parseInt(
+      document.getElementById(
+      "betAmount"
+      ).value);
+
+      const walletText =
+      document.getElementById(
+      "wallet"
+      );
 
       const coin =
-      document.getElementById("coin");
+      document.getElementById(
+      "coin"
+      );
 
       const result =
-      document.getElementById("result");
+      document.getElementById(
+      "result"
+      );
 
       const sound =
-      document.getElementById("flipSound");
+      document.getElementById(
+      "flipSound"
+      );
 
-      const random =
-      Math.random();
+      /* VALIDATION */
+
+      if(isNaN(bet)){
+
+        alert("Enter Bet Amount");
+        return;
+      }
+
+      if(bet < 10){
+
+        alert("Minimum Bet is 10");
+        return;
+      }
+
+      if(bet > 10000){
+
+        alert("Maximum Bet is 10000");
+        return;
+      }
+
+      if(bet > wallet){
+
+        alert("Not Enough Coins");
+        return;
+      }
 
       /* RESET */
 
@@ -342,50 +439,67 @@
 
       void coin.offsetWidth;
 
-      result.classList.remove("show");
+      result.classList.remove(
+      "show"
+      );
 
       /* PLAY SOUND */
 
       sound.currentTime = 0;
-
       sound.play();
 
-      /* RANDOM RESULT */
+      /* RANDOM */
 
-      if(random < 0.5){
+      const random =
+      Math.random() < 0.5
+      ? "Heads"
+      : "Tails";
+
+      /* ANIMATION */
+
+      if(random === "Heads"){
 
         coin.classList.add(
         "flip-heads"
         );
-
-        setTimeout(()=>{
-
-          result.innerText =
-          "🟡 Heads!";
-
-          result.classList.add(
-          "show"
-          );
-
-        },3000);
 
       }else{
 
         coin.classList.add(
         "flip-tails"
         );
-
-        setTimeout(()=>{
-
-          result.innerText =
-          "🟠 Tails!";
-
-          result.classList.add(
-          "show"
-          );
-
-        },3000);
       }
+
+      /* RESULT */
+
+      setTimeout(()=>{
+
+        if(choice === random){
+
+          wallet += bet;
+
+          result.innerHTML =
+          "🎉 You Won +"
+          + bet;
+
+        }else{
+
+          wallet -= bet;
+
+          result.innerHTML =
+          "❌ You Lost -"
+          + bet;
+        }
+
+        walletText.innerText =
+        wallet;
+
+        result.classList.add(
+        "show"
+        );
+
+      },2000);
+
     }
 
   </script>
