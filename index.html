@@ -1,1642 +1,1418 @@
 <!DOCTYPE html>
-<html lang="hi">
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SwiftCash Loans - Instant Loan Approval</title>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>GenZ Pets — Your Pet, Our Vibe 🐾</title>
+
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+
+    <!-- Font Awesome 6 (icons) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" />
+
+    <!-- Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js">
+    </script>
+
     <style>
-        * {
+        /* ========== RESET & BASE ========== */
+        *,
+        *::before,
+        *::after {
             margin: 0;
             padding: 0;
             box-sizing: border-box;
         }
-        :root {
-            --primary: #1a73e8;
-            --primary-dark: #0d47a1;
-            --primary-light: #e8f0fe;
-            --secondary: #00c853;
-            --accent: #ff6d00;
-            --danger: #ef4444;
-            --dark: #1a1a2e;
-            --gray: #6b7280;
-            --light-gray: #f3f4f6;
-            --white: #ffffff;
-            --shadow: 0 20px 60px rgba(0,0,0,0.08);
-            --shadow-hover: 0 30px 80px rgba(0,0,0,0.12);
-            --radius: 16px;
-            --radius-sm: 10px;
-            --transition: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+
+        html {
+            scroll-behavior: smooth;
+            overflow-x: hidden;
         }
-        html { scroll-behavior: smooth; }
+
         body {
-            font-family: 'Inter', -apple-system, sans-serif;
-            background: var(--white);
-            color: var(--dark);
+            font-family: 'Inter', sans-serif;
+            color: #1A1A2E;
+            background: #F7F7F7;
             line-height: 1.6;
             overflow-x: hidden;
         }
-        a { text-decoration: none; color: inherit; }
-        img { max-width: 100%; display: block; }
+
+        h1,
+        h2,
+        h3,
+        h4,
+        h5,
+        h6 {
+            font-family: 'Poppins', sans-serif;
+            font-weight: 700;
+            letter-spacing: 0.5px;
+        }
+
+        a {
+            text-decoration: none;
+            color: inherit;
+        }
+
+        img {
+            max-width: 100%;
+            display: block;
+        }
+
+        /* ========== UTILITY ========== */
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        .section-title {
+            font-size: 2.2rem;
+            text-align: center;
+            margin-bottom: 40px;
+            color: #1A1A2E;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 14px 32px;
+            border-radius: 50px;
+            font-family: 'Inter', sans-serif;
+            font-weight: 600;
+            font-size: 1rem;
+            cursor: pointer;
+            border: 2px solid transparent;
+            transition: all 0.3s ease;
+            letter-spacing: 0.3px;
+        }
+
+        .btn:hover {
+            transform: scale(1.05);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.15);
+        }
+
+        .btn-primary {
+            background: #FF6B35;
+            color: #fff;
+            border-color: #FF6B35;
+        }
+
+        .btn-primary:hover {
+            background: #e85a2a;
+            border-color: #e85a2a;
+        }
+
+        .btn-outline {
+            background: transparent;
+            color: #fff;
+            border-color: #fff;
+        }
+
+        .btn-outline:hover {
+            background: #fff;
+            color: #1A1A2E;
+        }
+
+        /* ========== SCROLL ANIMATION (Intersection Observer) ========== */
+        .fade-up {
+            opacity: 0;
+            transform: translateY(40px);
+            transition: opacity 0.6s ease, transform 0.6s ease;
+        }
+
+        .fade-up.visible {
+            opacity: 1;
+            transform: translateY(0);
+        }
+
+        /* Stagger delays for children */
+        .stagger-1 {
+            transition-delay: 0.1s;
+        }
+        .stagger-2 {
+            transition-delay: 0.2s;
+        }
+        .stagger-3 {
+            transition-delay: 0.3s;
+        }
+        .stagger-4 {
+            transition-delay: 0.4s;
+        }
+        .stagger-5 {
+            transition-delay: 0.5s;
+        }
+
+        /* ========== NAVBAR ========== */
         .navbar {
             position: fixed;
-            top: 0; left: 0; right: 0;
+            top: 0;
+            left: 0;
+            width: 100%;
             z-index: 1000;
-            padding: 18px 40px;
+            padding: 12px 30px;
             display: flex;
             align-items: center;
             justify-content: space-between;
-            background: rgba(255,255,255,0.95);
-            backdrop-filter: blur(20px);
-            border-bottom: 1px solid rgba(0,0,0,0.05);
-            transition: var(--transition);
+            background: rgba(255, 255, 255, 0.6);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.3);
+            transition: background 0.3s ease;
         }
-        .navbar.scrolled { box-shadow: 0 4px 30px rgba(0,0,0,0.08); }
-        .logo {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            font-size: 24px;
+
+        .navbar .logo {
+            font-family: 'Poppins', sans-serif;
             font-weight: 800;
-            color: var(--primary);
-        }
-        .logo i {
-            font-size: 28px;
-            background: linear-gradient(135deg, var(--primary), #4fc3f7);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        .logo span { color: var(--dark); -webkit-text-fill-color: var(--dark); }
-        .nav-links {
+            font-size: 1.5rem;
+            color: #FF6B35;
             display: flex;
             align-items: center;
-            gap: 32px;
-            list-style: none;
+            gap: 6px;
         }
-        .nav-links a {
-            font-size: 15px;
+
+        .navbar .logo span {
+            color: #1A1A2E;
+        }
+
+        .nav-links {
+            list-style: none;
+            display: flex;
+            gap: 28px;
             font-weight: 500;
-            color: var(--gray);
-            transition: var(--transition);
+            font-size: 0.95rem;
+        }
+
+        .nav-links a {
+            color: #1A1A2E;
+            transition: color 0.3s;
             position: relative;
         }
+
         .nav-links a::after {
             content: '';
             position: absolute;
-            bottom: -4px; left: 0;
-            width: 0; height: 2px;
-            background: var(--primary);
-            transition: var(--transition);
+            bottom: -4px;
+            left: 0;
+            width: 0;
+            height: 2px;
+            background: #FF6B35;
+            transition: width 0.3s;
         }
-        .nav-links a:hover { color: var(--primary); }
-        .nav-links a:hover::after { width: 100%; }
-        .nav-btn {
-            padding: 10px 24px;
-            background: var(--primary);
-            color: var(--white) !important;
-            border-radius: 50px;
-            font-weight: 600;
+
+        .nav-links a:hover::after {
+            width: 100%;
         }
-        .nav-btn:hover { background: var(--primary-dark) !important; }
-        .nav-btn::after { display: none !important; }
+
+        .nav-links a:hover {
+            color: #FF6B35;
+        }
+
+        .nav-actions {
+            display: flex;
+            align-items: center;
+            gap: 18px;
+        }
+
+        .nav-actions button {
+            background: none;
+            border: none;
+            font-size: 1.2rem;
+            cursor: pointer;
+            color: #1A1A2E;
+            position: relative;
+            transition: color 0.3s;
+        }
+
+        .nav-actions button:hover {
+            color: #FF6B35;
+        }
+
+        .cart-badge {
+            position: absolute;
+            top: -8px;
+            right: -10px;
+            background: #FF6B35;
+            color: #fff;
+            font-size: 0.65rem;
+            font-weight: 700;
+            width: 20px;
+            height: 20px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            transition: transform 0.3s;
+        }
+
+        .cart-badge.bounce {
+            animation: badgeBounce 0.4s ease;
+        }
+
+        @keyframes badgeBounce {
+            0%,
+            100% {
+                transform: scale(1);
+            }
+            50% {
+                transform: scale(1.4);
+            }
+        }
+
+        /* Hamburger */
         .hamburger {
             display: none;
             flex-direction: column;
             gap: 5px;
             cursor: pointer;
-            padding: 5px;
-        }
-        .hamburger span {
-            width: 25px; height: 3px;
-            background: var(--dark);
-            border-radius: 3px;
-            transition: var(--transition);
-        }
-        .hero {
-            min-height: 100vh;
-            display: flex;
-            align-items: center;
-            padding: 120px 40px 80px;
-            background: linear-gradient(135deg, #f8fbff 0%, #e8f0fe 50%, #dce8f5 100%);
-            position: relative;
-            overflow: hidden;
-        }
-        .hero::before {
-            content: '';
-            position: absolute;
-            top: -50%; right: -20%;
-            width: 800px; height: 800px;
-            background: radial-gradient(circle, rgba(26,115,232,0.08), transparent 70%);
-            border-radius: 50%;
-        }
-        .hero::after {
-            content: '';
-            position: absolute;
-            bottom: -30%; left: -10%;
-            width: 600px; height: 600px;
-            background: radial-gradient(circle, rgba(0,200,83,0.06), transparent 70%);
-            border-radius: 50%;
-        }
-        .hero-content {
-            max-width: 1400px;
-            margin: 0 auto;
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 60px;
-            align-items: center;
-            position: relative;
-            z-index: 1;
-        }
-        .hero-text h1 {
-            font-size: 52px;
-            font-weight: 900;
-            line-height: 1.15;
-            margin-bottom: 20px;
-        }
-        .hero-text h1 .highlight {
-            background: linear-gradient(135deg, var(--primary), #4fc3f7);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }
-        .hero-text p {
-            font-size: 18px;
-            color: var(--gray);
-            margin-bottom: 32px;
-            max-width: 500px;
-        }
-        .hero-badges {
-            display: flex;
-            gap: 24px;
-            margin-bottom: 36px;
-            flex-wrap: wrap;
-        }
-        .hero-badge {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            font-size: 14px;
-            font-weight: 500;
-            color: var(--gray);
-        }
-        .hero-badge i { color: var(--secondary); font-size: 18px; }
-        .hero-buttons { display: flex; gap: 16px; flex-wrap: wrap; }
-        .btn-primary {
-            padding: 16px 40px;
-            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
-            color: var(--white);
+            background: none;
             border: none;
-            border-radius: 50px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: var(--transition);
-            box-shadow: 0 8px 30px rgba(26,115,232,0.3);
-            display: inline-flex;
-            align-items: center;
-            gap: 10px;
+            padding: 4px;
         }
-        .btn-primary:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 12px 40px rgba(26,115,232,0.4);
+
+        .hamburger span {
+            width: 26px;
+            height: 3px;
+            background: #1A1A2E;
+            border-radius: 3px;
+            transition: 0.3s;
         }
-        .btn-secondary {
-            padding: 16px 40px;
-            background: var(--white);
-            color: var(--primary);
-            border: 2px solid rgba(26,115,232,0.2);
-            border-radius: 50px;
-            font-size: 16px;
-            font-weight: 600;
-            cursor: pointer;
-            transition: var(--transition);
-            display: inline-flex;
-            align-items: center;
-            gap: 10px;
+
+        .hamburger.active span:nth-child(1) {
+            transform: rotate(45deg) translate(5px, 6px);
         }
-        .btn-secondary:hover { border-color: var(--primary); background: var(--primary-light); }
-        .hero-visual { position: relative; }
-        .hero-visual .card-mockup {
-            background: var(--white);
-            border-radius: var(--radius);
-            padding: 40px;
-            box-shadow: var(--shadow);
+        .hamburger.active span:nth-child(2) {
+            opacity: 0;
+        }
+        .hamburger.active span:nth-child(3) {
+            transform: rotate(-45deg) translate(5px, -6px);
+        }
+
+        /* ========== HERO ========== */
+        .hero {
             position: relative;
-        }
-        .hero-visual .card-mockup .amount-display {
-            text-align: center;
-            padding: 20px;
-            background: linear-gradient(135deg, var(--primary-light), #e3f2fd);
-            border-radius: var(--radius-sm);
-            margin-bottom: 20px;
-        }
-        .hero-visual .card-mockup .amount-display .label { font-size: 14px; color: var(--gray); font-weight: 500; }
-        .hero-visual .card-mockup .amount-display .number { font-size: 36px; font-weight: 800; color: var(--primary); }
-        .hero-visual .card-mockup .amount-display .sub { font-size: 14px; color: var(--secondary); font-weight: 600; }
-        .hero-visual .card-mockup .quick-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
-        .hero-visual .card-mockup .quick-stats .stat { text-align: center; padding: 12px; background: var(--light-gray); border-radius: var(--radius-sm); }
-        .hero-visual .card-mockup .quick-stats .stat .num { font-size: 20px; font-weight: 700; color: var(--dark); }
-        .hero-visual .card-mockup .quick-stats .stat .lbl { font-size: 12px; color: var(--gray); }
-        .floating-badge {
-            position: absolute;
-            top: -20px; right: -20px;
-            background: var(--secondary);
-            color: var(--white);
-            padding: 12px 20px;
-            border-radius: 50px;
-            font-size: 14px;
-            font-weight: 600;
-            box-shadow: 0 8px 30px rgba(0,200,83,0.3);
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            animation: float 3s ease-in-out infinite;
-        }
-        @keyframes float {
-            0%, 100% { transform: translateY(0); }
-            50% { transform: translateY(-10px); }
-        }
-        .trusted { padding: 40px 40px; text-align: center; }
-        .trusted p { font-size: 14px; color: var(--gray); text-transform: uppercase; letter-spacing: 2px; font-weight: 600; margin-bottom: 20px; }
-        .trusted-logos { display: flex; justify-content: center; gap: 48px; flex-wrap: wrap; opacity: 0.5; }
-        .trusted-logos span { font-size: 18px; font-weight: 700; color: var(--gray); }
-        .section { padding: 100px 40px; }
-        .section-header { text-align: center; max-width: 700px; margin: 0 auto 60px; }
-        .section-header h2 { font-size: 40px; font-weight: 800; margin-bottom: 16px; }
-        .section-header p { font-size: 18px; color: var(--gray); }
-        .section-header .badge {
-            display: inline-block;
-            padding: 6px 20px;
-            background: var(--primary-light);
-            color: var(--primary);
-            border-radius: 50px;
-            font-size: 14px;
-            font-weight: 600;
-            margin-bottom: 16px;
-        }
-        .steps-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 30px; max-width: 1200px; margin: 0 auto; }
-        .step-card {
-            background: var(--white);
-            border-radius: var(--radius);
-            padding: 40px 30px;
-            text-align: center;
-            box-shadow: var(--shadow);
-            border: 1px solid rgba(0,0,0,0.03);
-            transition: var(--transition);
-            position: relative;
-        }
-        .step-card:hover { transform: translateY(-8px); box-shadow: var(--shadow-hover); }
-        .step-card .step-number {
-            width: 56px; height: 56px;
-            background: var(--primary-light);
-            color: var(--primary);
-            border-radius: 50%;
+            width: 100%;
+            height: 100vh;
+            min-height: 600px;
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 22px;
-            font-weight: 800;
-            margin: 0 auto 20px;
+            overflow: hidden;
+            background: #1A1A2E;
+            /* fallback */
         }
-        .step-card h3 { font-size: 20px; font-weight: 700; margin-bottom: 12px; }
-        .step-card p { font-size: 15px; color: var(--gray); }
-        .step-card .icon-big { font-size: 40px; margin-bottom: 16px; display: block; color: var(--primary); }
-        #apply { background: linear-gradient(135deg, #f8fbff, #e8f0fe); }
-        .apply-wrap { max-width: 1200px; margin: 0 auto; display: grid; grid-template-columns: 1fr 1.2fr; gap: 50px; align-items: start; }
-        .apply-info h2 { font-size: 36px; font-weight: 800; margin-bottom: 16px; }
-        .apply-info p { color: var(--gray); margin-bottom: 24px; font-size: 16px; }
-        .apply-info .features-list { list-style: none; }
-        .apply-info .features-list li {
+
+        .hero-bg {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            object-fit: cover;
+            object-position: center;
+            z-index: 0;
+        }
+
+        .hero-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg,
+                    rgba(0, 78, 137, 0.75) 0%,
+                    rgba(26, 26, 46, 0.85) 100%);
+            z-index: 1;
+        }
+
+        /* Three.js paw canvas */
+        #three-paw {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            z-index: 2;
+            pointer-events: none;
+        }
+
+        .hero-content {
+            position: relative;
+            z-index: 3;
+            text-align: center;
+            color: #fff;
+            max-width: 720px;
+            padding: 0 20px;
+        }
+
+        .hero-content h1 {
+            font-size: 3.5rem;
+            line-height: 1.15;
+            margin-bottom: 16px;
+            text-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+        }
+
+        .hero-content p {
+            font-size: 1.2rem;
+            font-weight: 400;
+            opacity: 0.9;
+            margin-bottom: 36px;
+            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
+
+        .hero-buttons {
+            display: flex;
+            gap: 16px;
+            justify-content: center;
+            flex-wrap: wrap;
+        }
+
+        /* Floating animation on CTA */
+        .hero-buttons .btn {
+            animation: float 3s ease-in-out infinite;
+        }
+
+        .hero-buttons .btn:nth-child(2) {
+            animation-delay: 0.5s;
+        }
+
+        @keyframes float {
+            0%,
+            100% {
+                transform: translateY(0);
+            }
+            50% {
+                transform: translateY(-6px);
+            }
+        }
+
+        /* ========== FEATURED PRODUCTS ========== */
+        .products-section {
+            padding: 80px 20px;
+            background: #F7F7F7;
+        }
+
+        .product-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+            gap: 30px;
+        }
+
+        .product-card {
+            background: #fff;
+            border-radius: 20px;
+            padding: 28px 20px 24px;
+            text-align: center;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+            transition: all 0.4s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+            cursor: default;
+            border: 1px solid rgba(0, 0, 0, 0.04);
+            /* 3D tilt container */
+            perspective: 800px;
+        }
+
+        .product-card:hover {
+            transform: translateY(-8px);
+            box-shadow: 0 16px 40px rgba(0, 0, 0, 0.12);
+        }
+
+        .product-card .icon-wrap {
+            font-size: 4rem;
+            margin-bottom: 12px;
+            display: block;
+        }
+
+        .product-card h3 {
+            font-size: 1.2rem;
+            color: #1A1A2E;
+            margin-bottom: 6px;
+        }
+
+        .product-card .price {
+            font-size: 1.3rem;
+            font-weight: 700;
+            color: #FF6B35;
+            margin-bottom: 6px;
+        }
+
+        .product-card .rating {
+            color: #FFD166;
+            font-size: 1rem;
+            letter-spacing: 2px;
+            margin-bottom: 16px;
+        }
+
+        .product-card .btn-add {
+            background: #FF6B35;
+            color: #fff;
+            border: none;
+            padding: 10px 28px;
+            border-radius: 50px;
+            font-weight: 600;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.3s;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .product-card .btn-add:hover {
+            background: #e85a2a;
+            transform: scale(1.05);
+            box-shadow: 0 6px 20px rgba(255, 107, 53, 0.35);
+        }
+
+        /* Mobile card adjustment */
+        @media (max-width: 600px) {
+            .product-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        /* ========== FEATURES STRIP ========== */
+        .features-section {
+            padding: 70px 20px;
+            background: #fff;
+        }
+
+        .features-grid {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 40px;
+            text-align: center;
+        }
+
+        .feature-item .icon {
+            font-size: 2.8rem;
+            margin-bottom: 14px;
+        }
+
+        .feature-item h4 {
+            font-size: 1.1rem;
+            color: #1A1A2E;
+            margin-bottom: 6px;
+        }
+
+        .feature-item p {
+            font-size: 0.9rem;
+            color: #555;
+        }
+
+        @media (max-width: 768px) {
+            .features-grid {
+                grid-template-columns: 1fr;
+                gap: 30px;
+            }
+        }
+
+        /* ========== NEWSLETTER ========== */
+        .newsletter-section {
+            padding: 80px 20px;
+            background: linear-gradient(135deg, #fff6ed 0%, #ffede0 100%);
+            text-align: center;
+        }
+
+        .newsletter-section h2 {
+            margin-bottom: 10px;
+        }
+
+        .newsletter-section p {
+            color: #555;
+            margin-bottom: 24px;
+        }
+
+        .newsletter-form {
+            display: flex;
+            justify-content: center;
+            gap: 12px;
+            flex-wrap: wrap;
+            max-width: 500px;
+            margin: 0 auto;
+        }
+
+        .newsletter-form input {
+            flex: 1;
+            min-width: 220px;
+            padding: 14px 20px;
+            border-radius: 50px;
+            border: 2px solid #ddd;
+            font-size: 1rem;
+            font-family: 'Inter', sans-serif;
+            outline: none;
+            transition: border 0.3s;
+        }
+
+        .newsletter-form input:focus {
+            border-color: #FF6B35;
+        }
+
+        .newsletter-form .btn {
+            border-radius: 50px;
+        }
+
+        .newsletter-small {
+            margin-top: 12px;
+            font-size: 0.85rem;
+            color: #888;
+        }
+
+        /* ========== FOOTER ========== */
+        .footer {
+            background: #1A1A2E;
+            color: #ccc;
+            padding: 60px 20px 0;
+        }
+
+        .footer-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 40px;
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .footer-col h4 {
+            color: #fff;
+            font-size: 1.1rem;
+            margin-bottom: 16px;
+        }
+
+        .footer-col p,
+        .footer-col li {
+            font-size: 0.9rem;
+            line-height: 2;
+        }
+
+        .footer-col ul {
+            list-style: none;
+        }
+
+        .footer-col ul a {
+            color: #ccc;
+            transition: color 0.3s;
+        }
+
+        .footer-col ul a:hover {
+            color: #FFD166;
+        }
+
+        .footer-socials {
+            display: flex;
+            gap: 14px;
+            font-size: 1.3rem;
+            margin-top: 8px;
+        }
+
+        .footer-socials a {
+            color: #ccc;
+            transition: color 0.3s, transform 0.3s;
+        }
+
+        .footer-socials a:hover {
+            color: #FF6B35;
+            transform: translateY(-3px);
+        }
+
+        .footer-bottom {
+            text-align: center;
+            padding: 24px 0;
+            margin-top: 40px;
+            border-top: 1px solid rgba(255, 255, 255, 0.08);
+            font-size: 0.85rem;
+            color: #888;
+        }
+
+        @media (max-width: 768px) {
+            .footer-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+        }
+
+        @media (max-width: 480px) {
+            .footer-grid {
+                grid-template-columns: 1fr;
+                text-align: center;
+            }
+            .footer-socials {
+                justify-content: center;
+            }
+        }
+
+        /* ========== CART SIDEBAR ========== */
+        .cart-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.4);
+            z-index: 2000;
+            opacity: 0;
+            visibility: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .cart-overlay.open {
+            opacity: 1;
+            visibility: visible;
+        }
+
+        .cart-sidebar {
+            position: fixed;
+            top: 0;
+            right: 0;
+            width: 380px;
+            max-width: 90vw;
+            height: 100vh;
+            background: #fff;
+            z-index: 2001;
+            box-shadow: -8px 0 40px rgba(0, 0, 0, 0.15);
+            transform: translateX(100%);
+            transition: transform 0.4s cubic-bezier(0.22, 1, 0.36, 1);
+            display: flex;
+            flex-direction: column;
+            padding: 24px 20px;
+        }
+
+        .cart-sidebar.open {
+            transform: translateX(0);
+        }
+
+        .cart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            padding-bottom: 12px;
+            border-bottom: 2px solid #f0f0f0;
+        }
+
+        .cart-header h3 {
+            font-size: 1.3rem;
+        }
+
+        .cart-close {
+            background: none;
+            border: none;
+            font-size: 1.5rem;
+            cursor: pointer;
+            color: #1A1A2E;
+            transition: color 0.3s;
+        }
+
+        .cart-close:hover {
+            color: #FF6B35;
+        }
+
+        .cart-items {
+            flex: 1;
+            overflow-y: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .cart-item {
             display: flex;
             align-items: center;
             gap: 12px;
-            padding: 12px 0;
-            border-bottom: 1px solid rgba(0,0,0,0.05);
-            font-size: 15px;
-        }
-        .apply-info .features-list li i { color: var(--secondary); font-size: 18px; }
-        .loan-form {
-            background: var(--white);
-            border-radius: var(--radius);
-            padding: 40px;
-            box-shadow: var(--shadow);
-        }
-        .loan-form h3 { font-size: 22px; font-weight: 700; margin-bottom: 8px; }
-        .loan-form .form-sub { font-size: 14px; color: var(--gray); margin-bottom: 28px; }
-        .form-group { margin-bottom: 20px; }
-        .form-group label { display: block; font-size: 14px; font-weight: 600; margin-bottom: 6px; color: var(--dark); }
-        .form-group label .required { color: #ef4444; }
-        .form-group input, .form-group select, .form-group textarea {
-            width: 100%;
-            padding: 14px 16px;
-            border: 2px solid #e5e7eb;
-            border-radius: var(--radius-sm);
-            font-size: 15px;
-            font-family: inherit;
-            transition: var(--transition);
-            background: var(--white);
-        }
-        .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
-            outline: none;
-            border-color: var(--primary);
-            box-shadow: 0 0 0 4px rgba(26,115,232,0.1);
-        }
-        .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-        .slider-container { margin: 10px 0; }
-        .slider-container .amount-values { display: flex; justify-content: space-between; font-size: 13px; color: var(--gray); }
-        .slider-container input[type="range"] {
-            width: 100%;
-            height: 6px;
-            -webkit-appearance: none;
-            background: linear-gradient(to right, var(--primary) 0%, var(--primary) 50%, #e5e7eb 50%, #e5e7eb 100%);
-            border-radius: 10px;
-            outline: none;
-        }
-        .slider-container input[type="range"]::-webkit-slider-thumb {
-            -webkit-appearance: none;
-            width: 24px; height: 24px;
-            background: var(--white);
-            border: 3px solid var(--primary);
-            border-radius: 50%;
-            cursor: pointer;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-        }
-        .selected-amount { text-align: center; font-size: 32px; font-weight: 800; color: var(--primary); margin: 10px 0; }
-        .upload-area {
-            border: 2px dashed #d1d5db;
-            border-radius: var(--radius-sm);
-            padding: 30px;
-            text-align: center;
-            cursor: pointer;
-            transition: var(--transition);
-            background: var(--light-gray);
-        }
-        .upload-area:hover { border-color: var(--primary); background: var(--primary-light); }
-        .upload-area i { font-size: 40px; color: var(--primary); margin-bottom: 12px; }
-        .upload-area p { font-size: 14px; color: var(--gray); }
-        .upload-area .small { font-size: 12px; color: #9ca3af; margin-top: 4px; }
-        .upload-list { margin-top: 12px; }
-        .upload-item {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            padding: 10px 14px;
-            background: var(--primary-light);
-            border-radius: 8px;
-            margin-bottom: 8px;
-            font-size: 14px;
-        }
-        .upload-item i { color: var(--secondary); }
-        .upload-item .remove { color: #ef4444; cursor: pointer; font-size: 16px; }
-        .fee-box {
-            background: linear-gradient(135deg, #fff3e0, #ffe0b2);
-            border-radius: var(--radius-sm);
-            padding: 20px;
-            text-align: center;
-            margin: 20px 0;
-            border: 2px solid #ffcc80;
-        }
-        .fee-box .fee-label { font-size: 14px; font-weight: 600; color: #e65100; }
-        .fee-box .fee-amount { font-size: 28px; font-weight: 800; color: #bf360c; }
-        .fee-box .fee-sub { font-size: 13px; color: #8d6e63; }
-        .btn-submit {
-            width: 100%;
-            padding: 16px;
-            background: linear-gradient(135deg, var(--primary), var(--primary-dark));
-            color: var(--white);
-            border: none;
-            border-radius: var(--radius-sm);
-            font-size: 17px;
-            font-weight: 700;
-            cursor: pointer;
-            transition: var(--transition);
-        }
-        .btn-submit:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(26,115,232,0.3); }
-        .features-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 24px; max-width: 1200px; margin: 0 auto; }
-        .feature-card {
-            background: var(--white);
-            border-radius: var(--radius);
-            padding: 32px 24px;
-            text-align: center;
-            box-shadow: var(--shadow);
-            border: 1px solid rgba(0,0,0,0.03);
-            transition: var(--transition);
-        }
-        .feature-card:hover { transform: translateY(-5px); box-shadow: var(--shadow-hover); }
-        .feature-card .icon {
-            width: 64px; height: 64px;
-            background: var(--primary-light);
-            border-radius: 16px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 28px;
-            color: var(--primary);
-            margin: 0 auto 16px;
-        }
-        .feature-card h4 { font-size: 18px; font-weight: 700; margin-bottom: 8px; }
-        .feature-card p { font-size: 14px; color: var(--gray); }
-        .testimonials-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; max-width: 1200px; margin: 0 auto; }
-        .testimonial-card {
-            background: var(--white);
-            border-radius: var(--radius);
-            padding: 32px;
-            box-shadow: var(--shadow);
-            border: 1px solid rgba(0,0,0,0.03);
-        }
-        .testimonial-card .stars { color: #f59e0b; font-size: 16px; margin-bottom: 12px; }
-        .testimonial-card blockquote { font-size: 15px; color: var(--gray); font-style: italic; margin-bottom: 20px; }
-        .testimonial-card .author { display: flex; align-items: center; gap: 12px; }
-        .testimonial-card .author .avatar {
-            width: 44px; height: 44px;
-            background: var(--primary-light);
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-weight: 700;
-            color: var(--primary);
-        }
-        .testimonial-card .author .name { font-weight: 600; font-size: 15px; }
-        .testimonial-card .author .role { font-size: 13px; color: var(--gray); }
-        #faq { background: var(--light-gray); }
-        .faq-grid { max-width: 800px; margin: 0 auto; }
-        .faq-item {
-            background: var(--white);
-            border-radius: var(--radius-sm);
-            margin-bottom: 12px;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-            overflow: hidden;
-        }
-        .faq-question {
-            padding: 20px 24px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            cursor: pointer;
-            font-weight: 600;
-            font-size: 16px;
-            transition: var(--transition);
-        }
-        .faq-question:hover { background: var(--light-gray); }
-        .faq-question i { transition: var(--transition); color: var(--gray); }
-        .faq-answer { padding: 0 24px 20px; font-size: 15px; color: var(--gray); display: none; }
-        .faq-item.active .faq-question i { transform: rotate(180deg); }
-        .faq-item.active .faq-answer { display: block; }
-        .footer {
-            background: var(--dark);
-            color: rgba(255,255,255,0.8);
-            padding: 60px 40px 30px;
-        }
-        .footer-grid {
-            max-width: 1200px;
-            margin: 0 auto;
-            display: grid;
-            grid-template-columns: 2fr 1fr 1fr 1fr;
-            gap: 40px;
-            margin-bottom: 40px;
-        }
-        .footer-brand p { margin-top: 16px; font-size: 14px; }
-        .footer h4 { color: var(--white); font-size: 16px; font-weight: 700; margin-bottom: 16px; }
-        .footer ul { list-style: none; }
-        .footer ul li { margin-bottom: 10px; font-size: 14px; }
-        .footer ul li a:hover { color: var(--white); }
-        .footer-bottom { border-top: 1px solid rgba(255,255,255,0.1); padding-top: 24px; text-align: center; font-size: 14px; }
-        .admin-login-overlay {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.85);
-            z-index: 9999;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            backdrop-filter: blur(10px);
-        }
-        .admin-login-box {
-            background: var(--white);
-            border-radius: var(--radius);
-            padding: 50px 40px 40px;
-            width: 420px;
-            max-width: 90%;
-            box-shadow: 0 40px 100px rgba(0,0,0,0.5);
-            text-align: center;
-            position: relative;
-        }
-        .admin-login-box .lock-icon {
-            width: 80px; height: 80px;
-            background: var(--primary-light);
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 36px;
-            color: var(--primary);
-            margin: 0 auto 20px;
-        }
-        .admin-login-box h2 { font-size: 24px; font-weight: 800; margin-bottom: 6px; }
-        .admin-login-box p { font-size: 14px; color: var(--gray); margin-bottom: 28px; }
-        .admin-login-box .form-group { text-align: left; }
-        .admin-login-box .form-group input {
-            padding: 14px 16px 14px 44px;
-        }
-        .admin-login-box .input-icon-wrap { position: relative; }
-        .admin-login-box .input-icon-wrap i {
-            position: absolute;
-            left: 16px;
-            top: 50%;
-            transform: translateY(-50%);
-            color: var(--gray);
-            font-size: 18px;
-        }
-        .admin-login-box .login-btn {
-            width: 100%;
-            padding: 14px;
-            background: var(--primary);
-            color: var(--white);
-            border: none;
-            border-radius: var(--radius-sm);
-            font-size: 16px;
-            font-weight: 700;
-            cursor: pointer;
-            transition: var(--transition);
-            margin-top: 8px;
-        }
-        .admin-login-box .login-btn:hover { background: var(--primary-dark); }
-        .admin-login-box .error-msg {
-            color: var(--danger);
-            font-size: 13px;
-            margin-top: 12px;
-            display: none;
-        }
-        .admin-login-box .close-login {
-            position: absolute;
-            top: 16px; right: 20px;
-            font-size: 24px;
-            color: var(--gray);
-            cursor: pointer;
-            transition: var(--transition);
-        }
-        .admin-login-box .close-login:hover { color: var(--dark); }
-        .admin-panel-overlay {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.7);
-            z-index: 9998;
-            display: none;
-            backdrop-filter: blur(5px);
-            overflow-y: auto;
-            padding: 40px 20px;
-        }
-        .admin-panel-overlay.active { display: flex; align-items: flex-start; justify-content: center; }
-        .admin-panel {
-            background: var(--white);
-            border-radius: var(--radius);
-            max-width: 1200px;
-            width: 100%;
-            box-shadow: 0 40px 100px rgba(0,0,0,0.4);
-            overflow: hidden;
-            animation: slideUp 0.4s ease;
-        }
-        @keyframes slideUp {
-            from { opacity: 0; transform: translateY(50px); }
-            to { opacity: 1; transform: translateY(0); }
-        }
-        .admin-header {
-            background: linear-gradient(135deg, var(--dark), #16213e);
-            padding: 30px 40px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            color: var(--white);
-        }
-        .admin-header h2 { font-size: 26px; font-weight: 800; }
-        .admin-header h2 i { margin-right: 10px; }
-        .admin-header .admin-actions { display: flex; gap: 12px; align-items: center; }
-        .admin-header .admin-actions .admin-badge {
-            background: rgba(255,255,255,0.15);
-            padding: 8px 16px;
-            border-radius: 50px;
-            font-size: 13px;
-            font-weight: 600;
-        }
-        .admin-header .admin-actions button {
-            padding: 8px 18px;
-            background: rgba(255,255,255,0.15);
-            color: var(--white);
-            border: 1px solid rgba(255,255,255,0.2);
-            border-radius: 50px;
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: 600;
-            transition: var(--transition);
-        }
-        .admin-header .admin-actions button:hover { background: var(--danger); border-color: var(--danger); }
-        .admin-stats-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 20px;
-            padding: 30px 40px;
-            background: var(--light-gray);
-        }
-        .admin-stat-card {
-            background: var(--white);
-            border-radius: var(--radius-sm);
-            padding: 24px;
-            box-shadow: 0 2px 12px rgba(0,0,0,0.04);
-            text-align: center;
-        }
-        .admin-stat-card .stat-icon {
-            font-size: 32px;
-            margin-bottom: 12px;
-        }
-        .admin-stat-card .stat-number {
-            font-size: 32px;
-            font-weight: 800;
-            color: var(--dark);
-        }
-        .admin-stat-card .stat-label {
-            font-size: 13px;
-            color: var(--gray);
-            font-weight: 500;
-            margin-top: 4px;
-        }
-        .admin-stat-card:nth-child(1) .stat-icon { color: var(--primary); }
-        .admin-stat-card:nth-child(2) .stat-icon { color: #f59e0b; }
-        .admin-stat-card:nth-child(3) .stat-icon { color: var(--secondary); }
-        .admin-stat-card:nth-child(4) .stat-icon { color: var(--accent); }
-        .admin-table-wrap { padding: 30px 40px 40px; }
-        .admin-table-wrap h3 { font-size: 18px; font-weight: 700; margin-bottom: 16px; }
-        .admin-table-wrap h3 i { margin-right: 8px; color: var(--primary); }
-        .admin-table {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 14px;
-        }
-        .admin-table th {
-            text-align: left;
-            padding: 12px 16px;
-            background: var(--light-gray);
-            font-weight: 600;
-            color: var(--gray);
-            font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .admin-table td {
-            padding: 14px 16px;
+            padding: 10px 0;
             border-bottom: 1px solid #f0f0f0;
         }
-        .admin-table .status-badge {
-            padding: 4px 14px;
-            border-radius: 50px;
-            font-size: 12px;
+
+        .cart-item .item-icon {
+            font-size: 1.8rem;
+            width: 44px;
+            text-align: center;
+        }
+
+        .cart-item .item-info {
+            flex: 1;
+        }
+
+        .cart-item .item-info h4 {
+            font-size: 0.95rem;
+            margin-bottom: 2px;
+        }
+
+        .cart-item .item-info .item-price {
+            font-size: 0.85rem;
+            color: #FF6B35;
             font-weight: 600;
         }
-        .admin-table .status-badge.pending { background: #fef3c7; color: #92400e; }
-        .admin-table .status-badge.paid { background: #d1fae5; color: #065f46; }
-        .admin-table .status-badge.approved { background: #dbeafe; color: #1e40af; }
-        .admin-table .status-badge.rejected { background: #fee2e2; color: #991b1b; }
-        .payment-modal-overlay {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.8);
-            z-index: 10000;
-            display: none;
-            align-items: center;
-            justify-content: center;
-            backdrop-filter: blur(8px);
-        }
-        .payment-modal-overlay.active { display: flex; }
-        .payment-modal {
-            background: var(--white);
-            border-radius: var(--radius);
-            max-width: 500px;
-            width: 90%;
-            padding: 40px;
-            box-shadow: 0 40px 100px rgba(0,0,0,0.5);
-            text-align: center;
-            animation: slideUp 0.4s ease;
-        }
-        .payment-modal .payment-icon {
-            font-size: 56px;
-            color: var(--accent);
-            margin-bottom: 16px;
-        }
-        .payment-modal h2 { font-size: 24px; font-weight: 800; margin-bottom: 8px; }
-        .payment-modal p { font-size: 14px; color: var(--gray); margin-bottom: 20px; }
-        .payment-modal .pay-amount {
-            font-size: 42px;
-            font-weight: 900;
-            color: var(--primary);
-            margin: 10px 0;
-        }
-        .payment-modal .timer-container {
-            background: #fef3c7;
-            border-radius: var(--radius-sm);
-            padding: 16px;
-            margin: 20px 0;
-            border: 2px solid #fbbf24;
-        }
-        .payment-modal .timer-container .timer-label { font-size: 13px; font-weight: 600; color: #92400e; }
-        .payment-modal .timer-container .timer-display {
-            font-size: 40px;
-            font-weight: 900;
-            color: #dc2626;
-            font-family: 'Courier New', monospace;
-            letter-spacing: 3px;
-        }
-        .payment-modal .timer-container .timer-sub { font-size: 12px; color: #92400e; }
-        .payment-modal .pay-btn {
-            width: 100%;
-            padding: 16px;
-            background: linear-gradient(135deg, var(--secondary), #059669);
-            color: var(--white);
-            border: none;
-            border-radius: var(--radius-sm);
-            font-size: 18px;
-            font-weight: 700;
-            cursor: pointer;
-            transition: var(--transition);
+
+        .cart-item .item-qty {
             display: flex;
             align-items: center;
-            justify-content: center;
-            gap: 10px;
+            gap: 8px;
         }
-        .payment-modal .pay-btn:hover { transform: translateY(-2px); box-shadow: 0 8px 30px rgba(0,200,83,0.3); }
-        .payment-modal .pay-btn:disabled {
-            background: #9ca3af;
-            cursor: not-allowed;
-            transform: none;
-            box-shadow: none;
-        }
-        .payment-modal .skip-btn {
-            margin-top: 12px;
-            padding: 10px 24px;
-            background: transparent;
-            color: var(--gray);
-            border: 1px solid #e5e7eb;
-            border-radius: var(--radius-sm);
-            font-size: 14px;
-            cursor: pointer;
-            transition: var(--transition);
-        }
-        .payment-modal .skip-btn:hover { border-color: var(--gray); }
-        .payment-modal .close-payment {
-            position: absolute;
-            top: 16px; right: 20px;
-            font-size: 24px;
-            color: var(--gray);
-            cursor: pointer;
-        }
-        .success-modal-overlay {
-            position: fixed;
-            top: 0; left: 0; right: 0; bottom: 0;
-            background: rgba(0,0,0,0.7);
-            z-index: 10001;
-            display: none;
-            align-items: center;
-            justify-content: center;
-        }
-        .success-modal-overlay.active { display: flex; }
-        .success-modal {
-            background: var(--white);
-            border-radius: var(--radius);
-            max-width: 420px;
-            width: 90%;
-            padding: 50px 40px;
-            text-align: center;
-            box-shadow: 0 40px 100px rgba(0,0,0,0.4);
-            animation: slideUp 0.4s ease;
-        }
-        .success-modal .success-icon {
-            font-size: 72px;
-            color: var(--secondary);
-            margin-bottom: 20px;
-        }
-        .success-modal h2 { font-size: 26px; font-weight: 800; margin-bottom: 10px; }
-        .success-modal p { font-size: 15px; color: var(--gray); margin-bottom: 24px; line-height: 1.7; }
-        .success-modal .success-btn {
-            padding: 14px 40px;
-            background: var(--primary);
-            color: var(--white);
+
+        .cart-item .item-qty button {
+            background: #f0f0f0;
             border: none;
-            border-radius: 50px;
-            font-size: 16px;
-            font-weight: 600;
+            width: 28px;
+            height: 28px;
+            border-radius: 50%;
+            font-weight: 700;
             cursor: pointer;
-            transition: var(--transition);
+            transition: all 0.2s;
         }
-        .success-modal .success-btn:hover { background: var(--primary-dark); }
-        @media (max-width: 1024px) {
-            .hero-content { grid-template-columns: 1fr; text-align: center; }
-            .hero-text p { margin: 0 auto 32px; }
-            .hero-badges { justify-content: center; }
-            .hero-buttons { justify-content: center; }
-            .steps-grid { grid-template-columns: 1fr 1fr; }
-            .features-grid { grid-template-columns: 1fr 1fr; }
-            .apply-wrap { grid-template-columns: 1fr; }
-            .testimonials-grid { grid-template-columns: 1fr 1fr; }
-            .footer-grid { grid-template-columns: 1fr 1fr; }
-            .admin-stats-grid { grid-template-columns: 1fr 1fr; }
+
+        .cart-item .item-qty button:hover {
+            background: #FF6B35;
+            color: #fff;
         }
+
+        .cart-item .item-qty span {
+            font-weight: 600;
+            min-width: 20px;
+            text-align: center;
+        }
+
+        .cart-item .item-remove {
+            background: none;
+            border: none;
+            color: #e74c3c;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: transform 0.2s;
+        }
+
+        .cart-item .item-remove:hover {
+            transform: scale(1.2);
+        }
+
+        .cart-empty {
+            text-align: center;
+            color: #aaa;
+            padding: 40px 0;
+            font-size: 0.95rem;
+        }
+
+        .cart-footer {
+            padding-top: 16px;
+            border-top: 2px solid #f0f0f0;
+        }
+
+        .cart-total {
+            display: flex;
+            justify-content: space-between;
+            font-size: 1.1rem;
+            font-weight: 700;
+            margin-bottom: 16px;
+        }
+
+        .cart-footer .btn {
+            width: 100%;
+        }
+
+        /* ========== RESPONSIVE NAV ========== */
         @media (max-width: 768px) {
-            .navbar { padding: 14px 20px; }
-            .nav-links { 
-                display: none;
-                position: absolute;
-                top: 100%; left: 0; right: 0;
-                background: var(--white);
-                flex-direction: column;
-                padding: 20px;
-                gap: 16px;
-                box-shadow: 0 20px 40px rgba(0,0,0,0.1);
+            .hamburger {
+                display: flex;
             }
-            .nav-links.open { display: flex; }
-            .hamburger { display: flex; }
-            .hero { padding: 100px 20px 60px; }
-            .hero-text h1 { font-size: 32px; }
-            .steps-grid { grid-template-columns: 1fr; }
-            .features-grid { grid-template-columns: 1fr; }
-            .testimonials-grid { grid-template-columns: 1fr; }
-            .form-row { grid-template-columns: 1fr; }
-            .footer-grid { grid-template-columns: 1fr; }
-            .section { padding: 60px 20px; }
-            .section-header h2 { font-size: 28px; }
-            .loan-form { padding: 24px; }
-            .trusted-logos { gap: 24px; }
-            .admin-stats-grid { grid-template-columns: 1fr 1fr; }
-            .admin-header { flex-direction: column; gap: 12px; text-align: center; }
-            .admin-table-wrap { padding: 20px; overflow-x: auto; }
-            .admin-stats-grid { padding: 20px; }
+
+            .nav-links {
+                position: fixed;
+                top: 70px;
+                left: 0;
+                width: 100%;
+                background: rgba(255, 255, 255, 0.95);
+                backdrop-filter: blur(16px);
+                flex-direction: column;
+                align-items: center;
+                padding: 20px 0;
+                gap: 18px;
+                transform: translateY(-120%);
+                transition: transform 0.4s ease;
+                box-shadow: 0 8px 30px rgba(0, 0, 0, 0.08);
+                border-bottom: 1px solid rgba(0, 0, 0, 0.05);
+            }
+
+            .nav-links.open {
+                transform: translateY(0);
+            }
+
+            .hero-content h1 {
+                font-size: 2.2rem;
+            }
+
+            .hero-content p {
+                font-size: 1rem;
+            }
+
+            .section-title {
+                font-size: 1.7rem;
+            }
+        }
+
+        @media (max-width: 480px) {
+            .navbar {
+                padding: 10px 16px;
+            }
+            .navbar .logo {
+                font-size: 1.2rem;
+            }
+            .hero-content h1 {
+                font-size: 1.8rem;
+            }
+            .product-card {
+                padding: 20px 14px;
+            }
         }
     </style>
 </head>
+
 <body>
 
-    <nav class="navbar" id="navbar">
-        <a href="#" class="logo">
-            <i class="fas fa-bolt"></i> Swift<span>Cash</span>
-        </a>
+    <!-- =============================== -->
+    <!-- NAVBAR                          -->
+    <!-- =============================== -->
+    <header class="navbar" id="navbar">
+        <div class="logo">
+            🐾 GenZ<span>Pets</span>
+        </div>
+
         <ul class="nav-links" id="navLinks">
-            <li><a href="#how">How It Works</a></li>
-            <li><a href="#features">Features</a></li>
-            <li><a href="#apply">Apply Now</a></li>
-            <li><a href="#faq">FAQ</a></li>
-            <li><a href="#apply" class="nav-btn"><i class="fas fa-rupee-sign"></i> Get Loan</a></li>
+            <li><a href="#hero" onclick="closeNav()">Home</a></li>
+            <li><a href="#products" onclick="closeNav()">Shop</a></li>
+            <li><a href="#features" onclick="closeNav()">About</a></li>
+            <li><a href="#newsletter" onclick="closeNav()">Contact</a></li>
         </ul>
-        <div class="hamburger" id="hamburger" onclick="toggleMenu()">
-            <span></span><span></span><span></span>
-        </div>
-    </nav>
 
-    <section class="hero">
-        <div class="hero-content">
-            <div class="hero-text">
-                <h1>Instant Cash Loan — <span class="highlight">Approved in Minutes</span></h1>
-                <p>No paperwork, no hidden charges. Upload your Aadhaar & PAN card and get loan approval within minutes. Amounts from ₹5,000 to ₹5,00,000.</p>
-                <div class="hero-badges">
-                    <span class="hero-badge"><i class="fas fa-shield-alt"></i> RBI Registered</span>
-                    <span class="hero-badge"><i class="fas fa-clock"></i> 2-Min Approval</span>
-                    <span class="hero-badge"><i class="fas fa-percent"></i> 0% Hidden Fees</span>
-                </div>
-                <div class="hero-buttons">
-                    <a href="#apply" class="btn-primary"><i class="fas fa-rupee-sign"></i> Apply Now</a>
-                    <a href="#how" class="btn-secondary"><i class="fas fa-play-circle"></i> How It Works</a>
-                </div>
+        <div class="nav-actions">
+            <button aria-label="Search" title="Search">
+                <i class="fas fa-search"></i>
+            </button>
+            <button aria-label="Cart" title="Cart" id="cartToggle">
+                <i class="fas fa-shopping-bag"></i>
+                <span class="cart-badge" id="cartBadge">0</span>
+            </button>
+            <button class="hamburger" id="hamburger" aria-label="Menu">
+                <span></span>
+                <span></span>
+                <span></span>
+            </button>
+        </div>
+    </header>
+
+    <!-- =============================== -->
+    <!-- HERO SECTION                   -->
+    <!-- =============================== -->
+    <section class="hero" id="hero">
+        <!-- Background image -->
+        <img class="hero-bg" src="https://files.catbox.moe/s0otyu.jpg" alt="Happy pets" />
+
+        <!-- Dark overlay -->
+        <div class="hero-overlay"></div>
+
+        <!-- Three.js 3D paw canvas -->
+        <div id="three-paw"></div>
+
+        <!-- Content -->
+        <div class="hero-content fade-up">
+            <h1>Pamper Your Pet, GenZ Style</h1>
+            <p>Trendy accessories your furry friend deserves</p>
+            <div class="hero-buttons">
+                <a href="#products" class="btn btn-primary">Shop Now</a>
+                <a href="#features" class="btn btn-outline">Explore</a>
             </div>
-            <div class="hero-visual">
-                <div class="card-mockup">
-                    <div class="amount-display">
-                        <div class="label">Your Loan Amount</div>
-                        <div class="number">₹50,000</div>
-                        <div class="sub"><i class="fas fa-check-circle"></i> Pre-Approved</div>
-                    </div>
-                    <div class="quick-stats">
-                        <div class="stat">
-                            <div class="num">2.5%</div>
-                            <div class="lbl">Monthly Interest</div>
-                        </div>
-                        <div class="stat">
-                            <div class="num">6 Months</div>
-                            <div class="lbl">Tenure</div>
-                        </div>
-                        <div class="stat">
-                            <div class="num">₹8,958</div>
-                            <div class="lbl">Monthly EMI</div>
-                        </div>
-                        <div class="stat">
-                            <div class="num">4.8</div>
-                            <div class="lbl">Rating</div>
-                        </div>
-                    </div>
+        </div>
+    </section>
+
+    <!-- =============================== -->
+    <!-- FEATURED PRODUCTS              -->
+    <!-- =============================== -->
+    <section class="products-section" id="products">
+        <div class="container">
+            <h2 class="section-title fade-up">🐾 Our Top Picks</h2>
+
+            <div class="product-grid" id="productGrid">
+                <!-- Products injected via JS -->
+            </div>
+        </div>
+    </section>
+
+    <!-- =============================== -->
+    <!-- FEATURES STRIP                 -->
+    <!-- =============================== -->
+    <section class="features-section" id="features">
+        <div class="container">
+            <div class="features-grid">
+                <div class="feature-item fade-up stagger-1">
+                    <div class="icon">🚚</div>
+                    <h4>Free Delivery</h4>
+                    <p>Free shipping on orders above ₹500</p>
                 </div>
-                <div class="floating-badge">
-                    <i class="fas fa-bolt"></i> 100% Online
+                <div class="feature-item fade-up stagger-2">
+                    <div class="icon">✅</div>
+                    <h4>Premium Quality</h4>
+                    <p>100% pet-safe materials</p>
+                </div>
+                <div class="feature-item fade-up stagger-3">
+                    <div class="icon">🔄</div>
+                    <h4>Easy Returns</h4>
+                    <p>7-day hassle-free returns</p>
                 </div>
             </div>
         </div>
     </section>
 
-    <section class="trusted">
-        <p>Trusted by 50,000+ customers across India</p>
-        <div class="trusted-logos">
-            <span><i class="fas fa-building"></i> HDFC Partner</span>
-            <span><i class="fas fa-university"></i> ICICI Associate</span>
-            <span><i class="fas fa-credit-card"></i> SBI Network</span>
-            <span><i class="fas fa-bank"></i> Paytm</span>
-            <span><i class="fas fa-mobile-alt"></i> PhonePe</span>
+    <!-- =============================== -->
+    <!-- NEWSLETTER                     -->
+    <!-- =============================== -->
+    <section class="newsletter-section" id="newsletter">
+        <div class="container">
+            <h2 class="section-title fade-up">Stay in the Loop 🐾</h2>
+            <p class="fade-up stagger-1">Be the first to know about new drops & exclusive deals.</p>
+            <form class="newsletter-form fade-up stagger-2" onsubmit="event.preventDefault(); alert('Thanks for subscribing!');">
+                <input type="email" placeholder="Enter your email" required />
+                <button class="btn btn-primary" type="submit">Subscribe</button>
+            </form>
+            <p class="newsletter-small fade-up stagger-3">Get 10% off on your first order 🎉</p>
         </div>
     </section>
 
-    <section class="section" id="how">
-        <div class="section-header">
-            <span class="badge">Simple 3-Step Process</span>
-            <h2>Loan in 3 Easy Steps</h2>
-            <p>No bank visits, no endless paperwork. Get money in your account within hours.</p>
-        </div>
-        <div class="steps-grid">
-            <div class="step-card">
-                <div class="step-number">1</div>
-                <i class="fas fa-id-card icon-big"></i>
-                <h3>Upload Documents</h3>
-                <p>Upload your Aadhaar Card, PAN Card, and a selfie for instant KYC verification.</p>
-            </div>
-            <div class="step-card">
-                <div class="step-number">2</div>
-                <i class="fas fa-file-invoice icon-big"></i>
-                <h3>Pay Approval Fee</h3>
-                <p>A small one-time approval fee to process your application. Fully transparent.</p>
-            </div>
-            <div class="step-card">
-                <div class="step-number">3</div>
-                <i class="fas fa-hand-holding-usd icon-big"></i>
-                <h3>Get Your Money</h3>
-                <p>Once approved, the loan amount is credited to your bank account within 30 minutes.</p>
-            </div>
-        </div>
-    </section>
-
-    <section class="section" id="features" style="background: var(--light-gray);">
-        <div class="section-header">
-            <span class="badge">Why Choose Us</span>
-            <h2>Why SwiftCash?</h2>
-            <p>We make lending simple, fast, and transparent for everyone.</p>
-        </div>
-        <div class="features-grid">
-            <div class="feature-card">
-                <div class="icon"><i class="fas fa-bolt"></i></div>
-                <h4>Instant Approval</h4>
-                <p>AI-powered system checks your documents and approves in under 2 minutes.</p>
-            </div>
-            <div class="feature-card">
-                <div class="icon"><i class="fas fa-rupee-sign"></i></div>
-                <h4>Up to ₹5 Lakh</h4>
-                <p>Loan amounts from ₹5,000 to ₹5,00,000 based on your eligibility and need.</p>
-            </div>
-            <div class="feature-card">
-                <div class="icon"><i class="fas fa-lock"></i></div>
-                <h4>100% Secure</h4>
-                <p>256-bit encryption protects your Aadhaar, PAN, and personal data.</p>
-            </div>
-            <div class="feature-card">
-                <div class="icon"><i class="fas fa-smile"></i></div>
-                <h4>No Hidden Charges</h4>
-                <p>Only a transparent approval fee. No processing fee, no hidden costs.</p>
-            </div>
-            <div class="feature-card">
-                <div class="icon"><i class="fas fa-mobile-alt"></i></div>
-                <h4>Full Mobile Support</h4>
-                <p>Apply from anywhere using your phone. Works on all devices.</p>
-            </div>
-            <div class="feature-card">
-                <div class="icon"><i class="fas fa-headset"></i></div>
-                <h4>24/7 Support</h4>
-                <p>Dedicated support team available round the clock via chat and phone.</p>
-            </div>
-            <div class="feature-card">
-                <div class="icon"><i class="fas fa-history"></i></div>
-                <h4>Flexible Tenure</h4>
-                <p>Choose repayment tenure from 3 to 24 months as per your comfort.</p>
-            </div>
-            <div class="feature-card">
-                <div class="icon"><i class="fas fa-handshake"></i></div>
-                <h4>No Collateral</h4>
-                <p>Completely unsecured personal loan. No guarantor or security needed.</p>
-            </div>
-        </div>
-    </section>
-
-    <section class="section" id="apply">
-        <div class="apply-wrap">
-            <div class="apply-info">
-                <h2>Ready to Apply?</h2>
-                <p>Fill the form and upload your documents. Get loan approval in just 2 minutes!</p>
-                <ul class="features-list">
-                    <li><i class="fas fa-check-circle"></i> Aadhaar Card (any format)</li>
-                    <li><i class="fas fa-check-circle"></i> PAN Card (mandatory)</li>
-                    <li><i class="fas fa-check-circle"></i> Selfie / Photo for verification</li>
-                    <li><i class="fas fa-check-circle"></i> Bank Account for transfer</li>
-                    <li><i class="fas fa-check-circle"></i> Only <strong>one-time approval fee</strong> no monthly charges</li>
-                </ul>
-                <div style="margin-top: 24px; padding: 16px; background: var(--primary-light); border-radius: var(--radius-sm); border-left: 4px solid var(--primary);">
-                    <strong style="color: var(--primary);"><i class="fas fa-info-circle"></i> Note:</strong>
-                    <span style="font-size: 14px; color: var(--gray);"> We only charge an approval fee to process your loan. No other fees. Loan amount is credited after fee payment and approval.</span>
-                </div>
-            </div>
-            <div class="loan-form">
-                <h3><i class="fas fa-file-alt"></i> Loan Application</h3>
-                <p class="form-sub">All fields marked with <span style="color:#ef4444;">*</span> are required</p>
-                <form id="loanForm" onsubmit="return handleSubmit(event)">
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Full Name <span class="required">*</span></label>
-                            <input type="text" id="fullName" placeholder="As per Aadhaar" required>
-                        </div>
-                        <div class="form-group">
-                            <label>Mobile Number <span class="required">*</span></label>
-                            <input type="tel" id="mobileNum" placeholder="+91 98765 43210" pattern="[0-9]{10}" required>
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Email Address</label>
-                            <input type="email" id="emailAddr" placeholder="your@email.com">
-                        </div>
-                        <div class="form-group">
-                            <label>Date of Birth <span class="required">*</span></label>
-                            <input type="date" id="dobField" required>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Loan Amount <span class="required">*</span></label>
-                        <div class="slider-container">
-                            <div class="amount-values">
-                                <span>₹5,000</span>
-                                <span>₹2,50,000</span>
-                                <span>₹5,00,000</span>
-                            </div>
-                            <input type="range" id="loanSlider" min="5000" max="500000" step="5000" value="50000" oninput="updateLoanAmount(this.value)">
-                            <div class="selected-amount" id="displayAmount">₹50,000</div>
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Repayment Tenure</label>
-                            <select id="tenureSelect">
-                                <option>3 Months</option>
-                                <option>6 Months</option>
-                                <option selected>12 Months</option>
-                                <option>18 Months</option>
-                                <option>24 Months</option>
-                            </select>
-                        </div>
-                        <div class="form-group">
-                            <label>Purpose of Loan</label>
-                            <select id="purposeSelect">
-                                <option>Personal / Family</option>
-                                <option>Medical Emergency</option>
-                                <option>Business</option>
-                                <option>Education</option>
-                                <option>Debt Consolidation</option>
-                                <option>Other</option>
-                            </select>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Aadhaar Card <span class="required">*</span></label>
-                        <div class="upload-area" onclick="document.getElementById('aadhaarInput').click()">
-                            <i class="fas fa-cloud-upload-alt"></i>
-                            <p><strong>Click to Upload Aadhaar</strong></p>
-                            <p class="small">PDF, JPG, PNG (Max 5MB)</p>
-                            <input type="file" id="aadhaarInput" accept=".pdf,.jpg,.jpeg,.png" style="display:none" onchange="showUploaded(this, 'aadhaarList')" required>
-                            <div class="upload-list" id="aadhaarList"></div>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>PAN Card <span class="required">*</span></label>
-                        <div class="upload-area" onclick="document.getElementById('panInput').click()">
-                            <i class="fas fa-cloud-upload-alt"></i>
-                            <p><strong>Click to Upload PAN Card</strong></p>
-                            <p class="small">PDF, JPG, PNG (Max 5MB)</p>
-                            <input type="file" id="panInput" accept=".pdf,.jpg,.jpeg,.png" style="display:none" onchange="showUploaded(this, 'panList')" required>
-                            <div class="upload-list" id="panList"></div>
-                        </div>
-                    </div>
-                    <div class="form-group">
-                        <label>Selfie / Photo <span class="required">*</span></label>
-                        <div class="upload-area" onclick="document.getElementById('selfieInput').click()">
-                            <i class="fas fa-camera"></i>
-                            <p><strong>Click to Upload Selfie</strong></p>
-                            <p class="small">JPG, PNG only (Max 2MB)</p>
-                            <input type="file" id="selfieInput" accept=".jpg,.jpeg,.png" style="display:none" onchange="showUploaded(this, 'selfieList')" required>
-                            <div class="upload-list" id="selfieList"></div>
-                        </div>
-                    </div>
-                    <div class="form-row">
-                        <div class="form-group">
-                            <label>Account Number <span class="required">*</span></label>
-                            <input type="text" id="accountNum" placeholder="Bank account for loan transfer" required>
-                        </div>
-                        <div class="form-group">
-                            <label>IFSC Code <span class="required">*</span></label>
-                            <input type="text" id="ifscCode" placeholder="e.g. HDFC0001234" required>
-                        </div>
-                    </div>
-                    <div class="fee-box">
-                        <div class="fee-label">ONE-TIME APPROVAL FEE</div>
-                        <div class="fee-amount" id="feeAmount">₹499</div>
-                        <div class="fee-sub">This is the only fee you pay. No hidden charges. Fee is based on your loan amount.</div>
-                    </div>
-                    <div class="form-group" style="display: flex; align-items: flex-start; gap: 10px;">
-                        <input type="checkbox" id="agree" style="width: auto; margin-top: 4px;" required>
-                        <label for="agree" style="font-weight: 400; font-size: 13px; margin-bottom: 0;">I agree to the Terms & Conditions and authorize SwiftCash to verify my documents and process my loan application.</label>
-                    </div>
-                    <button type="submit" class="btn-submit">
-                        <i class="fas fa-paper-plane"></i> Submit Application
-                    </button>
-                    <p style="text-align: center; margin-top: 16px; font-size: 13px; color: var(--gray);">
-                        <i class="fas fa-lock"></i> Your data is encrypted and secure
-                    </p>
-                </form>
-            </div>
-        </div>
-    </section>
-
-    <section class="section">
-        <div class="section-header">
-            <span class="badge">Customer Reviews</span>
-            <h2>What Our Customers Say</h2>
-        </div>
-        <div class="testimonials-grid">
-            <div class="testimonial-card">
-                <div class="stars">
-                    <i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i>
-                </div>
-                <blockquote>"Mujhe emergency mein ₹30,000 ki zaroorat thi. 10 minute mein approval mil gaya aur 1 ghante mein account mein aa gaye. Bahut easy process hai!"</blockquote>
-                <div class="author">
-                    <div class="avatar">RK</div>
-                    <div><div class="name">Rahul Kumar</div><div class="role">Delhi - Personal Loan</div></div>
-                </div>
-            </div>
-            <div class="testimonial-card">
-                <div class="stars">
-                    <i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i>
-                </div>
-                <blockquote>"Pehle mujhe lagta tha loan lena bahut mushkil hai. But SwiftCash ne itna aasan bana diya. Sirf Aadhaar aur PAN chahiye tha. Thank you!"</blockquote>
-                <div class="author">
-                    <div class="avatar">PS</div>
-                    <div><div class="name">Priya Sharma</div><div class="role">Mumbai - Business Loan</div></div>
-                </div>
-            </div>
-            <div class="testimonial-card">
-                <div class="stars">
-                    <i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star"></i><i class="fas fa-star-half-alt"></i>
-                </div>
-                <blockquote>"Approval fees thoda lena hai but overall process transparent hai. Koi hidden charges nahi. Loan bhi jaldi mil gaya. Recommend karta hoon."</blockquote>
-                <div class="author">
-                    <div class="avatar">AV</div>
-                    <div><div class="name">Amit Verma</div><div class="role">Bangalore - Personal Loan</div></div>
-                </div>
-            </div>
-        </div>
-    </section>
-
-    <section class="section" id="faq">
-        <div class="section-header">
-            <span class="badge">FAQ</span>
-            <h2>Frequently Asked Questions</h2>
-        </div>
-        <div class="faq-grid">
-            <div class="faq-item active">
-                <div class="faq-question" onclick="toggleFaq(this)">
-                    Kya loan ke liye CIBIL score hona zaroori hai?
-                    <i class="fas fa-chevron-down"></i>
-                </div>
-                <div class="faq-answer">
-                    Nahi, hum CIBIL score ko strictly check nahi karte. Aapke documents aur repayment capacity ke basis par loan approve kiya jaata hai.
-                </div>
-            </div>
-            <div class="faq-item">
-                <div class="faq-question" onclick="toggleFaq(this)">
-                    Approval fees kya hai aur yeh kyun leni hai?
-                    <i class="fas fa-chevron-down"></i>
-                </div>
-                <div class="faq-answer">
-                    Approval fees ek one-time charge hai jo aapke loan application ko process karne, documents verify karne, aur loan amount disburse karne ke liye li jaati hai. Yeh amount aapke loan amount ke hisaab se decide hoti hai. Yeh hi ekmatra fee hai koi aur hidden charge nahi hai.
-                </div>
-            </div>
-            <div class="faq-item">
-                <div class="faq-question" onclick="toggleFaq(this)">
-                    Kitna loan mil sakta hai aur kitne time mein?
-                    <i class="fas fa-chevron-down"></i>
-                </div>
-                <div class="faq-answer">
-                    Aap ₹5,000 se ₹5,00,000 tak loan le sakte hain. Application submit karne ke baad 2-5 minutes mein approval mil jaata hai, aur approval fees pay karne ke baad 30-60 minutes mein aapke bank account mein credit ho jaata hai.
-                </div>
-            </div>
-            <div class="faq-item">
-                <div class="faq-question" onclick="toggleFaq(this)">
-                    Kaun kaun se documents chahiye hote hain?
-                    <i class="fas fa-chevron-down"></i>
-                </div>
-                <div class="faq-answer">
-                    Sirf 3 cheezein chahiye: (1) Aadhaar Card, (2) PAN Card, (3) Selfie/Photo. Aur koi document nahi chahiye. Na income proof, na salary slip, na bank statement.
-                </div>
-            </div>
-            <div class="faq-item">
-                <div class="faq-question" onclick="toggleFaq(this)">
-                    Kya main pehle apply kar ke baad mein fees pay kar sakta hoon?
-                    <i class="fas fa-chevron-down"></i>
-                </div>
-                <div class="faq-answer">
-                    Haan, pehle aap form fill karke apply karein. Documents verify hone ke baad aapko approval fees pay karne ka link milega. Fees pay karne ke baad hi loan amount aapke account mein bhej diya jaayega.
-                </div>
-            </div>
-            <div class="faq-item">
-                <div class="faq-question" onclick="toggleFaq(this)">
-                    Kya main jald se jald loan repay kar sakta hoon?
-                    <i class="fas fa-chevron-down"></i>
-                </div>
-                <div class="faq-answer">
-                    Haan, aap bina kisi prepayment charges ke apna loan jaldi chuka sakte hain. Isse aapke future loan eligibility bhi improve hoti hai.
-                </div>
-            </div>
-        </div>
-    </section>
-
+    <!-- =============================== -->
+    <!-- FOOTER                         -->
+    <!-- =============================== -->
     <footer class="footer">
         <div class="footer-grid">
-            <div class="footer-brand">
-                <a href="#" class="logo" style="color: var(--white);">
-                    <i class="fas fa-bolt"></i> Swift<span style="color: var(--white);">Cash</span>
-                </a>
-                <p>India's fastest digital lending platform. Get instant loans with minimal documentation. RBI registered and fully compliant.</p>
-                <p style="margin-top: 12px;">
-                    <i class="fas fa-envelope"></i> support@swiftcash.in<br>
-                    <i class="fas fa-phone"></i> +91 1800-123-4567
-                </p>
+            <div class="footer-col">
+                <h4>🐾 GenZ Pets</h4>
+                <p>Trendy pet accessories for the modern pet parent. Your pet, our vibe.</p>
+                <div class="footer-socials">
+                    <a href="#" aria-label="Instagram"><i class="fab fa-instagram"></i></a>
+                    <a href="#" aria-label="YouTube"><i class="fab fa-youtube"></i></a>
+                    <a href="#" aria-label="Twitter"><i class="fab fa-twitter"></i></a>
+                    <a href="#" aria-label="Facebook"><i class="fab fa-facebook"></i></a>
+                </div>
             </div>
-            <div>
+            <div class="footer-col">
                 <h4>Quick Links</h4>
                 <ul>
-                    <li><a href="#how">How It Works</a></li>
-                    <li><a href="#apply">Apply Now</a></li>
-                    <li><a href="#features">Features</a></li>
-                    <li><a href="#faq">FAQ</a></li>
+                    <li><a href="#hero">Home</a></li>
+                    <li><a href="#products">Shop</a></li>
+                    <li><a href="#features">About</a></li>
+                    <li><a href="#newsletter">Contact</a></li>
+                    <li><a href="#">FAQ</a></li>
                 </ul>
             </div>
-            <div>
-                <h4>Loan Types</h4>
+            <div class="footer-col">
+                <h4>Follow Us</h4>
                 <ul>
-                    <li><a href="#">Personal Loan</a></li>
-                    <li><a href="#">Business Loan</a></li>
-                    <li><a href="#">Medical Loan</a></li>
-                    <li><a href="#">Education Loan</a></li>
+                    <li><a href="#">Instagram</a></li>
+                    <li><a href="#">YouTube</a></li>
+                    <li><a href="#">Twitter / X</a></li>
+                    <li><a href="#">Facebook</a></li>
                 </ul>
             </div>
-            <div>
-                <h4>Legal</h4>
+            <div class="footer-col">
+                <h4>Contact</h4>
                 <ul>
-                    <li><a href="#">Privacy Policy</a></li>
-                    <li><a href="#">Terms & Conditions</a></li>
-                    <li><a href="#">Refund Policy</a></li>
-                    <li><a href="#">Disclaimer</a></li>
+                    <li><i class="fas fa-envelope"></i> hello@genzpets.in</li>
+                    <li><i class="fas fa-phone"></i> +91 98765 43210</li>
+                    <li><i class="fas fa-map-marker-alt"></i> Mumbai, India</li>
                 </ul>
             </div>
         </div>
         <div class="footer-bottom">
-            <span style="cursor:pointer;color:rgba(255,255,255,0.4);font-size:12px;" onclick="openAdminLogin()">Admin Panel</span> &nbsp; 2026 SwiftCash. All rights reserved.
+            &copy; 2026 GenZ Pets. All rights reserved.
         </div>
     </footer>
 
-    <div class="admin-login-overlay" id="adminLoginOverlay">
-        <div class="admin-login-box">
-            <div class="close-login" onclick="closeAdminLogin()">&times;</div>
-            <div class="lock-icon"><i class="fas fa-lock"></i></div>
-            <h2>Admin Login</h2>
-            <p>Enter credentials to access the admin dashboard</p>
-            <div class="form-group">
-                <label>Username</label>
-                <div class="input-icon-wrap">
-                    <i class="fas fa-user"></i>
-                    <input type="text"
-<input type="text" id="adminUser" placeholder="Enter username">
-                </div>
+    <!-- =============================== -->
+    <!-- CART SIDEBAR                   -->
+    <!-- =============================== -->
+    <div class="cart-overlay" id="cartOverlay"></div>
+    <div class="cart-sidebar" id="cartSidebar">
+        <div class="cart-header">
+            <h3>🛒 Your Cart</h3>
+            <button class="cart-close" id="cartClose">&times;</button>
+        </div>
+        <div class="cart-items" id="cartItems">
+            <div class="cart-empty">Your cart is empty 🐾</div>
+        </div>
+        <div class="cart-footer">
+            <div class="cart-total">
+                <span>Total</span>
+                <span id="cartTotal">₹0</span>
             </div>
-            <div class="form-group">
-                <label>Password</label>
-                <div class="input-icon-wrap">
-                    <i class="fas fa-key"></i>
-                    <input type="password" id="adminPass" placeholder="Enter password">
-                </div>
-            </div>
-            <div class="error-msg" id="loginError">Invalid username or password. Try again.</div>
-            <button class="login-btn" onclick="handleAdminLogin()"><i class="fas fa-sign-in-alt"></i> Login to Dashboard</button>
+            <button class="btn btn-primary" onclick="alert('Checkout coming soon!');">Checkout</button>
         </div>
     </div>
 
-    <div class="admin-panel-overlay" id="adminPanelOverlay">
-        <div class="admin-panel">
-            <div class="admin-header">
-                <h2><i class="fas fa-chart-bar"></i> SwiftCash Admin Dashboard</h2>
-                <div class="admin-actions">
-                    <span class="admin-badge"><i class="fas fa-user-shield"></i> Admin</span>
-                    <button onclick="closeAdminPanel()"><i class="fas fa-times"></i> Close</button>
-                </div>
-            </div>
-            <div class="admin-stats-grid">
-                <div class="admin-stat-card">
-                    <div class="stat-icon"><i class="fas fa-globe"></i></div>
-                    <div class="stat-number" id="statVisitors">0</div>
-                    <div class="stat-label">Total Visitors</div>
-                </div>
-                <div class="admin-stat-card">
-                    <div class="stat-icon"><i class="fas fa-file-invoice"></i></div>
-                    <div class="stat-number" id="statAttempted">0</div>
-                    <div class="stat-label">Payment Attempted</div>
-                </div>
-                <div class="admin-stat-card">
-                    <div class="stat-icon"><i class="fas fa-check-circle"></i></div>
-                    <div class="stat-number" id="statPaid">0</div>
-                    <div class="stat-label">Total Paid</div>
-                </div>
-                <div class="admin-stat-card">
-                    <div class="stat-icon"><i class="fas fa-rupee-sign"></i></div>
-                    <div class="stat-number" id="statEarnings">₹0</div>
-                    <div class="stat-label">Total Earnings</div>
-                </div>
-            </div>
-            <div class="admin-table-wrap">
-                <h3><i class="fas fa-list"></i> Recent Applications</h3>
-                <div style="overflow-x:auto;">
-                    <table class="admin-table">
-                        <thead>
-                            <tr>
-                                <th>Name</th>
-                                <th>Mobile</th>
-                                <th>Amount</th>
-                                <th>Fee Paid</th>
-                                <th>Status</th>
-                                <th>Date</th>
-                            </tr>
-                        </thead>
-                        <tbody id="applicationsTableBody">
-                        </tbody>
-                    </table>
-                </div>
-                <p id="noAppsMsg" style="text-align:center;color:var(--gray);padding:30px 0;">No applications yet. Applications will appear here once submitted.</p>
-            </div>
-        </div>
-    </div>
-
-    <div class="payment-modal-overlay" id="paymentModalOverlay">
-        <div class="payment-modal">
-            <div class="payment-icon"><i class="fas fa-credit-card"></i></div>
-            <h2>Approval Fee Payment</h2>
-            <p>Pay the one-time approval fee to continue with your loan application. Your loan amount will be credited within 30 minutes after payment.</p>
-            <div class="pay-amount" id="payAmountDisplay">₹399</div>
-            <div class="timer-container">
-                <div class="timer-label"><i class="fas fa-clock"></i> Payment Timer</div>
-                <div class="timer-display" id="timerDisplay">10:00</div>
-                <div class="timer-sub">Complete payment within 10 minutes or application will expire</div>
-            </div>
-            <button class="pay-btn" id="payNowBtn" onclick="processPayment()">
-                <i class="fas fa-lock"></i> Pay Now - Secure
-            </button>
-            <br>
-            <button class="skip-btn" onclick="skipPayment()">I'll pay later</button>
-        </div>
-    </div>
-
-    <div class="success-modal-overlay" id="successModalOverlay">
-        <div class="success-modal">
-            <div class="success-icon"><i class="fas fa-check-circle"></i></div>
-            <h2>Payment Successful!</h2>
-            <p>Your approval fee of <strong id="successAmount">₹399</strong> has been received.<br><br>Your loan application is now being processed. The loan amount will be credited to your bank account within 30 minutes.<br><br>Thank you for choosing SwiftCash!</p>
-            <button class="success-btn" onclick="closeSuccessModal()"><i class="fas fa-thumbs-up"></i> Done</button>
-        </div>
-    </div>
-
+    <!-- =============================== -->
+    <!-- JAVASCRIPT                    -->
+    <!-- =============================== -->
     <script>
-        let adminLoggedIn = false;
-        let applications = [];
-        let visitorsCount = 0;
-        let attemptedCount = 0;
-        let paidCount = 0;
-        let totalEarnings = 0;
-        let timerInterval = null;
-        let timerSeconds = 600;
-        let currentFeeForPayment = 399;
-        let currentApplicantData = null;
+        /* =================================================
+               PRODUCT DATA
+               ================================================= */
+        const products = [
+            { id: 1, name: 'Cat Litter', icon: '🐱', price: 299 },
+            { id: 2, name: 'Crystal Cat Litter', icon: '💎', price: 499 },
+            { id: 3, name: 'Dog Beds', icon: '🛏️', price: 1299 },
+            { id: 4, name: 'Dog Raincoats', icon: '🧥', price: 699 },
+            { id: 5, name: 'Cat Dog Food', icon: '🥫', price: 549 }
+        ];
 
-        document.getElementById('navbar').addEventListener('scroll', function() {
-            document.getElementById('navbar').classList.toggle('scrolled', window.scrollY > 50);
-        });
+        /* =================================================
+           CART STATE
+           ================================================= */
+        let cart = [];
 
-        function toggleMenu() {
-            document.getElementById('navLinks').classList.toggle('open');
+        // Load from localStorage
+        function loadCart() {
+            try {
+                const saved = localStorage.getItem('genzPetsCart');
+                if (saved) cart = JSON.parse(saved);
+            } catch (e) { cart = []; }
         }
 
-        function updateLoanAmount(val) {
-            const num = parseInt(val).toLocaleString('en-IN');
-            document.getElementById('displayAmount').innerText = '₹' + num;
-            let fee = 199;
-            if (val >= 10000) fee = 299;
-            if (val >= 25000) fee = 399;
-            if (val >= 50000) fee = 499;
-            if (val >= 100000) fee = 699;
-            if (val >= 250000) fee = 999;
-            document.getElementById('feeAmount').innerText = '₹' + fee;
+        function saveCart() {
+            localStorage.setItem('genzPetsCart', JSON.stringify(cart));
         }
 
-        function showUploaded(input, listId) {
-            const list = document.getElementById(listId);
-            list.innerHTML = '';
-            if (input.files.length > 0) {
-                const file = input.files[0];
-                const div = document.createElement('div');
-                div.className = 'upload-item';
-                div.innerHTML = '<span><i class="fas fa-file"></i> ' + file.name + '</span><span class="remove" onclick="removeFile(this,\'' + input.id + '\',\'' + listId + '\')">&times;</span>';
-                list.appendChild(div);
-            }
-        }
+        /* =================================================
+           RENDER PRODUCTS
+           ================================================= */
+        function renderProducts() {
+            const grid = document.getElementById('productGrid');
+            grid.innerHTML = '';
+            products.forEach((p, idx) => {
+                const card = document.createElement('div');
+                card.className = `product-card fade-up stagger-${(idx % 5) + 1}`;
+                card.setAttribute('data-tilt', '');
+                card.innerHTML = `
+                        <span class="icon-wrap">${p.icon}</span>
+                        <h3>${p.name}</h3>
+                        <p class="price">₹${p.price}</p>
+                        <p class="rating">★★★★☆</p>
+                        <button class="btn-add" data-id="${p.id}">Add to Cart</button>
+                    `;
+                grid.appendChild(card);
+            });
 
-        function removeFile(el, inputId, listId) {
-            document.getElementById(inputId).value = '';
-            document.getElementById(listId).innerHTML = '';
-        }
-
-        function toggleFaq(el) {
-            el.parentElement.classList.toggle('active');
-        }
-
-        function openAdminLogin() {
-            document.getElementById('adminLoginOverlay').style.display = 'flex';
-        }
-
-        function closeAdminLogin() {
-            document.getElementById('adminLoginOverlay').style.display = 'none';
-            document.getElementById('loginError').style.display = 'none';
-        }
-
-        function handleAdminLogin() {
-            const user = document.getElementById('adminUser').value;
-            const pass = document.getElementById('adminPass').value;
-            if (user === 'admin' && pass === 'admin123') {
-                adminLoggedIn = true;
-                closeAdminLogin();
-                openAdminPanel();
-            } else {
-                document.getElementById('loginError').style.display = 'block';
-            }
-            return false;
-        }
-
-        function openAdminPanel() {
-            updateAdminStats();
-            renderApplicationsTable();
-            document.getElementById('adminPanelOverlay').classList.add('active');
-        }
-
-        function closeAdminPanel() {
-            document.getElementById('adminPanelOverlay').classList.remove('active');
-        }
-
-        function updateAdminStats() {
-            document.getElementById('statVisitors').innerText = visitorsCount;
-            document.getElementById('statAttempted').innerText = attemptedCount;
-            document.getElementById('statPaid').innerText = paidCount;
-            document.getElementById('statEarnings').innerText = '₹' + totalEarnings.toLocaleString('en-IN');
-        }
-
-        function renderApplicationsTable() {
-            const tbody = document.getElementById('applicationsTableBody');
-            const noMsg = document.getElementById('noAppsMsg');
-            tbody.innerHTML = '';
-            if (applications.length === 0) {
-                noMsg.style.display = 'block';
-                return;
-            }
-            noMsg.style.display = 'none';
-            applications.forEach(function(app) {
-                const tr = document.createElement('tr');
-                let statusClass = 'pending';
-                if (app.status === 'paid') statusClass = 'paid';
-                else if (app.status === 'approved') statusClass = 'approved';
-                else if (app.status === 'rejected') statusClass = 'rejected';
-                const statusText = app.status.charAt(0).toUpperCase() + app.status.slice(1);
-                tr.innerHTML = '<td>' + app.name + '</td><td>' + app.mobile + '</td><td>₹' + app.amount.toLocaleString('en-IN') + '</td><td>₹' + app.fee + '</td><td><span class="status-badge ' + statusClass + '">' + statusText + '</span></td><td>' + app.date + '</td>';
-                tbody.appendChild(tr);
+            // Attach add-to-cart events
+            document.querySelectorAll('.btn-add').forEach(btn => {
+                btn.addEventListener('click', function(e) {
+                    const id = parseInt(this.dataset.id);
+                    addToCart(id);
+                });
             });
         }
 
-        function handleSubmit(e) {
-            e.preventDefault();
-            visitorsCount++;
+        /* =================================================
+           CART OPERATIONS
+           ================================================= */
+        function addToCart(productId) {
+            const product = products.find(p => p.id === productId);
+            if (!product) return;
 
-            const name = document.getElementById('fullName').value;
-            const mobile = document.getElementById('mobileNum').value;
-            const amount = parseInt(document.getElementById('loanSlider').value);
-            const feeText = document.getElementById('feeAmount').innerText;
-            const fee = parseInt(feeText.replace('₹', ''));
-            const date = new Date().toLocaleDateString('en-IN', { day: '2-digit', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+            const existing = cart.find(item => item.id === productId);
+            if (existing) {
+                existing.qty += 1;
+            } else {
+                cart.push({ ...product, qty: 1 });
+            }
 
-            const appData = {
-                name: name,
-                mobile: mobile,
-                amount: amount,
-                fee: fee,
-                status: 'pending',
-                date: date
-            };
-            applications.push(appData);
-            currentApplicantData = appData;
-            currentFeeForPayment = fee;
-
-            attemptedCount++;
-            updateAdminStats();
-            renderApplicationsTable();
-
-            openPaymentModal(fee);
-            return false;
+            saveCart();
+            updateCartUI();
+            // Bounce badge
+            const badge = document.getElementById('cartBadge');
+            badge.classList.remove('bounce');
+            void badge.offsetWidth;
+            badge.classList.add('bounce');
         }
 
-        function openPaymentModal(fee) {
-            currentFeeForPayment = fee;
-            document.getElementById('payAmountDisplay').innerText = '₹' + fee;
-            document.getElementById('paymentModalOverlay').classList.add('active');
-            startTimer(600);
+        function removeFromCart(productId) {
+            cart = cart.filter(item => item.id !== productId);
+            saveCart();
+            updateCartUI();
         }
 
-        function startTimer(seconds) {
-            timerSeconds = seconds;
-            if (timerInterval) clearInterval(timerInterval);
-            updateTimerDisplay();
-            timerInterval = setInterval(function() {
-                timerSeconds--;
-                updateTimerDisplay();
-                if (timerSeconds <= 0) {
-                    clearInterval(timerInterval);
-                    timerInterval = null;
-                    document.getElementById('timerDisplay').innerText = '00:00';
-                    document.getElementById('payNowBtn').disabled = true;
-                    document.getElementById('payNowBtn').innerHTML = '<i class="fas fa-times-circle"></i> Expired';
+        function changeQty(productId, delta) {
+            const item = cart.find(i => i.id === productId);
+            if (!item) return;
+            item.qty += delta;
+            if (item.qty <= 0) {
+                removeFromCart(productId);
+                return;
+            }
+            saveCart();
+            updateCartUI();
+        }
+
+        function updateCartUI() {
+            // Badge
+            const totalItems = cart.reduce((sum, i) => sum + i.qty, 0);
+            const badge = document.getElementById('cartBadge');
+            badge.textContent = totalItems;
+
+            // Sidebar items
+            const container = document.getElementById('cartItems');
+            if (cart.length === 0) {
+                container.innerHTML = `<div class="cart-empty">Your cart is empty 🐾</div>`;
+                document.getElementById('cartTotal').textContent = '₹0';
+                return;
+            }
+
+            let html = '';
+            let totalCost = 0;
+            cart.forEach(item => {
+                const subtotal = item.price * item.qty;
+                totalCost += subtotal;
+                html += `
+                        <div class="cart-item">
+                            <span class="item-icon">${item.icon}</span>
+                            <div class="item-info">
+                                <h4>${item.name}</h4>
+                                <span class="item-price">₹${item.price}</span>
+                            </div>
+                            <div class="item-qty">
+                                <button onclick="changeQty(${item.id}, -1)">−</button>
+                                <span>${item.qty}</span>
+                                <button onclick="changeQty(${item.id}, 1)">+</button>
+                            </div>
+                            <button class="item-remove" onclick="removeFromCart(${item.id})">
+                                <i class="fas fa-trash-alt"></i>
+                            </button>
+                        </div>
+                    `;
+            });
+
+            container.innerHTML = html;
+            document.getElementById('cartTotal').textContent = `₹${totalCost.toLocaleString('en-IN')}`;
+        }
+
+        /* =================================================
+           CART SIDEBAR TOGGLE
+           ================================================= */
+        function openCart() {
+            document.getElementById('cartOverlay').classList.add('open');
+            document.getElementById('cartSidebar').classList.add('open');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeCart() {
+            document.getElementById('cartOverlay').classList.remove('open');
+            document.getElementById('cartSidebar').classList.remove('open');
+            document.body.style.overflow = '';
+        }
+
+        document.getElementById('cartToggle').addEventListener('click', openCart);
+        document.getElementById('cartClose').addEventListener('click', closeCart);
+        document.getElementById('cartOverlay').addEventListener('click', closeCart);
+
+        /* =================================================
+           MOBILE HAMBURGER MENU
+           ================================================= */
+        const hamburger = document.getElementById('hamburger');
+        const navLinks = document.getElementById('navLinks');
+
+        hamburger.addEventListener('click', () => {
+            hamburger.classList.toggle('active');
+            navLinks.classList.toggle('open');
+        });
+
+        function closeNav() {
+            hamburger.classList.remove('active');
+            navLinks.classList.remove('open');
+        }
+
+        /* =================================================
+           INTERSECTION OBSERVER — SCROLL ANIMATIONS
+           ================================================= */
+        const observer = new IntersectionObserver((entries) => {
+            entries.forEach(entry => {
+                if (entry.isIntersecting) {
+                    entry.target.classList.add('visible');
+                    // Optionally unobserve after reveal
+                    // observer.unobserve(entry.target);
                 }
-            }, 1000);
-        }
+            });
+        }, { threshold: 0.15, rootMargin: '0px 0px -40px 0px' });
 
-        function updateTimerDisplay() {
-            const mins = Math.floor(timerSeconds / 60);
-            const secs = timerSeconds % 60;
-            document.getElementById('timerDisplay').innerText = String(mins).padStart(2, '0') + ':' + String(secs).padStart(2, '0');
-        }
+        document.querySelectorAll('.fade-up').forEach(el => observer.observe(el));
 
-        function processPayment() {
-            if (document.getElementById('payNowBtn').disabled) return;
-            clearInterval(timerInterval);
-            timerInterval = null;
-            paidCount++;
-            totalEarnings += currentFeeForPayment;
-            if (currentApplicantData) {
-                currentApplicantData.status = 'paid';
+        /* =================================================
+           THREE.JS — FLOATING 3D PAW PRINT
+           ================================================= */
+        function initThreePaw() {
+            const container = document.getElementById('three-paw');
+            if (!container) return;
+
+            const width = container.clientWidth;
+            const height = container.clientHeight;
+
+            const scene = new THREE.Scene();
+            const camera = new THREE.PerspectiveCamera(45, width / height, 0.1, 1000);
+            camera.position.set(0, 0, 5);
+
+            const renderer = new THREE.WebGLRenderer({ alpha: true, antialias: true });
+            renderer.setSize(width, height);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            container.appendChild(renderer.domElement);
+
+            // --- Create a paw-print shape with merged geometry ---
+            // Main pad (central large circle)
+            const mainPad = new THREE.SphereGeometry(0.7, 32, 32);
+            // Toe beans (4 smaller spheres)
+            const toeGeo = new THREE.SphereGeometry(0.35, 24, 24);
+
+            const group = new THREE.Group();
+
+            const mat = new THREE.MeshStandardMaterial({
+                color: 0xFF6B35,
+                metalness: 0.2,
+                roughness: 0.4,
+                transparent: true,
+                opacity: 0.7,
+                emissive: 0xFF6B35,
+                emissiveIntensity: 0.1
+            });
+
+            const mainMesh = new THREE.Mesh(mainPad, mat);
+            mainMesh.position.y = -0.1;
+            mainMesh.scale.set(1, 0.5, 0.8);
+            group.add(mainMesh);
+
+            // Toes positioned around
+            const toePositions = [
+                { x: -0.5, z: 1.0 },
+                { x: 0.5, z: 1.0 },
+                { x: 0, z: 1.15 },
+                { x: -0.25, z: 0.8 },
+                { x: 0.25, z: 0.8 }
+            ];
+
+            toePositions.forEach(pos => {
+                const toe = new THREE.Mesh(toeGeo, mat);
+                toe.position.set(pos.x, 0.05, pos.z);
+                toe.scale.set(1, 0.4, 0.8);
+                group.add(toe);
+            });
+
+            // Small accent ring (glow)
+            const ringGeo = new THREE.TorusGeometry(0.9, 0.04, 16, 32);
+            const ringMat = new THREE.MeshStandardMaterial({
+                color: 0xFFD166,
+                transparent: true,
+                opacity: 0.3,
+                emissive: 0xFFD166,
+                emissiveIntensity: 0.2
+            });
+            const ring = new THREE.Mesh(ringGeo, ringMat);
+            ring.rotation.x = Math.PI / 2;
+            ring.position.y = -0.2;
+            ring.scale.set(1.2, 1.2, 1.2);
+            group.add(ring);
+
+            scene.add(group);
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+            scene.add(ambientLight);
+            const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            dirLight.position.set(2, 3, 4);
+            scene.add(dirLight);
+            const backLight = new THREE.DirectionalLight(0xFFD166, 0.3);
+            backLight.position.set(-2, -1, -3);
+            scene.add(backLight);
+
+            // --- Optional floating particles (bubbles) ---
+            const particleCount = 120;
+            const particleGeo = new THREE.BufferGeometry();
+            const positions = new Float32Array(particleCount * 3);
+            for (let i = 0; i < particleCount * 3; i++) {
+                positions[i] = (Math.random() - 0.5) * 12;
             }
-            updateAdminStats();
-            renderApplicationsTable();
-            document.getElementById('paymentModalOverlay').classList.remove('active');
-            document.getElementById('successAmount').innerText = '₹' + currentFeeForPayment;
-            document.getElementById('successModalOverlay').classList.add('active');
+            particleGeo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+            const particleMat = new THREE.PointsMaterial({
+                color: 0xFFD166,
+                size: 0.06,
+                transparent: true,
+                opacity: 0.4,
+                blending: THREE.AdditiveBlending
+            });
+            const particles = new THREE.Points(particleGeo, particleMat);
+            scene.add(particles);
+
+            // --- Animation loop ---
+            function animate() {
+                requestAnimationFrame(animate);
+
+                // Rotate the paw slowly on Y-axis
+                group.rotation.y += 0.008;
+                // Slight bob
+                group.position.y = Math.sin(Date.now() * 0.001) * 0.1;
+
+                // Rotate particles slowly
+                particles.rotation.y += 0.0006;
+
+                renderer.render(scene, camera);
+            }
+
+            animate();
+
+            // --- Resize handler ---
+            window.addEventListener('resize', () => {
+                const w = container.clientWidth;
+                const h = container.clientHeight;
+                camera.aspect = w / h;
+                camera.updateProjectionMatrix();
+                renderer.setSize(w, h);
+            });
         }
 
-        function skipPayment() {
-            clearInterval(timerInterval);
-            timerInterval = null;
-            document.getElementById('paymentModalOverlay').classList.remove('active');
-            alert('Your application has been saved. You will receive a payment link on your registered mobile number. Please complete the payment within 24 hours to proceed with your loan.');
+        /* =================================================
+           PRODUCT CARD 3D TILT (vanilla JS)
+           ================================================= */
+        function initTilt() {
+            document.querySelectorAll('.product-card').forEach(card => {
+                card.addEventListener('mousemove', function(e) {
+                    const rect = this.getBoundingClientRect();
+                    const x = e.clientX - rect.left;
+                    const y = e.clientY - rect.top;
+                    const centerX = rect.width / 2;
+                    const centerY = rect.height / 2;
+                    const rotateX = ((y - centerY) / centerY) * -8;
+                    const rotateY = ((x - centerX) / centerX) * 8;
+                    this.style.transform =
+                        `translateY(-8px) perspective(800px) rotateX(${rotateX}deg) rotateY(${rotateY}deg)`;
+                    this.style.boxShadow = `0 20px 50px rgba(0,0,0,0.15)`;
+                });
+
+                card.addEventListener('mouseleave', function() {
+                    this.style.transform = 'translateY(0) perspective(800px) rotateX(0) rotateY(0)';
+                    this.style.boxShadow = '0 4px 20px rgba(0,0,0,0.06)';
+                });
+            });
         }
 
-        function closeSuccessModal() {
-            document.getElementById('successModalOverlay').classList.remove('active');
-        }
+        /* =================================================
+           INIT EVERYTHING
+           ================================================= */
+        document.addEventListener('DOMContentLoaded', function() {
+            loadCart();
+            renderProducts();
+            updateCartUI();
+            initThreePaw();
+            // Tilt needs a small delay so cards are rendered
+            setTimeout(initTilt, 100);
 
-        document.addEventListener('click', function(e) {
-            if (e.target === document.getElementById('adminLoginOverlay')) {
-                closeAdminLogin();
-            }
-            if (e.target === document.getElementById('paymentModalOverlay')) {
-                // do not close on click outside
-            }
-            if (e.target === document.getElementById('successModalOverlay')) {
-                // do not close
-            }
+            // Also re-observe new fade-up elements if any were added dynamically
+            document.querySelectorAll('.fade-up:not(.observed)').forEach(el => {
+                el.classList.add('observed');
+                observer.observe(el);
+            });
         });
-
-        document.getElementById('loanSlider').addEventListener('input', function() {
-            const val = this.value;
-            const percent = ((val - 5000) / (500000 - 5000)) * 100;
-            this.style.background = 'linear-gradient(to right, var(--primary) 0%, var(--primary) ' + percent + '%, #e5e7eb ' + percent + '%, #e5e7eb 100%)';
-        });
-
-        updateLoanAmount(50000);
     </script>
+
 </body>
 </html>
