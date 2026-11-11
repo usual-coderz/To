@@ -1,11 +1,12 @@
-"""LZT Market API client — typed, mapping-corrected, tolerant."""
+"""LZT Market API client — typed, retrying, tolerant."""
 import asyncio
 import logging
 
 import httpx
 
-from app.config import HTTP_TIMEOUT, LZT_BASE, LZT_TOKEN
-from app.utils.money import parse_balances, parse_user
+from app.config import HTTP_BACKOFF, HTTP_RETRIES, HTTP_TIMEOUT, LZT_BASE, LZT_TOKEN
+from app.utils.filters import search_query
+from app.utils.money import parse_balances, parse_user, same_currency
 
 log = logging.getLogger("lzt")
 
@@ -51,32 +52,56 @@ class LztClient:
             timeout=HTTP_TIMEOUT,
             headers={"Authorization": f"Bearer {token}",
                      "Accept": "application/json",
-                     "User-Agent": "AccStore/2.0"},
+                     "User-Agent": "AccStore/2.1"},
         )
 
     async def close(self):
-        await self._http.aclose()
+        try:
+            await self._http.aclose()
+        except Exception:
+            pass
 
     async def _request(self, method: str, path: str, **kwargs) -> dict:
-        try:
-            r = await self._http.request(method, path, **kwargs)
-        except httpx.HTTPError as e:
-            raise LztError(f"network: {e}")
+        delay = HTTP_BACKOFF
+        last: LztError | None = None
+        for attempt in range(HTTP_RETRIES):
+            try:
+                r = await self._http.request(method, path, **kwargs)
+            except httpx.HTTPError as e:
+                last = LztError(f"network: {e}")
+                if attempt + 1 < HTTP_RETRIES:
+                    await asyncio.sleep(delay)
+                    delay *= 2
+                    continue
+                raise last
 
-        try:
-            payload = r.json() if r.content else {}
-        except ValueError:
-            payload = {}
+            try:
+                payload = r.json() if r.content else {}
+            except ValueError:
+                payload = {}
 
-        if r.status_code >= 400:
-            raise LztError(_message(payload) or f"HTTP {r.status_code}", r.status_code)
+            retryable = r.status_code == 429 or r.status_code >= 500
+            if retryable and attempt + 1 < HTTP_RETRIES:
+                wait = delay
+                try:
+                    wait = max(wait, float(r.headers.get("Retry-After") or 0))
+                except ValueError:
+                    pass
+                log.info(f"{path}: HTTP {r.status_code}, retry in {wait:.1f}s")
+                await asyncio.sleep(min(wait, 20.0))
+                delay *= 2
+                continue
 
-        if isinstance(payload, dict) and payload.get("errors"):
-            msg = _message(payload)
-            if msg:
-                raise LztError(msg, r.status_code)
+            if r.status_code >= 400:
+                raise LztError(_message(payload) or f"HTTP {r.status_code}", r.status_code)
 
-        return payload if isinstance(payload, dict) else {}
+            if isinstance(payload, dict) and payload.get("errors"):
+                msg = _message(payload)
+                if msg:
+                    raise LztError(msg, r.status_code)
+
+            return payload if isinstance(payload, dict) else {}
+        raise last or LztError("request failed")
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
         return await self._request("GET", path, params=params or {})
@@ -94,7 +119,10 @@ class LztClient:
         return parse_balances(await self._get("/balance/exchange"))
 
     async def balance_total(self, currency: str = "usd") -> float:
-        return parse_user(await self._get("/me"))["balance"]
+        user = parse_user(await self._get("/me"))
+        if not same_currency(user["currency"], currency):
+            return 0.0
+        return max(0.0, user["balance"] - user["hold"])
 
     async def payments(self, page: int = 1) -> list[dict]:
         data = await self._get("/payments", {"page": page, "limit": 20})
@@ -133,10 +161,7 @@ class LztClient:
         if deny:
             params["not_country[]"] = deny
 
-        if s.get("session_age"):
-            params["session_age"] = s["session_age"]
-            params["session_age_period"] = s.get("session_age_period", "day")
-
+        params.update(search_query(s))
         return {k: v for k, v in params.items() if v not in (None, "", [])}
 
     async def search(self, s: dict) -> list[dict]:
