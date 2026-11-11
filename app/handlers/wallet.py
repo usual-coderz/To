@@ -93,9 +93,14 @@ async def cb_payments(cq: CallbackQuery):
     try:
         rows = await lzt.payments(page=1)
     except LztError as e:
-        await show(cq, f"error <code>{tg.esc(str(e))}</code>", kb.back("m:wallet"))
+        await show(cq, f"payments error <code>{tg.esc(str(e)[:200])}</code>",
+                   kb.back("m:wallet"))
         return await cq.answer()
-    body = "\n".join(payment_text(p) for p in rows[:10]) or "nothing"
+    if not rows:
+        await show(cq, "<b>Payments</b>\nnothing returned by the API",
+                   kb.back("m:wallet"))
+        return await cq.answer()
+    body = "\n".join(payment_text(p) for p in rows[:10])
     await show(cq, f"<b>Payments</b>\n{body}", kb.back("m:wallet"))
     await cq.answer()
 
