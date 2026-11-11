@@ -57,15 +57,9 @@ async def edit(message, text, markup=None) -> bool:
     except Exception as e:
         if "not modified" in str(e):
             return True
-    plain = clip(strip_tags(text))
-    for body, mode in ((text, None), (plain, None)):
-        try:
-            await message.edit_caption(caption=body, reply_markup=markup, parse_mode=mode)
-            return True
-        except Exception:
-            pass
     try:
-        await message.edit_text(plain, reply_markup=markup, parse_mode=None)
+        await message.edit_text(clip(strip_tags(text)), reply_markup=markup,
+                                parse_mode=None, link_preview_options=LP)
         return True
     except Exception as e:
         if "not modified" in str(e):
