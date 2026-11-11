@@ -192,7 +192,8 @@ async def _ensure_indexes():
     for coll_name, keys, opts in _INDEXES:
         coll = _db[coll_name]
         try:
-            existing = [spec async for spec in coll.list_indexes()]
+            cursor = await coll.list_indexes()
+            existing = [spec async for spec in cursor]
         except Exception as e:
             log.debug(f"list_indexes {coll_name}: {e}")
             existing = []
