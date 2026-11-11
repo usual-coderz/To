@@ -10,13 +10,15 @@ BACK_LIMITS = "m:limits"
 BACK_WALLET = "m:wallet"
 BACK_SESSIONS = "m:sessions"
 
+MAX_DATA = 64
+
 
 def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
-    """Build a markup, dropping empty rows and empty buttons."""
+    """Build a markup, dropping empty rows and oversized callback data."""
     b = InlineKeyboardBuilder()
     widths: list[int] = []
     for row in rows:
-        clean = [(t, d) for t, d in row if t and d]
+        clean = [(t, d) for t, d in row if t and d and len(d.encode()) <= MAX_DATA]
         if not clean:
             continue
         for text, data in clean:
@@ -129,11 +131,11 @@ def session_detail(p: dict) -> InlineKeyboardMarkup:
 
 
 def bought(p: dict) -> InlineKeyboardMarkup:
-    """Attached to every purchase notification."""
+    """Attached to every purchase notification — never empty."""
     pid = p["_id"]
     return kb([
-        [("Session file", f"f:{pid}"), ("Check", f"c:{pid}")],
-        [("Clean now", f"k:{pid}")],
+        [("Open", f"v:{pid}"), ("Session file", f"f:{pid}")],
+        [("Check", f"c:{pid}"), ("Clean now", f"k:{pid}")],
     ])
 
 
@@ -175,7 +177,9 @@ def exchange(pool: list[dict], step: str, offset: int = 0,
 
 
 def amount(currency: str, available: float) -> InlineKeyboardMarkup:
-    quick = [(str(v), f"xa:{v}") for v in (10, 50, 100) if v <= available] or [("10", "xa:10")]
+    quick = [(str(v), f"xa:{v}") for v in (10, 50, 100) if v <= available]
+    if not quick:
+        quick = [(fmt_money(max(0.01, min(available, 10)), currency), "xa:max")]
     return kb([quick, [("Max", "xa:max"), ("Cancel", "xc")]])
 
 
