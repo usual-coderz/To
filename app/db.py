@@ -289,6 +289,13 @@ async def spent_today(tg_id: int) -> float:
     return total
 
 
+def due_from(age_hours: float, target_hours: float) -> int:
+    now = _now()
+    target = max(1.0, float(target_hours)) * 3600
+    left = max(0.0, target - max(0.0, float(age_hours)) * 3600)
+    return int(now + max(SETTLE_SECONDS, left))
+
+
 async def add_purchase(tg_id, item_id, phone, country, price, password="", mail="",
                        mail_password="", session_string="", expires_at=0,
                        target_age_hours=24.0, age_at_buy_hours=0.0, account_created_ts=0,
@@ -392,23 +399,12 @@ async def bump_expiry(pid, seconds: int, inc_tries: bool = False):
     await _db.purchases.update_one({"_id": oid}, {"$inc": inc})
 
 
-def due_from(created: int, age_hours: float, target_hours: float) -> int:
-    now = _now()
-    target = int(max(1.0, float(target_hours)) * 3600)
-    if created:
-        due = created + target
-    else:
-        due = int(now + max(0.0, target - max(0.0, float(age_hours)) * 3600))
-    return max(now + SETTLE_SECONDS, int(due))
-
-
 async def reschedule(tg_id: int, target_hours: float):
     now = _now()
     target = float(max(1.0, target_hours))
     cursor = _db.purchases.find({"tg_id": tg_id, "status": "queued"})
     async for p in cursor:
-        due = due_from(int(p.get("account_created_ts") or 0),
-                       float(p.get("age_at_buy_hours") or 0.0), target)
+        due = due_from(float(p.get("age_at_buy_hours") or 0.0), target)
         await _db.purchases.update_one(
             {"_id": p["_id"]},
             {"$set": {"expires_at": max(now + SETTLE_SECONDS, due),
