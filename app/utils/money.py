@@ -1,12 +1,3 @@
-"""Balance parsing that survives unknown payload shapes.
-
-Rules:
-  * never raise — every parser degrades to a default
-  * a balance is only spendable when its identity says market/other, never a
-    TG wallet
-  * money is normalised before arithmetic, so symbols/spaces/commas cannot
-    poison a float()
-"""
 import math
 import re
 from decimal import Decimal, InvalidOperation
@@ -27,14 +18,29 @@ _ID_FIELDS = ("balance_type", "type", "kind", "slug", "title", "name", "label",
 
 _MARKET_TOKENS = {"market", "main", "trade", "trading", "spend"}
 _TG_TOKENS = {"tg", "tgwallet", "telegram"}
-
-_STRIP = str.maketrans({
-    " ": "", "\u00a0": "", "\u202f": "", ",": ".", "'": "",
-    "$": "", "€": "", "₽": "", "₴": "", "£": "", "₸": "", "¥": "", "₺": "", "R": "",
-})
+_SYMS = "$€₽₴£₸¥₺"
 
 MAX_ENTRIES = 200
 MAX_DEPTH = 6
+
+
+def _clean(text: str) -> str:
+    s = str(text).strip()
+    for ch in ("\u00a0", "\u202f", " ", "'"):
+        s = s.replace(ch, "")
+    if s.startswith("R$"):
+        s = s[2:]
+    for sym in _SYMS:
+        s = s.replace(sym, "")
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        tail = s.rsplit(",", 1)[1]
+        s = s.replace(",", ".") if len(tail) in (1, 2) else s.replace(",", "")
+    return s
 
 
 def canon(currency: str) -> str:
@@ -47,14 +53,13 @@ def same_currency(a: str, b: str) -> bool:
 
 
 def _num(value, default=None):
-    """Tolerant float. Bools and non-finite values fall back to default."""
     if value is None or isinstance(value, bool):
         return default
     if isinstance(value, (int, float)):
         f = float(value)
         return f if math.isfinite(f) else default
     try:
-        f = float(Decimal(str(value).translate(_STRIP)))
+        f = float(Decimal(_clean(value)))
     except (InvalidOperation, TypeError, ValueError):
         return default
     return f if math.isfinite(f) else default
@@ -106,7 +111,6 @@ def _identity(d: dict) -> str:
 
 
 def _kind(d: dict) -> str:
-    """Only identity fields decide; no identity info → usable ('other')."""
     raw = _identity(d)
     if not raw.strip():
         return "other"
