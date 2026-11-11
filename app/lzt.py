@@ -14,6 +14,10 @@ log = logging.getLogger("lzt")
 PAYMENT_PATHS = ("/user/payments", "/payments", "/balance/payments")
 AUTH_KEY_FIELDS = ("telegram_auth_key", "auth_key", "telegram_session", "session",
                    "authKey", "auth_key_json")
+CODE_FIELDS = ("code", "login_code", "loginCode", "telegram_login_code",
+               "telegramLoginCode")
+MODE_FIELDS = ("mode", "kind", "type")
+KEY_MODES = ("auth_key", "authkey", "session", "key")
 
 RESET_PATHS = ("/{}/reset-authorizations", "/{}/telegram-reset-authorizations",
                "/telegram/{}/reset-authorizations", "/{}/reset-sessions",
@@ -56,6 +60,29 @@ def _message(payload) -> str:
     return dig(payload)[:300]
 
 
+def _dig_field(node, fields: tuple[str, ...], depth: int = 0) -> str:
+    if depth > 4:
+        return ""
+    if isinstance(node, dict):
+        for key in fields:
+            if key in node:
+                found = _dig_field(node[key], fields, depth + 1)
+                if found:
+                    return found
+        for value in node.values():
+            found = _dig_field(value, fields, depth + 1)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _dig_field(value, fields, depth + 1)
+            if found:
+                return found
+    elif isinstance(node, (str, int)) and not isinstance(node, bool):
+        return str(node).strip()
+    return ""
+
+
 def _dig_key(node, depth: int = 0) -> str:
     if depth > 4:
         return ""
@@ -76,11 +103,20 @@ def _dig_key(node, depth: int = 0) -> str:
     return ""
 
 
+def _parse_code(data) -> tuple[str, str]:
+    value = _dig_field(data, CODE_FIELDS)
+    mode = _dig_field(data, MODE_FIELDS).lower()
+    if value and (mode in KEY_MODES or len(value) > 100):
+        return value, "auth_key"
+    return value, mode
+
+
 class LztClient:
     def __init__(self, token: str = LZT_TOKEN):
         self._token = token
         self._cache: dict[str, tuple[float, object]] = {}
         self._reset_path: str = ""
+        self._key_path: str = ""
         self._code_verb: str = ""
         self._http = httpx.AsyncClient(
             base_url=LZT_BASE,
@@ -305,33 +341,36 @@ class LztClient:
             except LztError as e:
                 last = e
                 if e.status in SOFT_STATUS:
+                    if verb == self._code_verb:
+                        self._code_verb = ""
                     continue
                 raise
-            if not self._code_verb:
-                self._code_verb = verb
-            item = data.get("item") or data
-            value = str(item.get("code") or "").strip()
-            mode = str(item.get("mode") or "").strip().lower()
-            if value or not self._code_verb:
-                return value, mode
+            self._code_verb = verb
+            return _parse_code(data)
         if last and last.status not in SOFT_STATUS:
             log.info(f"code {item_id}: {last}")
         return "", ""
 
     async def auth_key(self, item_id: int) -> str:
         value, mode = await self.telegram_login_code(item_id)
-        if value and mode in ("auth_key", "authkey", "session", "key"):
+        if value and (mode in KEY_MODES or len(value) > 100):
             return value
 
-        for template in AUTH_KEY_PATHS:
+        templates = tuple(t for t in AUTH_KEY_PATHS if t != self._key_path)
+        if self._key_path:
+            templates = (self._key_path,) + templates
+        for template in templates:
             try:
                 data = await self._request("GET", template.format(int(item_id)))
             except LztError as e:
                 if e.status in SOFT_STATUS:
+                    if template == self._key_path:
+                        self._key_path = ""
                     continue
                 raise
             found = _dig_key(data)
             if found:
+                self._key_path = template
                 return found
 
         try:
