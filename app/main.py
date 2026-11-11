@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import re
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -12,11 +13,14 @@ from app.deps import lzt
 from app.engine import buy_loop, drain_bg, expiry_loop
 from app.handlers import ROUTERS
 from app.handlers.menu import allowed
-from app.utils import tg
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("main")
+
+
+def _mask(uri: str) -> str:
+    return re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", uri or "")
 
 
 async def access_mw(handler, event, data):
@@ -50,7 +54,7 @@ async def _supervise(name: str, factory, bot, *args):
 async def main():
     if not BOT_TOKEN:
         sys.exit("BOT_TOKEN is not set")
-    log.info(f"mongo: {MONGO_URI} db={MONGO_DB}")
+    log.info(f"mongo: {_mask(MONGO_URI)} db={MONGO_DB}")
 
     await db.init_db()
     for oid in OWNER_IDS:
