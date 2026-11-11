@@ -92,7 +92,7 @@ def fmt_age(hours: float | None) -> str:
     except (TypeError, ValueError):
         return "unknown"
     if minutes < 1:
-        return "<1m"
+        return "&lt;1m"
     if minutes < 60:
         return f"{minutes}m"
     h, m = divmod(minutes, 60)
