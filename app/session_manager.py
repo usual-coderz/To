@@ -1,11 +1,14 @@
 import asyncio
+import base64
+import json
 import logging
 import re
 
 from telethon import TelegramClient, functions
+from telethon.crypto import AuthKey
 from telethon.errors import (FloodWaitError, PasswordHashInvalidError,
-                            PhoneCodeExpiredError, PhoneCodeInvalidError,
-                            SessionPasswordNeededError)
+                             PhoneCodeExpiredError, PhoneCodeInvalidError,
+                             SessionPasswordNeededError)
 from telethon.sessions import StringSession
 
 from app.config import API_HASH, API_ID, CODE_TIMEOUT
@@ -13,10 +16,12 @@ from app.lzt import LztError
 
 log = logging.getLogger("session")
 
-DEVICE = dict(device_model="AccStore", system_version="2.0",
-              app_version="2.0", lang_code="en")
+DEVICE = dict(device_model="AccStore", system_version="2.1",
+              app_version="2.1", lang_code="en")
 
 _PROXY_RE = re.compile(r"(socks5|socks4|http)://(?:([^:@]+):([^@]+)@)?([^:]+):(\d+)")
+
+_FALLBACK_DC = (2, "149.154.167.51", 443)
 
 
 def normalize_phone(raw) -> str:
@@ -50,45 +55,140 @@ def client(session_string: str = "", proxy_cfg: str = ""):
                           flood_sleep_threshold=90, **DEVICE)
 
 
-async def _await_code(lzt, item_id: int, timeout: int) -> str:
+def _key_bytes(value: str) -> bytes:
+    value = value.strip()
+    if not value:
+        return b""
+    try:
+        return bytes.fromhex(value)
+    except ValueError:
+        pass
+    try:
+        return base64.b64decode(value + "=" * (-len(value) % 4))
+    except Exception:
+        return b""
+
+
+def session_from_auth_key(raw: str) -> str:
+    raw = (raw or "").strip().strip('"')
+    if not raw:
+        raise ValueError("empty auth key")
+    if raw.startswith("1") and len(raw) > 300:
+        return raw
+
+    data = None
+    try:
+        parsed = json.loads(raw)
+    except ValueError:
+        parsed = None
+    if isinstance(parsed, dict):
+        inner = parsed.get("data")
+        data = inner if isinstance(inner, dict) else parsed
+    elif raw.count(":") == 3:
+        dc, addr, port, key = raw.split(":")
+        data = {"dc_id": dc, "server_address": addr, "port": port, "auth_key": key}
+    if not isinstance(data, dict):
+        data = {"auth_key": raw}
+
+    key = _key_bytes(str(data.get("auth_key") or data.get("authKey") or ""))
+    if len(key) < 200:
+        raise ValueError("short auth key")
+
+    dc_id = int(data.get("dc_id") or data.get("dcId") or _FALLBACK_DC[0])
+    addr = str(data.get("server_address") or data.get("serverAddress") or _FALLBACK_DC[1])
+    port = int(data.get("port") or _FALLBACK_DC[2])
+
+    session = StringSession()
+    session.set_dc(dc_id, addr, port)
+    session.auth_key = AuthKey(key)
+    return session.save()
+
+
+async def _reset(lzt, item_id: int) -> bool:
+    try:
+        await lzt.reset_authorizations(item_id)
+        return True
+    except LztError as e:
+        log.info(f"reset auths {item_id}: {e}")
+        return False
+
+
+async def _alive(c: TelegramClient) -> bool:
+    try:
+        await c.get_me()
+        return True
+    except Exception as e:
+        log.info(f"alive check: {e}")
+        return False
+
+
+async def _send_code(c: TelegramClient, number: str):
+    try:
+        return await c.send_code_request(number)
+    except FloodWaitError as e:
+        wait = min(int(e.seconds) + 2, 120)
+        log.info(f"flood wait {wait}s")
+        await asyncio.sleep(wait)
+        return await c.send_code_request(number)
+
+
+async def _await_code(lzt, item_id: int, timeout: int) -> tuple[str, str]:
     loop = asyncio.get_running_loop()
     end = loop.time() + timeout
     while loop.time() < end:
         try:
-            got, _mode = await lzt.telegram_login_code(item_id)
+            value, mode = await lzt.telegram_login_code(item_id)
         except LztError as e:
             log.info(f"code poll {item_id}: {e}")
-            got = ""
-        if got and len(got) >= 4:
-            return got
+            value, mode = "", ""
+        if value and mode in ("auth_key", "authkey", "session") and len(value) > 100:
+            return value, "auth_key"
+        if value and len(value) >= 4:
+            return value, "code"
         await asyncio.sleep(4)
-    return ""
+    return "", ""
 
 
-async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg: str = ""):
-    number = normalize_phone(phone)
-    if not number:
-        raise RuntimeError("no phone number on item")
+async def _from_key(raw: str, proxy_cfg: str):
+    c = client(session_from_auth_key(raw), proxy_cfg)
+    await c.connect()
+    if not await _alive(c):
+        try:
+            await c.disconnect()
+        except Exception:
+            pass
+        raise RuntimeError("auth key rejected")
+    return c, c.session.save()
 
+
+async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: str):
     c = client("", proxy_cfg)
     await c.connect()
     try:
-        try:
-            sent = await c.send_code_request(number)
-        except FloodWaitError as e:
-            wait = min(int(e.seconds) + 2, 120)
-            log.info(f"flood wait {wait}s before sending code for {item_id}")
-            await asyncio.sleep(wait)
-            sent = await c.send_code_request(number)
-
+        sent = await _send_code(c, number)
         last: Exception | None = None
 
         for attempt in range(3):
-            code = await _await_code(lzt, item_id, CODE_TIMEOUT)
-            if not code:
+            value, mode = await _await_code(lzt, item_id, CODE_TIMEOUT)
+
+            if mode == "auth_key" and value:
+                try:
+                    key_c, key_str = await _from_key(value, proxy_cfg)
+                    return key_c, key_str, 0
+                except Exception as e:
+                    last = e
+                    continue
+
+            if not value:
+                if attempt == 0:
+                    await _reset(lzt, item_id)
+                    await asyncio.sleep(2.0)
+                    sent = await _send_code(c, number)
+                    continue
                 raise RuntimeError("LZT login code not received")
+
             try:
-                await c.sign_in(phone=number, code=code,
+                await c.sign_in(phone=number, code=value,
                                 phone_code_hash=sent.phone_code_hash)
                 break
             except SessionPasswordNeededError:
@@ -98,13 +198,9 @@ async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg
                 break
             except (PhoneCodeInvalidError, PhoneCodeExpiredError) as e:
                 last = e
-                log.info(f"code rejected for {item_id}, retrying ({attempt + 1}/3)")
+                log.info(f"code rejected for {item_id} ({attempt + 1}/3)")
                 if isinstance(e, PhoneCodeExpiredError):
-                    try:
-                        sent = await c.send_code_request(number)
-                    except FloodWaitError as fw:
-                        await asyncio.sleep(min(int(fw.seconds) + 2, 120))
-                        sent = await c.send_code_request(number)
+                    sent = await _send_code(c, number)
                 await asyncio.sleep(3)
         else:
             raise RuntimeError(f"login code rejected: {last}")
@@ -120,6 +216,46 @@ async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg
         except Exception:
             pass
         raise
+
+
+async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg: str = ""):
+    number = normalize_phone(phone)
+    if not number:
+        raise RuntimeError("no phone number on item")
+
+    try:
+        key = await lzt.auth_key(item_id)
+    except LztError as e:
+        log.info(f"auth key {item_id}: {e}")
+        key = ""
+
+    if key:
+        try:
+            c, session_str = await _from_key(key, proxy_cfg)
+            await _reset(lzt, item_id)
+            await asyncio.sleep(1.5)
+            if await _alive(c):
+                return c, session_str, 0
+            await c.disconnect()
+        except Exception as e:
+            log.info(f"auth key login {item_id}: {e}")
+
+    await _reset(lzt, item_id)
+    await asyncio.sleep(2.5)
+
+    c, session_str, uid = await _code_login(number, password, item_id, lzt, proxy_cfg)
+
+    await _reset(lzt, item_id)
+    await asyncio.sleep(1.5)
+    if await _alive(c):
+        return c, session_str, uid
+
+    try:
+        await c.disconnect()
+    except Exception:
+        pass
+    log.info(f"session died after reset {item_id}, reissuing")
+    return await _code_login(number, password, item_id, lzt, proxy_cfg)
 
 
 async def check_session(session_string: str, proxy_cfg: str = ""):
@@ -182,9 +318,15 @@ async def set_2fa(c: TelegramClient, password: str, current: str = ""):
         try:
             await c.edit_2fa(new_password=password, current_password=attempt, hint="")
             return
+        except FloodWaitError as e:
+            await asyncio.sleep(min(int(e.seconds) + 2, 60))
+            try:
+                await c.edit_2fa(new_password=password, current_password=attempt, hint="")
+                return
+            except Exception as inner:
+                last = inner
         except (PasswordHashInvalidError, SessionPasswordNeededError) as e:
             last = e
-            continue
     if last:
         raise last
 
@@ -198,7 +340,6 @@ async def spambot_status(c: TelegramClient) -> str:
         except Exception as e:
             log.info(f"spambot entity: {e}")
             return ""
-
     try:
         async with c.conversation(bot, timeout=30) as conv:
             await conv.send_message("/start")
@@ -234,7 +375,7 @@ async def owned_counts(c: TelegramClient) -> tuple[int, int, int]:
     except Exception as e:
         log.info(f"owned channels: {e}")
     try:
-        async for d in c.iter_dialogs(limit=200):
+        async for d in c.iter_dialogs(limit=120):
             if d.is_group and getattr(d.entity, "creator", False):
                 groups += 1
             elif d.is_user and getattr(d.entity, "bot", False):
