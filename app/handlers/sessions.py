@@ -1,12 +1,13 @@
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import BufferedInputFile, CallbackQuery, Message
+from aiogram.types import CallbackQuery, Message
 
 from app import db, keyboards as kb
 from app.deps import lzt
 from app.handlers.menu import show
 from app.lzt import LztError
 from app.session_manager import check_session, client, terminate
+from app.utils import tg
 from app.utils.texts import session_detail, session_file
 from app.utils.timeutil import fmt_dt, now
 
@@ -29,7 +30,7 @@ async def cmd_session(m: Message):
         p = await db.find_by_phone(m.from_user.id, arg[1].strip())
         if not p:
             return await m.answer("not found")
-        return await m.answer(session_detail(p), reply_markup=kb.session_detail(p))
+        return await tg.send(m.bot, m.chat.id, session_detail(p), kb.session_detail(p))
     await _list(m)
 
 
@@ -59,14 +60,15 @@ async def cb_check(cq: CallbackQuery):
 
     await cq.answer("checking…")
     s = await db.get_settings(cq.from_user.id)
-    alive, me = await check_session(p["session_string"], s["proxy"])
+    alive, me = await check_session(p["session_string"], s.get("proxy", ""))
 
     note = "session live" if alive else "session dead"
     if me:
         note += f" · @{me.username or me.id}"
     await db.set_purchase(pid, session_state="live" if alive else "dead", checked_at=now())
     p = await db.get_purchase(pid)
-    await show(cq, session_detail(p, f"🔎 {note} · {fmt_dt(now())}"), kb.session_detail(p))
+    await show(cq, session_detail(p, f"🔎 {note} · {fmt_dt(now())}"),
+               kb.session_detail(p))
 
 
 @router.callback_query(F.data.startswith("f:"))
@@ -74,9 +76,8 @@ async def cb_file(cq: CallbackQuery):
     p = await db.get_purchase(cq.data.split(":", 1)[1])
     if not p:
         return await cq.answer("gone", show_alert=True)
-    name = (p.get("phone") or str(p["item_id"])).lstrip("+")
-    await cq.message.answer_document(
-        BufferedInputFile(session_file(p).encode(), filename=f"{name}.py"))
+    name = (p.get("phone") or str(p["item_id"])).lstrip("+") or "session"
+    await tg.send_document(cq.bot, cq.from_user.id, session_file(p).encode(), f"{name}.py")
     await cq.answer("sent")
 
 
@@ -86,10 +87,11 @@ async def cb_kill(cq: CallbackQuery):
     p = await db.get_purchase(pid)
     if not p:
         return await cq.answer("gone", show_alert=True)
+    s = await db.get_settings(cq.from_user.id)
 
     await db.close_purchase(pid, "killed", "manual clean")
     if p.get("session_string"):
-        c = client(p["session_string"])
+        c = client(p["session_string"], s.get("proxy", ""))
         try:
             await c.connect()
             await terminate(c)
@@ -104,5 +106,6 @@ async def cb_kill(cq: CallbackQuery):
         await lzt.reset_authorizations(p["item_id"])
     except LztError:
         pass
-    await show(cq, f"cleaned <code>{p.get('phone')}</code>", kb.back("m:sessions"))
+    await show(cq, f"cleaned <code>{tg.esc(p.get('phone') or p['item_id'])}</code>",
+               kb.back("m:sessions"))
     await cq.answer("cleaned")
