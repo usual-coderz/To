@@ -151,11 +151,7 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         expires_at=due, target_age_hours=target, age_at_buy_hours=age,
         account_created_ts=created, spam_flag=(soft == "spam_flag"), note="bought")
 
-    purchase = await db.get_purchase(pid)
-    if purchase:
-        purchase["password"] = password
-        await _notify_card(bot, tg_id, purchase, "bought")
-
+    log.info(f"bought {item_id} pid={pid} age={age:.2f}h due_in={due - time.time():.0f}s")
     _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, s))
     return True, (soft or "bought")
 
@@ -187,7 +183,7 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, s):
         if int(p.get("expires_at") or 0) <= time.time():
             await clean_purchase(bot, lzt, p)
         else:
-            await _notify_card(bot, tg_id, p, "queued")
+            log.info(f"queued {item_id} for {int(p['expires_at']) - int(time.time())}s")
 
 
 async def _mail_client_for(p: dict, s: dict):
@@ -238,8 +234,12 @@ async def clean_purchase(bot, lzt, p: dict):
             addr = ""
         password = s.get("twofa_password") or db.DEFAULT_2FA
 
-        killed = await reset_others(c)
-        note.append(f"devices reset {killed}")
+        if addr and s.get("change_mail_on_expire") == "1":
+            try:
+                await change_email(c, addr, mc)
+                note.append("mail changed")
+            except Exception as e:
+                note.append(f"mail fail: {e}")
 
         try:
             await set_2fa(c, password, p.get("password") or "")
@@ -247,12 +247,9 @@ async def clean_purchase(bot, lzt, p: dict):
         except Exception as e:
             note.append(f"2fa fail: {e}")
 
-        if addr and s.get("change_mail_on_expire") == "1":
-            try:
-                await change_email(c, addr, mc)
-                note.append("mail changed")
-            except Exception as e:
-                note.append(f"mail fail: {e}")
+        if s.get("terminate_on_expire") == "1":
+            killed = await reset_others(c)
+            note.append(f"devices reset {killed}")
 
         data["spam"] = await spambot_status(c)
         data["devices"] = await device_list(c)
