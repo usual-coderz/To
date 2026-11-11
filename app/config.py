@@ -1,4 +1,3 @@
-"""Global configuration — env driven."""
 import os
 
 from dotenv import load_dotenv
@@ -13,6 +12,13 @@ os.makedirs(DATA_DIR, exist_ok=True)
 def _int(v, d=0):
     try:
         return int(v)
+    except (TypeError, ValueError):
+        return d
+
+
+def _float(v, d=0.0):
+    try:
+        return float(v)
     except (TypeError, ValueError):
         return d
 
@@ -39,12 +45,14 @@ MAX_SCAN: int = 80
 POLL_MIN: int = 5
 POLL_MAX: int = 3600
 
+QUEUE_TARGET_HOURS: float = _float(os.getenv("QUEUE_TARGET_HOURS"), 24.0) or 24.0
+TWOFA_PASSWORD: str = os.getenv("TWOFA_PASSWORD", "").strip()
+
 CACHE_TTL: float = 20.0
 PAYMENTS_PAGE: int = 10
 
 EXPIRY_RETRY: int = 8
 EXPIRY_RETRY_DELAY: int = 300
-EXPIRY_LOGIN_GRACE: int = 3600
 
 REPORT_KEEP_HOURS: int = 72
 
