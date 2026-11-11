@@ -156,13 +156,13 @@ async def cb_step(cq: CallbackQuery):
         return await cq.answer()
 
     live = {b["balance_id"]: b for b in wallet_view.exchangable(snap) if b.get("balance_id")}
-    pool = [b for b in st.get("pool") or [] if b.get("balance_id") in live]
+    st["pool"] = [b for b in st.get("pool") or [] if b.get("balance_id") in live]
+    pool = list(st["pool"])
     if step == "to":
         pool = [b for b in pool if b["balance_id"] != st.get("from_id")]
     if not pool:
         EXCH.pop(cq.from_user.id, None)
         return await cq.answer("balances changed, restart", show_alert=True)
-    st["pool"] = [b for b in st.get("pool") or [] if b.get("balance_id") in live]
     if idx >= len(pool):
         return await cq.answer("pick again", show_alert=True)
 
@@ -221,7 +221,6 @@ async def cb_amount_btn(cq: CallbackQuery):
         except ValueError:
             return await cq.answer("bad amount", show_alert=True)
 
-    st["busy"] = True
     chat_id, message_id = st.get("prompt") or (cq.message.chat.id, cq.message.message_id)
     await _deliver(cq.bot, cq.from_user.id, amount, chat_id, message_id)
     await cq.answer("done")
@@ -254,11 +253,14 @@ async def cmd_amount(m: Message):
 async def on_amount(m: Message):
     if (m.text or "").startswith("/"):
         return
+    st = _st(m.from_user.id)
+    if st.get("busy"):
+        return await m.answer("busy…")
     try:
         amount = float(m.text.replace(",", ".").strip())
     except ValueError:
         return await m.answer("number expected · /cancel")
-    chat_id, message_id = (_st(m.from_user.id).get("prompt") or (0, 0))
+    chat_id, message_id = (st.get("prompt") or (0, 0))
     await _deliver(m.bot, m.from_user.id, amount, chat_id, message_id)
 
 
@@ -272,21 +274,22 @@ async def _do(uid: int, bot, amount: float) -> str:
         return "⚠️ amount must be a positive number"
 
     try:
-        balances = await lzt.balances()
+        balances = await lzt.balances(use_cache=False)
     except LztError as e:
-        st["busy"] = False
         return f"⚠️ {tg.esc(str(e))}"
 
     src = next((b for b in balances if b.get("balance_id") == st["from_id"]), None)
     if not src:
         EXCH.pop(uid, None)
         return "⚠️ source balance gone, restart"
+    if not any(b.get("balance_id") == st["to_id"] for b in balances):
+        EXCH.pop(uid, None)
+        return "⚠️ target balance gone, restart"
+
     avail = free_of(src)
     if amount < 0.01:
-        st["busy"] = False
         return f"⚠️ minimum is {fmt_money(0.01, st['cur'])}"
     if amount > avail + 1e-9:
-        st["busy"] = False
         return f"⚠️ only {fmt_money(avail, st['cur'])} available"
 
     st["busy"] = True
