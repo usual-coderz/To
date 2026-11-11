@@ -6,11 +6,9 @@ import re
 
 from telethon import TelegramClient, functions
 from telethon.crypto import AuthKey
-from telethon.errors import (AuthRestartError, FloodWaitError,
-                             PasswordHashInvalidError, PhoneCodeExpiredError,
-                             PhoneCodeInvalidError, SendCodeUnavailableError,
-                             SessionPasswordNeededError)
-from telethon.errors.rpcbaseerrors import ResendCodeRequestError
+from telethon.errors import (FloodWaitError, PasswordHashInvalidError,
+                             PhoneCodeExpiredError, PhoneCodeInvalidError,
+                             RPCError, SessionPasswordNeededError)
 from telethon.sessions import StringSession
 
 from app.config import API_HASH, API_ID, CODE_TIMEOUT
@@ -24,6 +22,8 @@ DEVICE = dict(device_model="AccStore", system_version="2.1",
 _PROXY_RE = re.compile(r"(socks5|socks4|http)://(?:([^:@]+):([^@]+)@)?([^:]+):(\d+)")
 
 _FALLBACK_DC = (2, "149.154.167.51", 443)
+
+_RESEND_HINTS = ("RESEND_CODE", "ALL AVAILABLE OPTIONS", "SEND_CODE_UNAVAILABLE")
 
 
 def normalize_phone(raw) -> str:
@@ -106,6 +106,11 @@ def session_from_auth_key(raw: str) -> str:
     return session.save()
 
 
+def _hint(error: BaseException) -> str:
+    message = getattr(error, "message", "") or ""
+    return f"{message} {error}".upper()
+
+
 async def _reset(lzt, item_id: int) -> bool:
     try:
         await lzt.reset_authorizations(item_id)
@@ -124,32 +129,36 @@ async def _alive(c: TelegramClient) -> bool:
         return False
 
 
-async def _send_code(c: TelegramClient, number: str, previous: str = ""):
-    last: Exception | None = None
+async def _send_code(c: TelegramClient, number: str, previous: str = "") -> str:
+    last: BaseException | None = None
+
     for _ in range(3):
         try:
-            return await c.send_code_request(number)
-        except ResendCodeRequestError as e:
-            last = e
-            if not previous:
-                await asyncio.sleep(3)
-                continue
-            try:
-                await c(functions.auth.ResendCodeRequest(phone_number=number,
-                                                         phone_code_hash=previous))
-                return previous
-            except Exception as inner:
-                last = inner
-                await asyncio.sleep(3)
+            sent = await c.send_code_request(number)
+            return sent.phone_code_hash
         except FloodWaitError as e:
             last = e
-            await asyncio.sleep(min(int(e.seconds) + 2, 120))
-        except SendCodeUnavailableError as e:
+            wait = min(int(e.seconds) + 2, 120)
+            log.info(f"flood wait {wait}s")
+            await asyncio.sleep(wait)
+        except RPCError as e:
             last = e
-            await asyncio.sleep(15)
-        except AuthRestartError as e:
-            last = e
-            await asyncio.sleep(2)
+            text = _hint(e)
+            if previous and any(h in text for h in _RESEND_HINTS):
+                try:
+                    await c(functions.auth.ResendCodeRequest(
+                        phone_number=number, phone_code_hash=previous))
+                    return previous
+                except FloodWaitError as fw:
+                    await asyncio.sleep(min(int(fw.seconds) + 2, 120))
+                except RPCError as inner:
+                    last = inner
+                    log.info(f"resend {number}: {inner}")
+                    await asyncio.sleep(3)
+            else:
+                log.info(f"send code {number}: {e}")
+                await asyncio.sleep(5)
+
     if last:
         raise last
     raise RuntimeError("send code failed")
@@ -188,8 +197,8 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
     c = client("", proxy_cfg)
     await c.connect()
     try:
-        sent = await _send_code(c, number)
-        last: Exception | None = None
+        code_hash = await _send_code(c, number)
+        last: BaseException | None = None
 
         for attempt in range(3):
             value, mode = await _await_code(lzt, item_id, CODE_TIMEOUT)
@@ -210,13 +219,12 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
                 if attempt < 2:
                     await _reset(lzt, item_id)
                     await asyncio.sleep(2.0)
-                    sent = await _send_code(c, number, sent.phone_code_hash)
+                    code_hash = await _send_code(c, number, code_hash)
                     continue
                 raise RuntimeError("LZT login code not received")
 
             try:
-                await c.sign_in(phone=number, code=value,
-                                phone_code_hash=sent.phone_code_hash)
+                await c.sign_in(phone=number, code=value, phone_code_hash=code_hash)
                 break
             except SessionPasswordNeededError:
                 if not password:
@@ -227,7 +235,7 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
                 last = e
                 log.info(f"code rejected for {item_id} ({attempt + 1}/3)")
                 if isinstance(e, PhoneCodeExpiredError):
-                    sent = await _send_code(c, number, sent.phone_code_hash)
+                    code_hash = await _send_code(c, number, code_hash)
                 await asyncio.sleep(3)
         else:
             raise RuntimeError(f"login code rejected: {last}")
