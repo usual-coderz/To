@@ -2,11 +2,9 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from app import db, engine, keyboards as kb
-from app.deps import lzt
+from app import db, keyboards as kb
 from app.handlers.menu import show
-from app.lzt import LztError
-from app.session_manager import check_session, client, terminate
+from app.session_manager import check_session
 from app.utils import tg
 from app.utils.texts import session_detail, session_file
 from app.utils.timeutil import fmt_dt, now
@@ -74,38 +72,3 @@ async def cb_file(cq: CallbackQuery):
     name = (p.get("phone") or str(p["item_id"])).lstrip("+") or "session"
     await tg.send_document(cq.bot, cq.from_user.id, session_file(p).encode(), f"{name}.py")
     await cq.answer("sent")
-
-
-@router.callback_query(F.data.startswith("k:"))
-async def cb_kill(cq: CallbackQuery):
-    pid = cq.data.split(":", 1)[1]
-    p = await db.get_purchase(pid)
-    if not p or p["tg_id"] != cq.from_user.id:
-        return await cq.answer("gone", show_alert=True)
-    if p.get("status") == "queued":
-        await cq.answer("cleaning…")
-        await engine.clean_purchase(cq.bot, lzt, p)
-        return
-    if not p.get("session_string"):
-        return await cq.answer("no session", show_alert=True)
-
-    s = await db.get_settings(cq.from_user.id)
-    await cq.answer("cleaning…")
-    c = client(p["session_string"], s.get("proxy", ""))
-    try:
-        await c.connect()
-        await terminate(c)
-    except Exception:
-        pass
-    finally:
-        try:
-            await c.disconnect()
-        except Exception:
-            pass
-    try:
-        await lzt.reset_authorizations(p["item_id"])
-    except LztError:
-        pass
-    await db.close_purchase(pid, "killed", "manual clean")
-    await show(cq, f"cleaned <code>{tg.esc(p.get('phone') or p['item_id'])}</code>",
-               kb.back("m:sessions"))
