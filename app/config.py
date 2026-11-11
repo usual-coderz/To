@@ -38,7 +38,7 @@ HTTP_TIMEOUT: int = 40
 HTTP_RETRIES: int = 3
 HTTP_BACKOFF: float = 1.6
 TICK: float = 15.0
-CODE_TIMEOUT: int = 180
+CODE_TIMEOUT: int = 150
 LOGIN_CONCURRENCY: int = 4
 
 MAX_SCAN: int = 80
@@ -46,14 +46,22 @@ POLL_MIN: int = 5
 POLL_MAX: int = 3600
 
 QUEUE_TARGET_HOURS: float = _float(os.getenv("QUEUE_TARGET_HOURS"), 24.0) or 24.0
-TWOFA_PASSWORD: str = os.getenv("TWOFA_PASSWORD", "ivan").strip()
+SETTLE_SECONDS: int = _int(os.getenv("SETTLE_SECONDS"), 60)
+TWOFA_PASSWORD: str = (os.getenv("TWOFA_PASSWORD", "AccStore2fa").strip() or "AccStore2fa")
 
 CACHE_TTL: float = 20.0
 PAYMENTS_PAGE: int = 10
 
 EXPIRY_RETRY: int = 8
 EXPIRY_RETRY_DELAY: int = 300
+SESSION_RETRY: int = 3
+STALE_CLEAN_SECONDS: int = 900
 
 REPORT_KEEP_HOURS: int = 72
+PURCHASE_KEEP_DAYS: int = _int(os.getenv("PURCHASE_KEEP_DAYS"), 90)
 
-QUICK_COUNTRIES = ["AE", "LY", "JO", "EG", "IQ", "SA", "KW", "QA", "SD", "YE", "MA", "DZ"]
+MAIL_TIMEOUT: int = _int(os.getenv("MAIL_TIMEOUT"), 120)
+MAIL_POLL: float = 3.0
+MAIL_PROXY_RETRY: float = 6.0
+MAIL_CLAIM_ROUNDS: int = _int(os.getenv("MAIL_CLAIM_ROUNDS"), 2)
+MAIL_PREFER_DOMAIN: str = os.getenv("MAIL_PREFER_DOMAIN", "maxxspace.com").strip().lower()
