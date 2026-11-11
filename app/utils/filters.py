@@ -14,10 +14,11 @@ _COUNTRY_RE = re.compile(r"\(([A-Za-z]{2})\)")
 _PHONE_RE = re.compile(r"\+\d{6,16}")
 
 _CREATED_KEYS = (
-    "created_at", "creation_date", "registration_date", "telegram_registration_date",
-    "telegram_created_at", "registered_at", "item_created_at", "account_created_at",
+    "telegram_registration_date", "telegram_created_at", "registration_date",
+    "creation_date", "account_created_at", "registered_at", "telegram_registered_at",
+    "created_at", "item_created_at",
 )
-_CREATED_NESTED = ("item_origin", "origin", "telegram", "item", "meta", "account")
+_CREATED_NESTED = ("telegram", "item_origin", "origin", "account", "meta", "item")
 
 _AGE_NUM_KEYS = ("telegram_session_age", "session_age", "session_age_hours",
                  "session_age_seconds")
@@ -191,10 +192,23 @@ def session_hours(item: dict) -> float | None:
 
 
 def age_hours_of(item: dict, at: int | None = None) -> float | None:
+    declared = session_hours(item)
+    if declared is not None:
+        return declared
     created = account_created_ts(item)
     if created:
         return age_hours(created, at)
-    return session_hours(item)
+    return None
+
+
+def age_for_queue(item: dict) -> float:
+    declared = session_hours(item)
+    if declared is not None:
+        return max(0.0, declared)
+    created = account_created_ts(item)
+    if created:
+        return age_hours(created) or 0.0
+    return 0.0
 
 
 def search_query(s: dict) -> dict:
