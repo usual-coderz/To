@@ -1,4 +1,3 @@
-"""Button-only navigation — every screen edits the current message."""
 from aiogram.types import InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
@@ -14,7 +13,6 @@ MAX_DATA = 64
 
 
 def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
-    """Build a markup, dropping empty rows and oversized callback data."""
     b = InlineKeyboardBuilder()
     widths: list[int] = []
     for row in rows:
@@ -37,8 +35,6 @@ def _onoff(flag: str, on: str, off: str) -> str:
     return on if flag == "1" else off
 
 
-# ─── main ──────────────────────────────────────────────────────────────────
-
 def main(s: dict) -> InlineKeyboardMarkup:
     return kb([
         [("⏸ Stop" if s["auto_buy"] == "1" else "▶️ Start", "t:auto_buy")],
@@ -48,19 +44,14 @@ def main(s: dict) -> InlineKeyboardMarkup:
     ])
 
 
-# ─── filters ───────────────────────────────────────────────────────────────
-
 def filters(s: dict) -> InlineKeyboardMarkup:
     return kb([
         [(f"Price {s['price_min']}–{s['price_max']}", "m:price")],
         [(f"Spam: {s['spam_mode']}", "m:spam"), (f"Mail: {s['mail_mode']}", "m:mail")],
-        [(f"2FA: {s['password_mode']}", "m:pass"),
-         (f"Target: {s['session_life_hours']}h", "m:life")],
-        [(f"Min age {s['session_min_hours']}h", "in:session_min_hours"),
-         (f"Max age {s['session_max_hours']}h", "in:session_max_hours")],
+        [(f"2FA: {s['password_mode']}", "m:pass")],
+        [(f"Min age {s['session_min_hours']}h", "in:session_min_hours")],
         [("Include countries", "in:countries"), ("Exclude countries", "in:deny_countries")],
-        [(f"Resold {_onoff(s['nsb_only'], 'on', 'off')}", "t:nsb_only"),
-         ("Limits", BACK_LIMITS)],
+        [("Limits", BACK_LIMITS)],
         [("Back", BACK_MAIN)],
     ])
 
@@ -79,13 +70,13 @@ def limits(s: dict) -> InlineKeyboardMarkup:
         [(f"Daily cap ${s['daily_spend_cap']}", "in:daily_spend_cap")],
         [(f"Buys/cycle {s['max_buy_per_cycle']}", "in:max_buy_per_cycle"),
          (f"Poll {s['poll_interval']}s", "in:poll_interval")],
-        [(f"Early clean {_onoff(s['early_clean_if_aged'], 'on', 'off')}",
-          "t:early_clean_if_aged"),
-         (f"Terminate {_onoff(s['terminate_on_expire'], 'on', 'off')}",
-          "t:terminate_on_expire")],
-        [(f"Change mail {_onoff(s['change_mail_on_expire'], 'on', 'off')}",
-          "t:change_mail_on_expire"),
-         (f"Mail src {s['mail_provider']}", "m:mailprov")],
+        [(f"Clean at {s['queue_target_hours']}h", "in:queue_target_hours")],
+        [(f"Terminate {_onoff(s['terminate_on_expire'], 'on', 'off')}",
+          "t:terminate_on_expire"),
+         (f"Change mail {_onoff(s['change_mail_on_expire'], 'on', 'off')}",
+          "t:change_mail_on_expire")],
+        [(f"Mail src {s['mail_provider']}", "m:mailprov"),
+         (f"2FA pwd {s['twofa_password']}", "in:twofa_password")],
         [("Back", BACK_FILTERS)],
     ])
 
@@ -104,18 +95,12 @@ def pick(prefix: str, values: list[str], back_to: str = BACK_FILTERS) -> InlineK
     return kb(rows)
 
 
-def targets() -> InlineKeyboardMarkup:
-    return pick("s:session_life_hours", ["12", "20", "23", "24", "36", "48"])
-
-
-def floors() -> InlineKeyboardMarkup:
-    return pick("s:session_min_hours", ["0", "12", "18", "23", "24"])
-
-
-# ─── sessions ─────────────────────────────────────────────────────────────
-
 def sessions(items: list[dict]) -> InlineKeyboardMarkup:
-    rows = [[(f"📱 {p.get('phone') or p['item_id']}", f"v:{p['_id']}")] for p in items]
+    rows = []
+    for p in items:
+        state = "✅" if p.get("status") == "ready" else "⏳"
+        label = f"{state} {p.get('phone') or p['item_id']}"
+        rows.append([(label[:40], f"v:{p['_id']}")])
     rows.append([("Refresh", BACK_SESSIONS)])
     rows.append([("Back", BACK_MAIN)])
     return kb(rows)
@@ -123,15 +108,14 @@ def sessions(items: list[dict]) -> InlineKeyboardMarkup:
 
 def session_detail(p: dict) -> InlineKeyboardMarkup:
     pid = p["_id"]
-    return kb([
-        [("Session file", f"f:{pid}"), ("Check", f"c:{pid}")],
-        [("Clean now", f"k:{pid}"), ("Refresh", f"v:{pid}")],
-        [("Back", BACK_SESSIONS)],
-    ])
+    rows = [[("Session file", f"f:{pid}"), ("Check", f"c:{pid}")]]
+    if p.get("status") == "queued":
+        rows.append([("Clean now", f"k:{pid}")])
+    rows.append([("Back", BACK_SESSIONS)])
+    return kb(rows)
 
 
 def bought(p: dict) -> InlineKeyboardMarkup:
-    """Attached to every purchase notification — never empty."""
     pid = p["_id"]
     return kb([
         [("Open", f"v:{pid}"), ("Session file", f"f:{pid}")],
@@ -139,7 +123,13 @@ def bought(p: dict) -> InlineKeyboardMarkup:
     ])
 
 
-# ─── wallet ───────────────────────────────────────────────────────────────
+def audit(p: dict) -> InlineKeyboardMarkup:
+    pid = p["_id"]
+    return kb([
+        [("Session file", f"f:{pid}"), ("Check", f"c:{pid}")],
+        [("Sessions", BACK_SESSIONS), ("Menu", BACK_MAIN)],
+    ])
+
 
 def wallet(entries: list[dict]) -> InlineKeyboardMarkup:
     rows = [[("Refresh", BACK_WALLET), ("Payments", "m:payments")]]
@@ -151,7 +141,6 @@ def wallet(entries: list[dict]) -> InlineKeyboardMarkup:
 
 def exchange(pool: list[dict], step: str, offset: int = 0,
              page_size: int = 8) -> InlineKeyboardMarkup:
-    """Paged picker; the index is absolute so paging never shifts targets."""
     chunk = pool[offset:offset + page_size]
     rows: list[list[tuple[str, str]]] = []
     row: list[tuple[str, str]] = []
@@ -182,8 +171,6 @@ def amount(currency: str, available: float) -> InlineKeyboardMarkup:
         quick = [(fmt_money(max(0.01, min(available, 10)), currency), "xa:max")]
     return kb([quick, [("Max", "xa:max"), ("Cancel", "xc")]])
 
-
-# ─── report ───────────────────────────────────────────────────────────────
 
 def report() -> InlineKeyboardMarkup:
     return kb([
