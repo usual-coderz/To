@@ -10,7 +10,7 @@ from aiogram.types import CallbackQuery, ErrorEvent, Message
 from app import db
 from app.config import BOT_TOKEN, MONGO_DB, MONGO_URI, OWNER_IDS
 from app.deps import lzt
-from app.engine import buy_loop, drain_bg, expiry_loop
+from app.engine import buy_loop, cleaner_loop, drain_bg
 from app.handlers import ROUTERS
 from app.handlers.menu import allowed
 
@@ -74,7 +74,7 @@ async def main():
         dp.include_router(r)
 
     tasks = [asyncio.create_task(_supervise("buy_loop", buy_loop, bot, lzt)),
-             asyncio.create_task(_supervise("expiry_loop", expiry_loop, bot, lzt))]
+             asyncio.create_task(_supervise("cleaner_loop", cleaner_loop, bot, lzt))]
 
     log.info("bot up")
     try:
