@@ -7,6 +7,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app import db, keyboards as kb
 from app.handlers.menu import show
+from app.utils import tg
 from app.utils.texts import filters_text, limits_text
 
 router = Router()
@@ -17,13 +18,15 @@ PENDING: dict[int, dict] = {}
 NUMERIC = {
     "price_min": ("Min price", "cheapest allowed account price", 0.01, 10_000.0, 2),
     "price_max": ("Max price", "most expensive allowed account price", 0.01, 10_000.0, 2),
-    "session_min_hours": ("Min account age", "0 = any · hours (created time)", 0.0, 87_600.0, 1),
-    "session_max_hours": ("Max account age", "0 = no cap · hours (created time)", 0.0, 87_600.0, 1),
-    "session_life_hours": ("Lifetime after buy", "hours until auto logout", 0.0, 87_600.0, 1),
+    "session_min_hours": ("Min account age", "0 = any · hours", 0.0, 87_600.0, 1),
+    "queue_target_hours": ("Clean at age", "hours the account must reach first",
+                           1.0, 87_600.0, 1),
     "daily_spend_cap": ("Daily spend cap", "0 = unlimited", 0.0, 100_000.0, 2),
     "max_buy_per_cycle": ("Buys per cycle", "1-100", 1.0, 100.0, 0),
     "poll_interval": ("Poll interval", "seconds, 5-3600", 5.0, 3_600.0, 0),
 }
+
+TEXT_KEYS = {"twofa_password": "8-64 characters, used as the new cloud password"}
 
 COUNTRY_KEYS = {
     "countries": "only these countries get bought",
@@ -31,8 +34,8 @@ COUNTRY_KEYS = {
 }
 
 LIMIT_KEYS = {
-    "daily_spend_cap", "max_buy_per_cycle", "poll_interval", "early_clean_if_aged",
-    "terminate_on_expire", "change_mail_on_expire", "mail_provider",
+    "daily_spend_cap", "max_buy_per_cycle", "poll_interval", "queue_target_hours",
+    "terminate_on_expire", "change_mail_on_expire", "mail_provider", "twofa_password",
 }
 
 _SPLIT_RE = re.compile(r"[,\s;|]+")
@@ -83,9 +86,7 @@ async def _replace(bot, chat_id: int, message_id: int, text: str, markup):
     if chat_id and message_id:
         try:
             await bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id,
-                                        reply_markup=markup,
-                                        link_preview_options=__import__(
-                                            "app.utils.tg", fromlist=["LP"]).LP)
+                                        reply_markup=markup, link_preview_options=tg.LP)
             return
         except Exception:
             pass
@@ -141,18 +142,6 @@ async def cb_mailprov(cq: CallbackQuery):
     await cq.answer()
 
 
-@router.callback_query(F.data == "m:sess")
-async def cb_sess(cq: CallbackQuery):
-    await show(cq, "<b>Min account age</b> (0 = any)", kb.floors())
-    await cq.answer()
-
-
-@router.callback_query(F.data == "m:life")
-async def cb_life(cq: CallbackQuery):
-    await show(cq, "<b>Lifetime after buy</b>\nreached → auto clean", kb.targets())
-    await cq.answer()
-
-
 @router.callback_query(F.data.startswith("s:"))
 async def cb_set(cq: CallbackQuery):
     parts = cq.data.split(":", 2)
@@ -176,6 +165,9 @@ async def cb_input(cq: CallbackQuery):
     elif key in NUMERIC:
         label, hint, lo, hi, _ = NUMERIC[key]
         body = f"Send a number ({lo:g}-{hi:g}) · /cancel"
+    elif key in TEXT_KEYS:
+        label, hint = "2FA password", TEXT_KEYS[key]
+        body = "Send the new password · /cancel"
     else:
         return await cq.answer("unknown setting", show_alert=True)
 
@@ -220,7 +212,6 @@ async def on_text(m: Message):
     raw = (m.text or "").strip()
 
     if key in COUNTRY_KEYS:
-        # commas stay separators here — never normalise them to dots
         tokens = [t for t in _SPLIT_RE.split(raw) if t]
         if len(tokens) == 1 and tokens[0].lower() in ("all", "-", "clear", "none"):
             val = ""
@@ -230,6 +221,12 @@ async def on_text(m: Message):
                 _set_pending(m.from_user.id, key, hit["chat_id"], hit["message_id"])
                 return await m.answer("need ISO codes like AE,LY · /cancel")
             val = ",".join(dict.fromkeys(codes))
+        stored = await db.set_setting(m.from_user.id, key, val)
+    elif key in TEXT_KEYS:
+        val = "".join(raw.split())
+        if not 8 <= len(val) <= 64 or not val.isascii():
+            _set_pending(m.from_user.id, key, hit["chat_id"], hit["message_id"])
+            return await m.answer("8-64 ascii characters · /cancel")
         stored = await db.set_setting(m.from_user.id, key, val)
     else:
         label, _, lo, hi, _ = NUMERIC[key]
@@ -247,14 +244,13 @@ async def on_text(m: Message):
         return await m.answer("unknown setting")
 
     note = ""
-    if key in ("session_min_hours", "session_max_hours"):
-        if 0 < db.num(stored) < 24:
-            note = ("\n⚠️ below 24h the market filter cannot apply (day granularity) — "
-                    "checked locally after check-account")
+    if key == "session_min_hours" and 0 < db.num(stored) < 24:
+        note = ("\n⚠️ below 24h the market filter cannot apply (day granularity) — "
+                "checked locally after check-account")
 
     s = await db.get_settings(m.from_user.id)
     screen = screen_for(key)
     text = limits_text(s) if screen == "limits" else filters_text(s)
     markup = kb.limits(s) if screen == "limits" else kb.filters(s)
     await _replace(m.bot, hit["chat_id"], hit["message_id"],
-                   f"✅ saved <code>{stored or '-'}</code>{note}\n\n{text}", markup)
+                   f"✅ saved <code>{tg.esc(stored or '-')}</code>{note}\n\n{text}", markup)
