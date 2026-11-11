@@ -8,6 +8,7 @@ from aiogram.types import Message
 from app import db, engine
 from app.config import OWNER_IDS
 from app.deps import lzt
+from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import mail_state, pass_state, spam_state
 from app.utils.money import fmt_money
@@ -36,7 +37,7 @@ async def cmd_sold(m: Message):
     if len(parts) < 3:
         return await m.answer("Usage: /sold <purchase_id> <price>")
     try:
-        price = float(parts[2])
+        price = float(parts[2].replace(",", "."))
     except ValueError:
         return await m.answer("❌ Price must be a number")
     if not await db.mark_sold(parts[1], price):
@@ -55,7 +56,11 @@ async def cmd_buy(m: Message):
 
 async def _run_once(bot, tg_id: int):
     s = await db.get_settings(tg_id)
-    await engine._cycle(bot, lzt, tg_id, s)
+    try:
+        await engine._cycle(bot, lzt, tg_id, s)
+    except Exception as e:
+        await tg.send(bot, tg_id, f"cycle error: <code>{tg.esc(str(e)[:200])}</code>")
+        return
     row = (await db.recent_reports(tg_id, 1) or [{}])[0]
     bits = []
     if row.get("error"):
@@ -66,11 +71,9 @@ async def _run_once(bot, tg_id: int):
         bits.append(f"scan {row['scanned']} · buy {row.get('bought', 0)}")
     reasons = row.get("reasons") or {}
     if reasons:
-        bits.append(", ".join(f"{k}×{v}" for k, v in sorted(reasons.items(), key=lambda x: -x[1])[:4]))
-    try:
-        await bot.send_message(tg_id, "cycle: " + (" · ".join(bits) or "no data"))
-    except Exception:
-        pass
+        bits.append(", ".join(f"{k}×{v}" for k, v in
+                              sorted(reasons.items(), key=lambda x: -x[1])[:4]))
+    await tg.send(bot, tg_id, "cycle: " + (" · ".join(bits) or "no data"))
 
 
 @router.message(Command("diag"))
@@ -87,9 +90,9 @@ async def cmd_diag(m: Message):
         f"price {s['price_min']}–{s['price_max']} · currency {s['currency']}\n"
         f"total {fmt_money(snap['total'], s['currency'])}"
         f" · spendable {fmt_money(snap['spendable'], s['currency'])}\n"
-        f"entries {kinds}\n"
-        f"note {snap['note'] or '—'}\n"
-        f"error {snap['error'] or '—'}"
+        f"entries {tg.esc(kinds)}\n"
+        f"note {tg.esc(snap['note'] or '—')}\n"
+        f"error {tg.esc(snap['error'] or '—')}"
     )
 
 
@@ -104,7 +107,7 @@ async def cmd_peek(m: Message):
     try:
         chk = await lzt.check_account(int(parts[1]))
     except Exception as e:
-        return await m.answer(f"error {e}")
+        return await m.answer(f"error {html.escape(str(e))}")
     item = chk.get("item") or {}
     keep = ("price", "telegram_spam_block", "spam_block", "telegram_email", "email_type",
             "telegram_password", "country", "created_at", "registration_date",
