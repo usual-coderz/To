@@ -1,11 +1,3 @@
-"""Pure filter logic — no IO, unit-testable.
-
-Age comes from the real account creation time first, then session-age fields,
-then the title. Anything unreadable stays "unknown" and never rejects.
-
-Spam is server-authoritative: the search query already carries spam=no/yes, so
-the item flag is only enforced locally when the server was told to ignore spam.
-"""
 from __future__ import annotations
 
 import math
@@ -43,7 +35,6 @@ _PERIOD_HOURS = {
     "г": 8760.0, "год": 8760.0, "года": 8760.0, "лет": 8760.0,
 }
 
-# longest-first so "months" wins over "mo" and "m"
 _UNIT_ALT = "|".join(re.escape(u) for u in sorted(_PERIOD_HOURS, key=len, reverse=True))
 
 _AGE_TEXT_RES = (
@@ -52,10 +43,27 @@ _AGE_TEXT_RES = (
     re.compile(r"(\d+(?:[.,]\d+)?)\s*(" + _UNIT_ALT + r")?\s*(?:session|сесси[ия])"),
 )
 
-_STRIP = str.maketrans({" ": "", "\u00a0": "", ",": ".", "$": "", "€": "", "₽": ""})
+_SYMS = "$€₽₴£₸¥₺"
 
 _TRUE = {"1", "true", "yes", "y", "on", "да", "blocked", "ban", "spam"}
 _FALSE = {"0", "false", "no", "n", "off", "", "none", "nomatter", "-"}
+
+
+def _clean(text: str) -> str:
+    s = str(text).strip()
+    for ch in ("\u00a0", "\u202f", " ", "'"):
+        s = s.replace(ch, "")
+    for sym in _SYMS:
+        s = s.replace(sym, "")
+    if "," in s and "." in s:
+        if s.rfind(",") > s.rfind("."):
+            s = s.replace(".", "").replace(",", ".")
+        else:
+            s = s.replace(",", "")
+    elif "," in s:
+        tail = s.rsplit(",", 1)[1]
+        s = s.replace(",", ".") if len(tail) in (1, 2) else s.replace(",", "")
+    return s
 
 
 def _num(value) -> float | None:
@@ -65,14 +73,13 @@ def _num(value) -> float | None:
         f = float(value)
         return f if math.isfinite(f) else None
     try:
-        f = float(Decimal(str(value).translate(_STRIP)))
+        f = float(Decimal(_clean(value)))
     except (InvalidOperation, TypeError, ValueError):
         return None
     return f if math.isfinite(f) else None
 
 
 def _flag(value) -> bool | None:
-    """Explicit flag → bool; ambiguous text (a date, an address) → None."""
     if isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
@@ -163,12 +170,11 @@ def _age_from_text(item: dict) -> float | None:
             mult = _PERIOD_HOURS.get(unit)
             if mult:
                 return amount * mult
-            return amount * 24.0          # bare number on a market listing = days
+            return amount * 24.0
     return None
 
 
 def session_hours(item: dict) -> float | None:
-    """Age from the numeric fields; unit comes from the period key or the key name."""
     for key in _AGE_NUM_KEYS:
         v = _num(item.get(key))
         if v is None or v <= 0:
@@ -176,11 +182,11 @@ def session_hours(item: dict) -> float | None:
         mult = _period_hours(item) or _unit_from_key(key)
         if mult:
             return v * mult
-        if v > 100_000:                    # seconds
+        if v > 100_000:
             return v / 3600
-        if v > 1_000:                      # already hours
+        if v > 1_000:
             return v
-        return v * 24.0                    # market convention: days
+        return v * 24.0
     return _age_from_text(item)
 
 
@@ -192,7 +198,6 @@ def age_hours_of(item: dict, at: int | None = None) -> float | None:
 
 
 def search_query(s: dict) -> dict:
-    """Server-side age floor only (day granularity is all the API supports)."""
     floor = _num(s.get("session_min_hours")) or 0.0
     days = int(floor // 24)
     if days < 1:
@@ -245,7 +250,6 @@ def _codes(raw: str) -> set[str]:
 
 
 def passes(item: dict, s: dict, authoritative: bool = False) -> tuple[bool, str]:
-    """Returns (ok, reason). Unknown fields never reject."""
     price = _num(item.get("price"))
     if price is not None:
         floor = _num(s.get("price_min")) or 0.0
@@ -272,8 +276,6 @@ def passes(item: dict, s: dict, authoritative: bool = False) -> tuple[bool, str]
 
     unknown = False
 
-    # Server-authoritative: the query already carried spam=no/yes, so the item
-    # flag is only enforced when the server was told to ignore spam.
     spam = spam_state(item)
     mode = s.get("spam_mode", "no")
     if mode == "any":
