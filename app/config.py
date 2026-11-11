@@ -46,7 +46,7 @@ POLL_MIN: int = 5
 POLL_MAX: int = 3600
 
 QUEUE_TARGET_HOURS: float = _float(os.getenv("QUEUE_TARGET_HOURS"), 24.0) or 24.0
-TWOFA_PASSWORD: str = os.getenv("TWOFA_PASSWORD", "").strip()
+TWOFA_PASSWORD: str = os.getenv("TWOFA_PASSWORD", "ivan").strip()
 
 CACHE_TTL: float = 20.0
 PAYMENTS_PAGE: int = 10
