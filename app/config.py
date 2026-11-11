@@ -1,5 +1,6 @@
 """Global configuration — env driven."""
 import os
+
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,8 +29,15 @@ MONGO_DB: str = os.getenv("MONGO_DB", "accstore")
 
 LZT_BASE: str = "https://api.lzt.market"
 HTTP_TIMEOUT: int = 40
+HTTP_RETRIES: int = 3
+HTTP_BACKOFF: float = 1.6
 TICK: float = 15.0
 CODE_TIMEOUT: int = 180
+LOGIN_CONCURRENCY: int = 4
+
+MAX_SCAN: int = 80
+POLL_MIN: int = 5
+POLL_MAX: int = 3600
 
 CACHE_TTL: float = 20.0
 PAYMENTS_PAGE: int = 10
