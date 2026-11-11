@@ -175,31 +175,52 @@ def _spec_key(spec: dict) -> tuple:
 async def _ensure_indexes():
     for coll_name, keys, opts in _INDEXES:
         coll = _db[coll_name]
+
         try:
             cursor = await coll.list_indexes()
-existing = [spec async for spec in cursor]
+            existing = [spec async for spec in cursor]
+
         except Exception as e:
             log.debug(f"list_indexes {coll_name}: {e}")
             existing = []
 
         want = tuple((k, int(d)) for k, d in keys)
-        hit = next((s for s in existing if _spec_key(s) == want), None)
+        hit = next(
+            (s for s in existing if _spec_key(s) == want),
+            None
+        )
 
         if hit:
             if opts.get("unique") and not hit.get("unique"):
                 try:
                     await coll.drop_index(hit["name"])
-                    await coll.create_index(keys, name=hit["name"], **opts)
-                    log.info(f"{coll_name}: {hit['name']} upgraded to unique")
+                    await coll.create_index(
+                        keys,
+                        name=hit["name"],
+                        **opts
+                    )
+                    log.info(
+                        f"{coll_name}: {hit['name']} upgraded to unique"
+                    )
                 except Exception as e:
-                    log.warning(f"{coll_name}: unique upgrade failed: {e}")
+                    log.warning(
+                        f"{coll_name}: unique upgrade failed: {e}"
+                    )
+
             continue
 
         name = "_".join(f"{k}_{d}" for k, d in keys)
+
         try:
-            await coll.create_index(keys, name=name, **opts)
+            await coll.create_index(
+                keys,
+                name=name,
+                **opts
+            )
         except Exception as e:
-            log.warning(f"{coll_name}: index {name}: {e}")
+            log.warning(
+                f"{coll_name}: index {name}: {e}"
+            )
 
 
 async def init_db():
