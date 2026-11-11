@@ -5,6 +5,7 @@ from aiogram.types import CallbackQuery, Message
 from app import db, keyboards as kb
 from app.config import OWNER_IDS
 from app.deps import lzt
+from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.texts import menu_text
 from app.utils.timeutil import fmt_dt
@@ -17,17 +18,7 @@ def allowed(tg_id: int) -> bool:
 
 
 async def show(cq: CallbackQuery, text: str, markup):
-    try:
-        await cq.message.edit_text(text, reply_markup=markup, disable_web_page_preview=True)
-        return
-    except Exception:
-        pass
-    try:
-        await cq.message.edit_caption(caption=text, reply_markup=markup)
-        return
-    except Exception:
-        pass
-    await cq.message.answer(text, reply_markup=markup, disable_web_page_preview=True)
+    await tg.edit(cq.message, text, markup)
 
 
 async def _last_line(tg_id: int) -> str:
@@ -72,7 +63,7 @@ async def render_menu(tg_id: int) -> tuple[str, object]:
 async def cmd_start(m: Message):
     await db.ensure_user(m.from_user.id, m.from_user.username or "")
     text, markup = await render_menu(m.from_user.id)
-    await m.answer(text, reply_markup=markup, disable_web_page_preview=True)
+    await tg.send(m.bot, m.chat.id, text, markup)
 
 
 @router.callback_query(F.data == "m:main")
