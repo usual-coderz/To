@@ -14,7 +14,8 @@ router = Router()
 
 @router.message(Command("report"))
 async def cmd_report(m: Message):
-    await m.answer(report_text(await db.recent_reports(m.from_user.id)), reply_markup=kb.report())
+    await m.answer(report_text(await db.recent_reports(m.from_user.id)),
+                   reply_markup=kb.report())
 
 
 @router.callback_query(F.data.in_({"m:report", "r:view"}))
@@ -25,7 +26,9 @@ async def cb_report(cq: CallbackQuery):
 
 @router.callback_query(F.data == "m:stats")
 async def cb_stats(cq: CallbackQuery):
-    await show(cq, stats_text(await db.ledger_stats(cq.from_user.id)), kb.back())
+    s = await db.get_settings(cq.from_user.id)
+    await show(cq, stats_text(await db.ledger_stats(cq.from_user.id), s["currency"]),
+               kb.back())
     await cq.answer()
 
 
@@ -46,9 +49,10 @@ async def cb_csv(cq: CallbackQuery):
     buf = io.StringIO()
     buf.write("purchase_id,item_id,buy,sell,status,created,closed,note\n")
     for r in rows:
+        note = (r.get("extra") or "").replace('"', "'")[:60]
         buf.write(f"{r['purchase_id']},{r['item_id']},{r['buy_price']},"
                   f"{r['sell_price']},{r['status']},{r['created_at']},{r['closed_at']},"
-                  f"\"{(r.get('extra') or '')[:60]}\"\n")
+                  f"\"{note}\"\n")
     await cq.message.answer_document(
         BufferedInputFile(buf.getvalue().encode(), filename=f"ledger_{int(time.time())}.csv"))
     await cq.answer("sent")
