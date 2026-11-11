@@ -1,4 +1,3 @@
-"""Telethon: login via LZT code, session check, change mail, terminate."""
 import asyncio
 import logging
 import re
@@ -12,8 +11,8 @@ from app.lzt import LztError
 
 log = logging.getLogger("session")
 
-DEVICE = dict(device_model="AccStore", system_version="1.0",
-              app_version="1.0", lang_code="en")
+DEVICE = dict(device_model="AccStore", system_version="2.0",
+              app_version="2.0", lang_code="en")
 
 
 def _proxy(cfg: str):
@@ -91,7 +90,6 @@ async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg
 
 
 async def check_session(session_string: str, proxy_cfg: str = ""):
-    """(alive, me) — always disconnects."""
     if not session_string:
         return False, None
     c = client(session_string, proxy_cfg)
@@ -119,19 +117,74 @@ async def change_email(c: TelegramClient, new_email: str, mail_client,
     return code
 
 
-async def terminate(c: TelegramClient):
+async def reset_others(c: TelegramClient) -> int:
+    killed = 0
     try:
         auths = await c(functions.account.GetAuthorizationsRequest())
-        for a in auths.authorizations:
-            if a.current:
-                continue
-            try:
-                await c(functions.account.ResetAuthorizationRequest(hash=a.hash))
-                await asyncio.sleep(0.3)
-            except Exception as e:
-                log.info(f"reset auth {a.hash}: {e}")
     except Exception as e:
-        log.warning(f"reset auths: {e}")
+        log.warning(f"get auths: {e}")
+        return 0
+    for a in auths.authorizations:
+        if a.current:
+            continue
+        try:
+            await c(functions.account.ResetAuthorizationRequest(hash=a.hash))
+            killed += 1
+            await asyncio.sleep(0.3)
+        except Exception as e:
+            log.info(f"reset auth {a.hash}: {e}")
+    return killed
+
+
+async def set_2fa(c: TelegramClient, password: str, current: str = ""):
+    await c.edit_2fa(new_password=password, current_password=current or None, hint="")
+
+
+async def spambot_status(c: TelegramClient) -> str:
+    try:
+        bot = await c.get_entity("spambot")
+        async with c.conversation(bot, timeout=30) as conv:
+            await conv.send_message("/start")
+            msg = await conv.get_response()
+            return (msg.raw_text or "").strip()[:400]
+    except Exception as e:
+        log.info(f"spambot: {e}")
+        return ""
+
+
+async def device_list(c: TelegramClient) -> list[str]:
+    try:
+        auths = await c(functions.account.GetAuthorizationsRequest())
+    except Exception:
+        return []
+    out = []
+    for a in auths.authorizations:
+        mark = "🟢" if a.current else "⚪"
+        place = ", ".join(x for x in (a.country, a.region) if x) or "unknown"
+        out.append(f"{mark} {a.device_model or 'Unknown'} ({a.platform}) [{place}]")
+    return out
+
+
+async def owned_counts(c: TelegramClient) -> tuple[int, int, int]:
+    channels = groups = bots = 0
+    try:
+        res = await c(functions.channels.GetAdminedPublicChannelsRequest())
+        channels = len(res.chats)
+    except Exception:
+        pass
+    try:
+        async for d in c.iter_dialogs(limit=200):
+            if d.is_group and getattr(d.entity, "creator", False):
+                groups += 1
+            elif d.is_user and getattr(d.entity, "bot", False):
+                bots += 1
+    except Exception:
+        pass
+    return channels, groups, bots
+
+
+async def terminate(c: TelegramClient):
+    await reset_others(c)
     try:
         await c.log_out()
     except Exception as e:
