@@ -13,7 +13,7 @@ from app.session_manager import (change_email, check_session, client, device_lis
                                 reset_others, set_2fa, spambot_status)
 from app.utils import tg
 from app.utils import wallet as wallet_view
-from app.utils.filters import (account_created_ts, age_hours_of, country_of, passes,
+from app.utils.filters import (account_created_ts, age_for_queue, country_of, passes,
                               phone_of, spam_state)
 from app.utils.money import fmt_money, pick_for_buy
 from app.utils.texts import audit_text, bought_line, failed_line, session_file
@@ -28,6 +28,8 @@ _NEXT_RUN: dict[int, float] = {}
 _SEM: asyncio.Semaphore | None = None
 
 PHONE_KEYS = ("login", "telegram_login", "phone", "telegram_phone")
+
+LOGIN_TRIES = 3
 
 
 class SessionDead(RuntimeError):
@@ -169,10 +171,10 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
 
     phone, password = await _resolve_login(lzt, item_id, fresh, res)
     country = country_of(fresh)
+    age = age_for_queue(fresh)
     created = account_created_ts(fresh) or 0
-    age = age_hours_of(fresh) or 0.0
     target = db.num(s.get("queue_target_hours"), QUEUE_TARGET_HOURS) or QUEUE_TARGET_HOURS
-    due = db.due_from(created, age, target)
+    due = db.due_from(age, target)
 
     pid = await db.add_purchase(
         tg_id, item_id, phone, country, price, password=password,
@@ -195,18 +197,29 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
 async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s):
     async with _sem():
         await db.set_purchase(pid, password=password)
-        try:
-            c, session_str, _uid = await login_with_lzt(
-                phone, password, item_id, lzt, s.get("proxy", ""))
-        except Exception as e:
-            log.info(f"login {item_id}: {e}")
-            await db.close_purchase(pid, "login_failed", str(e)[:200])
-            await _notify(bot, tg_id, failed_line(country, str(e)))
+        last: Exception | None = None
+        conn = None
+        session_str = ""
+
+        for attempt in range(LOGIN_TRIES):
+            try:
+                conn, session_str, _uid = await login_with_lzt(
+                    phone, password, item_id, lzt, s.get("proxy", ""))
+                break
+            except Exception as e:
+                last = e
+                log.info(f"login {item_id} attempt {attempt + 1}/{LOGIN_TRIES}: {e}")
+                if attempt + 1 < LOGIN_TRIES:
+                    await asyncio.sleep(15 + attempt * 15)
+        else:
+            await db.close_purchase(pid, "login_failed", str(last)[:200])
+            await _notify(bot, tg_id, failed_line(country, str(last)))
             return
 
         await db.set_session(pid, session_str)
         try:
-            await c.disconnect()
+            if conn is not None:
+                await conn.disconnect()
         except Exception:
             pass
 
@@ -271,17 +284,17 @@ async def clean_purchase(bot, lzt, p: dict):
 
     data: dict = {"mail_ok": False, "twofa_ok": False}
     note: list[str] = []
-    c = client(p["session_string"], s.get("proxy", ""))
+    conn = client(p["session_string"], s.get("proxy", ""))
     try:
-        await c.connect()
-        if not await c.is_user_authorized():
+        await conn.connect()
+        if not await conn.is_user_authorized():
             raise SessionDead("session dead")
 
         mc, addr = await _mail_client_for(p, s)
         try:
             if addr and s.get("change_mail_on_expire") == "1":
                 try:
-                    await change_email(c, addr, mc)
+                    await change_email(conn, addr, mc)
                     data["mail_ok"] = True
                     data["mail"] = addr
                     note.append("mail changed")
@@ -293,7 +306,7 @@ async def clean_purchase(bot, lzt, p: dict):
 
         password = s.get("twofa_password") or db.DEFAULT_2FA
         try:
-            await set_2fa(c, password, p.get("password") or "")
+            await set_2fa(conn, password, p.get("password") or "")
             data["twofa_ok"] = True
             data["password"] = password
             note.append("2fa set")
@@ -301,12 +314,12 @@ async def clean_purchase(bot, lzt, p: dict):
             note.append(f"2fa fail: {e}")
 
         if s.get("terminate_on_expire") == "1":
-            killed = await reset_others(c)
+            killed = await reset_others(conn)
             note.append(f"devices reset {killed}")
 
-        data["spam"] = await spambot_status(c)
-        data["devices"] = await device_list(c)
-        data["owned"] = await owned_counts(c)
+        data["spam"] = await spambot_status(conn)
+        data["devices"] = await device_list(conn)
+        data["owned"] = await owned_counts(conn)
     except SessionDead as e:
         note.append(str(e))
         if tries < EXPIRY_RETRY:
@@ -323,7 +336,7 @@ async def clean_purchase(bot, lzt, p: dict):
         return
     finally:
         try:
-            await c.disconnect()
+            await conn.disconnect()
         except Exception:
             pass
 
@@ -338,10 +351,14 @@ async def clean_purchase(bot, lzt, p: dict):
         alive, _me = await check_session(session_str, s.get("proxy", ""))
         if not alive:
             try:
-                _, session_str, _uid = await login_with_lzt(
+                _c, session_str, _uid = await login_with_lzt(
                     p.get("phone"), p.get("password") or "", p["item_id"], lzt,
                     s.get("proxy", ""))
                 await db.set_session(pid, session_str)
+                try:
+                    await _c.disconnect()
+                except Exception:
+                    pass
                 note.append("session reissued")
             except Exception as e:
                 note.append(f"reissue fail: {e}")
