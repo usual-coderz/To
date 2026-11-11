@@ -1,4 +1,3 @@
-"""Telegram send/edit helpers that never raise and never lose a message."""
 import html
 import logging
 import re
@@ -13,7 +12,6 @@ LIMIT = 4000
 
 
 def esc(value) -> str:
-    """Escape a dynamic value for HTML parse mode."""
     return html.escape("" if value is None else str(value), quote=False)
 
 
@@ -26,7 +24,6 @@ def clip(text: str, limit: int = LIMIT) -> str:
 
 
 async def send(bot, chat_id, text, markup=None) -> bool:
-    """HTML first; plain-text fallback so a bad entity never drops the message."""
     text = clip(text)
     try:
         await bot.send_message(chat_id, text, reply_markup=markup, link_preview_options=LP)
@@ -34,7 +31,8 @@ async def send(bot, chat_id, text, markup=None) -> bool:
     except Exception as e:
         log.info(f"send html failed chat={chat_id}: {e}")
     try:
-        await bot.send_message(chat_id, clip(strip_tags(text)), reply_markup=markup)
+        await bot.send_message(chat_id, clip(strip_tags(text)), reply_markup=markup,
+                               parse_mode=None)
         return True
     except Exception as e:
         log.warning(f"send failed chat={chat_id}: {e}")
@@ -53,16 +51,23 @@ async def send_document(bot, chat_id, payload: bytes, filename: str) -> bool:
 
 async def edit(message, text, markup=None) -> bool:
     text = clip(text)
-    for body in (text, clip(strip_tags(text))):
-        try:
-            await message.edit_text(body, reply_markup=markup, link_preview_options=LP)
+    try:
+        await message.edit_text(text, reply_markup=markup, link_preview_options=LP)
+        return True
+    except Exception as e:
+        if "not modified" in str(e):
             return True
-        except Exception as e:
-            if "not modified" in str(e):
-                return True
+    plain = clip(strip_tags(text))
+    for body, mode in ((text, None), (plain, None)):
         try:
-            await message.edit_caption(caption=body, reply_markup=markup)
+            await message.edit_caption(caption=body, reply_markup=markup, parse_mode=mode)
             return True
         except Exception:
             pass
+    try:
+        await message.edit_text(plain, reply_markup=markup, parse_mode=None)
+        return True
+    except Exception as e:
+        if "not modified" in str(e):
+            return True
     return await send(message.bot, message.chat.id, text, markup)
