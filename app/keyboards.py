@@ -70,7 +70,7 @@ def limits(s: dict) -> InlineKeyboardMarkup:
         [(f"Daily cap ${s['daily_spend_cap']}", "in:daily_spend_cap")],
         [(f"Buys/cycle {s['max_buy_per_cycle']}", "in:max_buy_per_cycle"),
          (f"Poll {s['poll_interval']}s", "in:poll_interval")],
-        [(f"Clean at {s['queue_target_hours']}h", "in:queue_target_hours")],
+        [(f"Target age {s['queue_target_hours']}h", "in:queue_target_hours")],
         [(f"Terminate {_onoff(s['terminate_on_expire'], 'on', 'off')}",
           "t:terminate_on_expire"),
          (f"Change mail {_onoff(s['change_mail_on_expire'], 'on', 'off')}",
@@ -111,19 +111,6 @@ def session_detail(p: dict) -> InlineKeyboardMarkup:
     return kb([
         [("Session file", f"f:{pid}"), ("Check", f"c:{pid}")],
         [("Back", BACK_SESSIONS)],
-    ])
-
-
-def bought(p: dict) -> InlineKeyboardMarkup:
-    pid = p["_id"]
-    return kb([[("Session file", f"f:{pid}"), ("Check", f"c:{pid}")]])
-
-
-def audit(p: dict) -> InlineKeyboardMarkup:
-    pid = p["_id"]
-    return kb([
-        [("Session file", f"f:{pid}"), ("Check", f"c:{pid}")],
-        [("Sessions", BACK_SESSIONS), ("Menu", BACK_MAIN)],
     ])
 
 
