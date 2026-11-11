@@ -19,7 +19,7 @@ NUMERIC = {
     "price_min": ("Min price", "cheapest allowed account price", 0.01, 10_000.0, 2),
     "price_max": ("Max price", "most expensive allowed account price", 0.01, 10_000.0, 2),
     "session_min_hours": ("Min account age", "0 = any · hours", 0.0, 87_600.0, 1),
-    "queue_target_hours": ("Clean at age", "hours the account must reach first",
+    "queue_target_hours": ("Target age", "hours an account must reach before cleaning",
                            1.0, 87_600.0, 1),
     "daily_spend_cap": ("Daily spend cap", "0 = unlimited", 0.0, 100_000.0, 2),
     "max_buy_per_cycle": ("Buys per cycle", "1-100", 1.0, 100.0, 0),
@@ -148,8 +148,11 @@ async def cb_set(cq: CallbackQuery):
     if len(parts) != 3:
         return await cq.answer("bad callback")
     _, key, value = parts
-    if await db.set_setting(cq.from_user.id, key, value) is None:
+    stored = await db.set_setting(cq.from_user.id, key, value)
+    if stored is None:
         return await cq.answer("unknown setting", show_alert=True)
+    if key == "queue_target_hours":
+        await db.reschedule(cq.from_user.id, db.num(stored, 24.0))
     await render_screen(cq, key)
     await cq.answer("saved")
 
@@ -242,6 +245,9 @@ async def on_text(m: Message):
 
     if stored is None:
         return await m.answer("unknown setting")
+
+    if key == "queue_target_hours":
+        await db.reschedule(m.from_user.id, db.num(stored, 24.0))
 
     note = ""
     if key == "session_min_hours" and 0 < db.num(stored) < 24:
