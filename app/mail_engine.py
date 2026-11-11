@@ -1,4 +1,3 @@
-"""Mail engine: temp mail (Mail.tm → Tempmail.plus fallback) + IMAP fetcher."""
 import asyncio
 import email as emaillib
 import email.header
@@ -10,13 +9,27 @@ import random
 import re
 import string
 import time
-import urllib.error
-import urllib.request
 
-from app.config import DATA_DIR
+import httpx
+
+from app import proxies
+from app.config import (DATA_DIR, MAIL_POLL, MAIL_PREFER_DOMAIN, MAIL_PROXY_RETRY,
+                        MAIL_TIMEOUT)
+
+log = logging.getLogger("mail")
 
 VAULT = os.path.join(DATA_DIR, "temp_mail_vault.json")
 CODE_LEN = 5
+VAULT_MAX = 400
+MAILTM = "https://api.mail.tm"
+PLUS = "https://tempmail.plus/api"
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+PLUS_DOMAINS = ["fexbox.org", "fexpost.com", "mailbox.in.ua", "chitthi.in",
+                "rover.info", "mailto.plus", "fextemp.com", "anyalias.com"]
+
+
+class MailError(Exception):
+    pass
 
 
 def extract_telegram_code(text: str, expected_length: int = None):
@@ -24,115 +37,174 @@ def extract_telegram_code(text: str, expected_length: int = None):
         return None
     t = text.replace("&nbsp;", " ").replace("\u00a0", " ").replace("\u200b", " ")
     t = re.sub(r"<[^>]+>", " ", t)
-    ctx = (r"(?:your\s+(?:telegram\s+)?code|verification\s+code|login\s+code|telegram\s+code"
-           r"|security\s+code|confirm(?:ation)?\s+code|código|код|رمز\w*)")
-    for pat in (
+    ctx = (r"(?:your\s+(?:telegram\s+)?code|verification\s+code|login\s+code"
+           r"|telegram\s+code|security\s+code|confirm(?:ation)?\s+code|código|код|رمز\w*)")
+    patterns = (
         ctx + r"(?:\s+(?:is|was|to|هو))?[\s:=-]{1,10}(\d{3})[\s-](\d{3})\b",
         ctx + r"(?:\s+(?:is|was|to|هو))?[\s:=-]{1,10}(\d{5,6})\b",
         r"\b(\d{3})[\s-](\d{3})\b\s+(?:is\s+your\s+(?:telegram|verification|login|code))",
         r"\b(\d{5,6})\b\s+(?:is\s+your\s+(?:telegram|verification|login|code))",
-    ):
-        m = re.search(pat, t, re.I)
+    )
+    for pattern in patterns:
+        m = re.search(pattern, t, re.I)
+        if not m:
+            continue
+        cand = "".join(m.groups())
+        if expected_length is None or len(cand) == expected_length:
+            return cand
+    if expected_length in (None, 6):
+        m = re.search(r"\b(\d{3})[\s-](\d{3})\b", t)
         if m:
-            cand = "".join(m.groups())
-            if expected_length is None or len(cand) == expected_length:
-                return cand
-    m = re.search(r"\b(\d{3})[\s-](\d{3})\b", t)
-    if m and (expected_length is None or len(m.group(1) + m.group(2)) == expected_length):
-        return m.group(1) + m.group(2)
-    for c in re.findall(r"\b(\d{5,6})\b", t):
-        if expected_length is None or len(c) == expected_length:
-            return c
+            return m.group(1) + m.group(2)
+    for cand in re.findall(r"\b(\d{5,6})\b", t):
+        if expected_length is None or len(cand) == expected_length:
+            return cand
     return None
 
 
+def _vault_read() -> dict:
+    try:
+        if os.path.exists(VAULT):
+            with open(VAULT, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+    except Exception as e:
+        log.info(f"vault read: {e}")
+    return {}
+
+
+def _vault_write(data: dict):
+    try:
+        items = list(data.items())[-VAULT_MAX:]
+        with open(VAULT, "w", encoding="utf-8") as f:
+            json.dump(dict(items), f, indent=2)
+    except Exception as e:
+        log.info(f"vault write: {e}")
+
+
 class TempMailClient:
-    MAILTM = "https://api.mail.tm"
-    PLUS = "https://tempmail.plus/api"
-    PLUS_DOMAINS = ["fexbox.org", "fexpost.com", "mailbox.in.ua", "chitthi.in",
-                    "rover.info", "mailto.plus", "fextemp.com", "anyalias.com"]
-    _cooldown_until = 0.0
-
     def __init__(self):
-        self._email = None
-        self._token = None
-        self._provider = None
+        self._email = ""
+        self._token = ""
+        self._provider = ""
+        self._index = random.randrange(max(1, len(proxies.POOL) or 1))
+        self._cooldown: dict[str, float] = {}
+        self._clients: dict[str, httpx.AsyncClient] = {}
 
-    def _http(self, url, data=None, headers=None, method=None):
-        hdrs = {"User-Agent": "Mozilla/5.0 (AccStore/2.1)", "Content-Type": "application/json"}
-        hdrs.update(headers or {})
-        body = json.dumps(data).encode() if isinstance(data, dict) else data
-        req = urllib.request.Request(url, data=body, headers=hdrs, method=method)
-        with urllib.request.urlopen(req, timeout=20) as r:
-            raw = r.read().decode("utf-8", "replace")
-            return json.loads(raw) if raw.strip() else {}
+    def _http(self, proxy: str) -> httpx.AsyncClient:
+        client = self._clients.get(proxy)
+        if client is None:
+            client = httpx.AsyncClient(
+                timeout=15, follow_redirects=True, headers={"User-Agent": UA},
+                proxy=proxy or None)
+            self._clients[proxy] = client
+        return client
 
-    async def _ahttp(self, *a, **k):
-        return await asyncio.get_running_loop().run_in_executor(None, lambda: self._http(*a, **k))
+    async def close(self):
+        for client in self._clients.values():
+            try:
+                await client.aclose()
+            except Exception:
+                pass
+        self._clients.clear()
+
+    def _pick(self) -> str:
+        if not proxies.POOL:
+            return ""
+        now = time.time()
+        for _ in range(len(proxies.POOL)):
+            proxy, self._index = proxies.rotate(self._index)
+            if self._cooldown.get(proxy, 0.0) <= now:
+                return proxy
+        return proxies.get(self._index)
+
+    async def _request(self, method: str, url: str, **kw) -> httpx.Response:
+        last: Exception | None = None
+        for _ in range(3):
+            proxy = self._pick()
+            try:
+                r = await self._http(proxy).request(method, url, **kw)
+            except httpx.HTTPError as e:
+                last = e
+                self._cooldown[proxy] = time.time() + 2.0
+                await asyncio.sleep(0.4)
+                continue
+            if r.status_code == 429:
+                last = MailError("429")
+                self._cooldown[proxy] = time.time() + MAIL_PROXY_RETRY
+                await asyncio.sleep(0.4)
+                continue
+            return r
+        raise MailError(f"request failed: {last}")
 
     @staticmethod
     def _rand(prefix: str, n: int) -> str:
         return prefix + "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
+    def _remember(self, address: str, password: str, provider: str):
+        data = _vault_read()
+        data[address] = {"password": password, "provider": provider,
+                         "created_at": int(time.time())}
+        _vault_write(data)
+
+    async def _domains(self) -> list[str]:
+        r = await self._request("GET", f"{MAILTM}/domains")
+        if r.status_code != 200:
+            return []
+        rows = (r.json() or {}).get("hydra:member", [])
+        return [str(d.get("domain")) for d in rows
+                if d.get("isActive") and d.get("domain")]
+
+    async def claim(self, address: str, password: str = "") -> bool:
+        pwd = password or self._rand("AccStore_", 16)
+        body = {"address": address, "password": pwd}
+        r = await self._request("POST", f"{MAILTM}/accounts", json=body)
+        if r.status_code not in (200, 201, 422):
+            return False
+        t = await self._request("POST", f"{MAILTM}/token", json=body)
+        if t.status_code != 200:
+            return False
+        token = (t.json() or {}).get("token") or ""
+        if not token:
+            return False
+        self._email, self._token, self._provider = address, token, "mailtm"
+        self._remember(address, pwd, "mailtm")
+        return True
+
     async def create_temp_email(self, exclude_domains: list = None) -> str:
-        exclude = {d.lower().strip() for d in (exclude_domains or [])}
-
-        if time.time() >= TempMailClient._cooldown_until:
-            try:
-                r = await self._ahttp(f"{self.MAILTM}/domains")
-                doms = [d["domain"] for d in r.get("hydra:member", [])
-                        if d.get("isActive") and d["domain"].lower() not in exclude]
-                if doms:
-                    addr = self._rand("tg_", 12) + "@" + random.choice(doms)
-                    pw = self._rand("AccStore_", 14)
-                    await self._ahttp(f"{self.MAILTM}/accounts",
-                                      {"address": addr, "password": pw})
-                    tok = await self._ahttp(f"{self.MAILTM}/token",
-                                            {"address": addr, "password": pw})
-                    token = tok.get("token")
-                    if token:
-                        self._email, self._token, self._provider = addr, token, "mailtm"
-                        self._persist(addr, pw)
-                        return addr
-            except urllib.error.HTTPError as e:
-                logging.warning(f"[MAIL] mail.tm HTTP {e.code}")
-                if e.code == 429:
-                    TempMailClient._cooldown_until = time.time() + 600
-            except Exception as e:
-                logging.warning(f"[MAIL] mail.tm failed: {e}")
-
-        doms = [d for d in self.PLUS_DOMAINS if d.lower() not in exclude] or self.PLUS_DOMAINS
-        addr = self._rand("tg_", 12) + "@" + random.choice(doms)
-        self._email, self._token, self._provider = addr, None, "plus"
-        return addr
-
-    def _persist(self, addr, pw):
+        exclude = {d.lower().strip() for d in (exclude_domains or []) if d}
         try:
-            vault = {}
-            if os.path.exists(VAULT):
-                with open(VAULT, encoding="utf-8") as f:
-                    vault = json.load(f)
-            vault[addr] = {"password": pw, "provider": "mailtm",
-                           "created_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
-            with open(VAULT, "w", encoding="utf-8") as f:
-                json.dump(vault, f, indent=2)
+            doms = [d for d in await self._domains() if d.lower() not in exclude]
+            doms.sort(key=lambda d: 0 if d.lower() == MAIL_PREFER_DOMAIN else 1)
+            for domain in doms[:3]:
+                address = self._rand("tg_", 12) + "@" + domain
+                if await self.claim(address):
+                    return address
         except Exception as e:
-            logging.warning(f"[MAIL] vault write failed: {e}")
+            log.info(f"mail.tm create: {e}")
 
-    async def fetch_verification_code(self, target_email: str = None, timeout: int = 120,
-                                      poll_interval: float = 3.0,
+        pool = [d for d in PLUS_DOMAINS if d.lower() not in exclude] or PLUS_DOMAINS
+        address = self._rand("tg_", 12) + "@" + random.choice(pool)
+        self._email, self._token, self._provider = address, "", "plus"
+        self._remember(address, "", "plus")
+        return address
+
+    async def fetch_verification_code(self, target_email: str = None,
+                                      timeout: int = MAIL_TIMEOUT,
+                                      poll_interval: float = MAIL_POLL,
                                       expected_length: int = None) -> str:
         target = target_email or self._email
         if not target:
-            raise ValueError("no active mailbox")
-        start = time.time()
-        while time.time() - start < timeout:
+            raise MailError("no active mailbox")
+        end = time.time() + timeout
+        while time.time() < end:
             try:
                 code = await self._check_inbox(target, expected_length)
                 if code:
                     return code
             except Exception as e:
-                logging.warning(f"[MAIL] inbox error: {e}")
+                log.info(f"inbox: {e}")
             await asyncio.sleep(poll_interval)
         raise TimeoutError(f"no code in {timeout}s for {target}")
 
@@ -142,27 +214,39 @@ class TempMailClient:
         return await self._check_plus(target, expected_length)
 
     async def _check_mailtm(self, expected_length=None):
-        h = {"Authorization": f"Bearer {self._token}"}
-        listing = await self._ahttp(f"{self.MAILTM}/messages", headers=h)
-        for m in listing.get("hydra:member", []):
-            if not m.get("id"):
+        headers = {"Authorization": f"Bearer {self._token}"}
+        r = await self._request("GET", f"{MAILTM}/messages", headers=headers)
+        if r.status_code != 200:
+            return None
+        for m in (r.json() or {}).get("hydra:member", []):
+            mid = m.get("id")
+            if not mid:
                 continue
-            full = await self._ahttp(f"{self.MAILTM}/messages/{m['id']}", headers=h)
-            code = extract_telegram_code(
-                f"{full.get('subject', '')} {full.get('text', '') or full.get('html', '')}",
-                expected_length or CODE_LEN)
+            full = await self._request("GET", f"{MAILTM}/messages/{mid}", headers=headers)
+            if full.status_code != 200:
+                continue
+            data = full.json() or {}
+            body = f"{data.get('subject', '')} {data.get('text', '') or data.get('html', '')}"
+            code = extract_telegram_code(body, expected_length or CODE_LEN)
             if code:
                 return code
         return None
 
     async def _check_plus(self, target: str, expected_length=None):
-        r = await self._ahttp(f"{self.PLUS}/mails?email={target}&epin=&limit=15")
-        for m in r.get("mail_list", []) or []:
-            if m.get("id") is None:
+        r = await self._request("GET", f"{PLUS}/mails?email={target}&epin=&limit=15")
+        if r.status_code != 200:
+            return None
+        for m in (r.json() or {}).get("mail_list", []) or []:
+            mid = m.get("id")
+            if mid is None:
                 continue
-            full = await self._ahttp(f"{self.PLUS}/mails/{m['id']}?email={target}&epin=")
-            code = extract_telegram_code(f"{full.get('subject', '')} {full.get('text', '')}",
-                                         expected_length or CODE_LEN)
+            full = await self._request("GET", f"{PLUS}/mails/{mid}?email={target}&epin=")
+            if full.status_code != 200:
+                continue
+            data = full.json() or {}
+            code = extract_telegram_code(
+                f"{data.get('subject', '')} {data.get('text', '')}",
+                expected_length or CODE_LEN)
             if code:
                 return code
         return None
@@ -217,7 +301,7 @@ class IMAPMailClient:
             except Exception:
                 pass
 
-    async def fetch_verification_code(self, timeout: int = 120,
+    async def fetch_verification_code(self, timeout: int = MAIL_TIMEOUT,
                                       expected_length=None) -> str:
         code = await asyncio.get_running_loop().run_in_executor(
             None, self._blocking, timeout, expected_length)
