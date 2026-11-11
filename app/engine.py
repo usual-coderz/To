@@ -9,12 +9,12 @@ from app.config import (EXPIRY_RETRY, EXPIRY_RETRY_DELAY, LOGIN_CONCURRENCY, MAX
 from app.lzt import LztError
 from app.mail_engine import IMAPMailClient, TempMailClient
 from app.session_manager import (change_email, check_session, client, device_list,
-                                login_with_lzt, normalize_phone, owned_counts,
-                                reset_others, set_2fa, spambot_status)
+                                 login_with_lzt, normalize_phone, owned_counts,
+                                 reset_others, set_2fa, spambot_status)
 from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import (account_created_ts, age_for_queue, country_of, passes,
-                              phone_of, spam_state)
+                               phone_of, spam_state)
 from app.utils.money import fmt_money, pick_for_buy
 from app.utils.texts import audit_text, bought_line, failed_line, session_file
 
@@ -205,6 +205,8 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s
             try:
                 conn, session_str, _uid = await login_with_lzt(
                     phone, password, item_id, lzt, s.get("proxy", ""))
+                if not session_str:
+                    raise RuntimeError("empty session string")
                 break
             except Exception as e:
                 last = e
@@ -226,7 +228,6 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s
         p = await db.get_purchase(pid)
         if not p:
             return
-        p["password"] = password
         if int(p.get("expires_at") or 0) <= time.time():
             await clean_purchase(bot, lzt, p)
         else:
@@ -241,8 +242,8 @@ async def _mail_client_for(p: dict, s: dict):
             return IMAPMailClient(p["mail"], p["mail_password"]), p["mail"]
         except Exception as e:
             log.info(f"imap unavailable: {e}")
-            if provider == "native":
-                return None, ""
+    if provider == "native":
+        return None, ""
     mc = TempMailClient()
     try:
         addr = await mc.create_temp_email(exclude_domains=[current] if current else None)
@@ -260,7 +261,7 @@ async def _send_audit(bot, tg_id, p, data):
     await tg.send_document(bot, tg_id, session_file(p).encode(), f"{name}.py")
 
 
-async def _fail(bot, p, note: str):
+async def _fail(bot, p, note: list[str]):
     await db.close_purchase(p["_id"], "failed", "; ".join(note)[:300])
     await _notify(bot, p["tg_id"],
                   failed_line(p.get("country"), "; ".join(note)[:200]))
@@ -363,6 +364,8 @@ async def clean_purchase(bot, lzt, p: dict):
             except Exception as e:
                 note.append(f"reissue fail: {e}")
 
+    if not note:
+        note.append("cleaned")
     new_mail = data.get("mail", "") if data.get("mail_ok") else ""
     await db.close_purchase(pid, "ready", "; ".join(note)[:300], new_mail=new_mail)
     fresh = await db.get_purchase(pid)
@@ -408,9 +411,14 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
 
     reasons: Counter = Counter()
     bought = 0
+    seen: set[int] = set()
     max_buys = max(1, db.intval(s.get("max_buy_per_cycle"), 2))
 
     for it in items[:MAX_SCAN]:
+        item_id = it.get("item_id")
+        if item_id in seen:
+            continue
+        seen.add(item_id)
         ok, why = passes(it, s)
         if not ok:
             reasons[why] += 1
@@ -418,7 +426,7 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
         try:
             done, why = await buy_one(bot, lzt, tg_id, it, s, snap)
         except Exception as e:
-            log.exception(f"buy_one {it.get('item_id')}: {e}")
+            log.exception(f"buy_one {item_id}: {e}")
             reasons["error"] += 1
             continue
         reasons[why] += 1
@@ -443,6 +451,8 @@ async def buy_loop(bot, lzt):
             live_ids = {u["_id"] for u in owners}
             for stale in [k for k in _NEXT_RUN if k not in live_ids]:
                 _NEXT_RUN.pop(stale, None)
+            for stale in [k for k in _BAL_WARNED if k not in live_ids]:
+                _BAL_WARNED.pop(stale, None)
             for tg_id in live_ids:
                 if _NEXT_RUN.get(tg_id, 0.0) > now:
                     continue
