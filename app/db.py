@@ -6,20 +6,25 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from pymongo import ASCENDING, DESCENDING, AsyncMongoClient
 
-from app.config import MONGO_DB, MONGO_URI, REPORT_KEEP_HOURS
+from app.config import MONGO_DB, MONGO_URI, QUEUE_TARGET_HOURS, REPORT_KEEP_HOURS, TWOFA_PASSWORD
 
 log = logging.getLogger("db")
+
+DEFAULT_2FA = "AccStore2fa"
 
 DEFAULTS = {
     "price_min": "0.05", "price_max": "1.00",
     "spam_mode": "no", "mail_mode": "yes", "mail_type": "any", "password_mode": "no",
-    "session_min_hours": "0", "session_max_hours": "0", "session_life_hours": "24",
+    "session_min_hours": "0", "session_max_hours": "0",
+    "session_life_hours": str(int(QUEUE_TARGET_HOURS) or 24),
+    "queue_target_hours": str(int(QUEUE_TARGET_HOURS) or 24),
     "countries": "", "deny_countries": "IR,RU",
     "nsb_only": "1", "max_buy_per_cycle": "2", "daily_spend_cap": "15",
     "poll_interval": "25", "auto_buy": "0",
     "early_clean_if_aged": "1",
     "terminate_on_expire": "1", "change_mail_on_expire": "1",
     "verify_spam": "1", "currency": "usd", "proxy": "", "mail_provider": "auto",
+    "twofa_password": (TWOFA_PASSWORD or DEFAULT_2FA),
 }
 
 _TRUE = {"1", "true", "yes", "on", "y"}
@@ -104,6 +109,15 @@ def _flag(default: str = "0"):
     return norm
 
 
+def _pwd(default: str):
+    def norm(v) -> str:
+        t = "".join(str(v or "").split())
+        if 8 <= len(t) <= 64 and t.isascii():
+            return t
+        return default
+    return norm
+
+
 def _codes(v) -> str:
     seen = {c.strip().upper() for c in str(v or "").split(",") if c.strip()}
     return ",".join(sorted(seen))
@@ -118,7 +132,8 @@ NORMALIZERS = {
     "password_mode": _enum(("yes", "no", "any"), "no"),
     "session_min_hours": _f("0", 0.0, 87_600.0),
     "session_max_hours": _f("0", 0.0, 87_600.0),
-    "session_life_hours": _f("24", 0.0, 87_600.0),
+    "session_life_hours": _f("24", 1.0, 87_600.0),
+    "queue_target_hours": _f("24", 1.0, 87_600.0),
     "countries": _codes,
     "deny_countries": _codes,
     "nsb_only": _flag("1"),
@@ -133,6 +148,7 @@ NORMALIZERS = {
     "currency": _enum(("usd", "rub", "uah", "eur", "kzt", "byn", "gbp"), "usd"),
     "proxy": lambda v: str(v or "").strip()[:300],
     "mail_provider": _enum(("auto", "native", "temp"), "auto"),
+    "twofa_password": _pwd(DEFAULTS["twofa_password"]),
 }
 
 
@@ -175,52 +191,30 @@ def _spec_key(spec: dict) -> tuple:
 async def _ensure_indexes():
     for coll_name, keys, opts in _INDEXES:
         coll = _db[coll_name]
-
         try:
-            cursor = await coll.list_indexes()
-            existing = [spec async for spec in cursor]
-
+            existing = [spec async for spec in coll.list_indexes()]
         except Exception as e:
             log.debug(f"list_indexes {coll_name}: {e}")
             existing = []
 
         want = tuple((k, int(d)) for k, d in keys)
-        hit = next(
-            (s for s in existing if _spec_key(s) == want),
-            None
-        )
+        hit = next((s for s in existing if _spec_key(s) == want), None)
 
         if hit:
             if opts.get("unique") and not hit.get("unique"):
                 try:
                     await coll.drop_index(hit["name"])
-                    await coll.create_index(
-                        keys,
-                        name=hit["name"],
-                        **opts
-                    )
-                    log.info(
-                        f"{coll_name}: {hit['name']} upgraded to unique"
-                    )
+                    await coll.create_index(keys, name=hit["name"], **opts)
+                    log.info(f"{coll_name}: {hit['name']} upgraded to unique")
                 except Exception as e:
-                    log.warning(
-                        f"{coll_name}: unique upgrade failed: {e}"
-                    )
-
+                    log.warning(f"{coll_name}: unique upgrade failed: {e}")
             continue
 
         name = "_".join(f"{k}_{d}" for k, d in keys)
-
         try:
-            await coll.create_index(
-                keys,
-                name=name,
-                **opts
-            )
+            await coll.create_index(keys, name=name, **opts)
         except Exception as e:
-            log.warning(
-                f"{coll_name}: index {name}: {e}"
-            )
+            log.warning(f"{coll_name}: index {name}: {e}")
 
 
 async def init_db():
@@ -241,11 +235,18 @@ async def close_db():
 
 async def ensure_user(tg_id: int, username: str = ""):
     await _db.users.update_one(
-        {"_id": tg_id}, {"$setOnInsert": {"username": username, "created_at": _now()}},
+        {"_id": tg_id},
+        {"$set": {"username": username or ""},
+         "$setOnInsert": {"created_at": _now()}},
         upsert=True)
     clean, _ = normalize_settings({})
     await _db.settings.update_one(
         {"tg_id": tg_id}, {"$setOnInsert": {**clean, "tg_id": tg_id}}, upsert=True)
+
+
+async def get_username(tg_id: int) -> str:
+    doc = await _db.users.find_one({"_id": tg_id}, {"username": 1})
+    return (doc or {}).get("username") or ""
 
 
 async def get_settings(tg_id: int) -> dict:
@@ -288,7 +289,7 @@ async def spent_today(tg_id: int) -> float:
 async def add_purchase(tg_id, item_id, phone, country, price, mail="", mail_password="",
                        session_string="", expires_at=0, target_age_hours=24.0,
                        age_at_buy_hours=0.0, account_created_ts=0, spam_flag=False,
-                       status="active", note="") -> str:
+                       status="queued", note="") -> str:
     now = _now()
     pid = (await _db.purchases.insert_one({
         "tg_id": tg_id, "item_id": item_id, "phone": phone or "", "country": country or "",
@@ -312,17 +313,17 @@ async def add_purchase(tg_id, item_id, phone, country, price, mail="", mail_pass
 
 async def due_purchases(limit: int = 200) -> list[dict]:
     return await _db.purchases.find(
-        {"status": "active", "expires_at": {"$gt": 0, "$lte": _now()}}
+        {"status": "queued", "expires_at": {"$gt": 0, "$lte": _now()}}
     ).sort("expires_at", ASCENDING).limit(limit).to_list(None)
 
 
-async def active_purchases(tg_id: int) -> list[dict]:
-    return await _db.purchases.find({"tg_id": tg_id, "status": "active"}) \
-        .sort("expires_at", ASCENDING).to_list(None)
+async def active_purchases(tg_id: int, limit: int = 30) -> list[dict]:
+    return await _db.purchases.find({"tg_id": tg_id, "status": {"$in": ["queued", "ready"]}}) \
+        .sort("started_at", DESCENDING).limit(limit).to_list(None)
 
 
 async def queue_count(tg_id: int) -> int:
-    return await _db.purchases.count_documents({"tg_id": tg_id, "status": "active"})
+    return await _db.purchases.count_documents({"tg_id": tg_id, "status": "queued"})
 
 
 async def get_purchase(pid) -> dict | None:
@@ -399,7 +400,7 @@ async def ledger_stats(tg_id: int) -> dict:
         total += 1
         spent += float(row.get("buy_price") or 0.0)
         revenue += float(row.get("sell_price") or 0.0)
-        if row.get("status") in ("terminated", "sold"):
+        if row.get("status") in ("terminated", "sold", "ready"):
             done += 1
     profit = revenue - spent
     return {"total": total, "spent": spent, "revenue": revenue, "profit": profit,
