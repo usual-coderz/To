@@ -14,9 +14,10 @@ log = logging.getLogger("lzt")
 PAYMENT_PATHS = ("/user/payments", "/payments", "/balance/payments")
 AUTH_KEY_FIELDS = ("telegram_auth_key", "auth_key", "telegram_session", "session",
                    "authKey", "auth_key_json")
-CODE_FIELDS = ("code", "login_code", "loginCode", "telegram_login_code",
-               "telegramLoginCode")
+CODE_FIELDS = ("telegram_login_code", "telegramLoginCode", "login_code", "loginCode",
+               "code")
 MODE_FIELDS = ("mode", "kind", "type")
+HASH_FIELDS = ("phone_code_hash", "phoneCodeHash", "code_hash", "codeHash")
 KEY_MODES = ("auth_key", "authkey", "session", "key")
 
 RESET_PATHS = ("/{}/reset-authorizations", "/{}/telegram-reset-authorizations",
@@ -103,12 +104,15 @@ def _dig_key(node, depth: int = 0) -> str:
     return ""
 
 
-def _parse_code(data) -> tuple[str, str]:
+def _parse_code(data) -> tuple[str, str, str]:
     value = _dig_field(data, CODE_FIELDS)
     mode = _dig_field(data, MODE_FIELDS).lower()
+    code_hash = _dig_field(data, HASH_FIELDS)
+    if code_hash and (len(code_hash) < 8 or code_hash == value):
+        code_hash = ""
     if value and (mode in KEY_MODES or len(value) > 100):
-        return value, "auth_key"
-    return value, mode
+        return value, "auth_key", ""
+    return value, mode, code_hash
 
 
 class LztClient:
@@ -303,7 +307,7 @@ class LztClient:
                 return await self._post(path)
             except LztError as e:
                 last = e
-                if e.status not in (403, 429) or attempt:
+                if e.status != 429 or attempt:
                     raise
                 await asyncio.sleep(1.5)
         raise last or LztError("check failed")
@@ -330,7 +334,7 @@ class LztClient:
         log.info(f"reset endpoint resolved: {template}")
         return data
 
-    async def telegram_login_code(self, item_id: int) -> tuple[str, str]:
+    async def telegram_login_code(self, item_id: int) -> tuple[str, str, str]:
         path = f"/{int(item_id)}/telegram-login-code"
         verbs = [self._code_verb] if self._code_verb else []
         verbs += [v for v in ("GET", "POST") if v not in verbs]
@@ -349,10 +353,10 @@ class LztClient:
             return _parse_code(data)
         if last and last.status not in SOFT_STATUS:
             log.info(f"code {item_id}: {last}")
-        return "", ""
+        return "", "", ""
 
     async def auth_key(self, item_id: int) -> str:
-        value, mode = await self.telegram_login_code(item_id)
+        value, mode, _hash = await self.telegram_login_code(item_id)
         if value and (mode in KEY_MODES or len(value) > 100):
             return value
 
