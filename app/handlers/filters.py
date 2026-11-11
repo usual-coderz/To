@@ -1,3 +1,4 @@
+import re
 import time
 
 from aiogram import F, Router
@@ -20,7 +21,7 @@ NUMERIC = {
     "session_max_hours": ("Max account age", "0 = no cap · hours (created time)", 0.0, 87_600.0, 1),
     "session_life_hours": ("Lifetime after buy", "hours until auto logout", 0.0, 87_600.0, 1),
     "daily_spend_cap": ("Daily spend cap", "0 = unlimited", 0.0, 100_000.0, 2),
-    "max_buy_per_cycle": ("Buys per cycle", "1-50", 1.0, 50.0, 0),
+    "max_buy_per_cycle": ("Buys per cycle", "1-100", 1.0, 100.0, 0),
     "poll_interval": ("Poll interval", "seconds, 5-3600", 5.0, 3_600.0, 0),
 }
 
@@ -33,6 +34,8 @@ LIMIT_KEYS = {
     "daily_spend_cap", "max_buy_per_cycle", "poll_interval", "early_clean_if_aged",
     "terminate_on_expire", "change_mail_on_expire", "mail_provider",
 }
+
+_SPLIT_RE = re.compile(r"[,\s;|]+")
 
 
 def screen_for(key: str) -> str:
@@ -53,7 +56,14 @@ async def render_screen(cq: CallbackQuery, key: str):
     return await show(cq, filters_text(s), kb.filters(s))
 
 
+def _prune():
+    cutoff = time.time() - PENDING_TTL
+    for uid in [u for u, v in PENDING.items() if v["ts"] < cutoff]:
+        PENDING.pop(uid, None)
+
+
 def _set_pending(uid: int, key: str, chat_id: int = 0, message_id: int = 0):
+    _prune()
     PENDING[uid] = {"key": key, "ts": time.time(),
                     "chat_id": chat_id, "message_id": message_id}
 
@@ -73,12 +83,13 @@ async def _replace(bot, chat_id: int, message_id: int, text: str, markup):
     if chat_id and message_id:
         try:
             await bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id,
-                                        reply_markup=markup, disable_web_page_preview=True)
+                                        reply_markup=markup,
+                                        link_preview_options=__import__(
+                                            "app.utils.tg", fromlist=["LP"]).LP)
             return
         except Exception:
             pass
-    await bot.send_message(chat_id, text, reply_markup=markup,
-                           disable_web_page_preview=True)
+    await bot.send_message(chat_id, text, reply_markup=markup)
 
 
 @router.callback_query(F.data == "m:filters")
@@ -206,13 +217,15 @@ async def on_text(m: Message):
     if not hit:
         return
     key = hit["key"]
-    raw = (m.text or "").strip().replace(" ", "").replace(",", ".")
+    raw = (m.text or "").strip()
 
     if key in COUNTRY_KEYS:
-        if raw.lower() in ("all", "-", "clear"):
+        # commas stay separators here — never normalise them to dots
+        tokens = [t for t in _SPLIT_RE.split(raw) if t]
+        if len(tokens) == 1 and tokens[0].lower() in ("all", "-", "clear", "none"):
             val = ""
         else:
-            codes = [c.upper() for c in raw.split(",") if len(c) == 2 and c.isalpha()]
+            codes = [t.upper() for t in tokens if len(t) == 2 and t.isalpha()]
             if not codes:
                 _set_pending(m.from_user.id, key, hit["chat_id"], hit["message_id"])
                 return await m.answer("need ISO codes like AE,LY · /cancel")
@@ -221,7 +234,7 @@ async def on_text(m: Message):
     else:
         label, _, lo, hi, _ = NUMERIC[key]
         try:
-            number = float(raw)
+            number = float(raw.replace(" ", "").replace(",", "."))
         except ValueError:
             _set_pending(m.from_user.id, key, hit["chat_id"], hit["message_id"])
             return await m.answer(f"{label}: number expected · /cancel")
