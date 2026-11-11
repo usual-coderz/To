@@ -3,7 +3,9 @@ import logging
 import re
 
 from telethon import TelegramClient, functions
-from telethon.errors import PhoneCodeInvalidError, SessionPasswordNeededError
+from telethon.errors import (FloodWaitError, PasswordHashInvalidError,
+                            PhoneCodeExpiredError, PhoneCodeInvalidError,
+                            SessionPasswordNeededError)
 from telethon.sessions import StringSession
 
 from app.config import API_HASH, API_ID, CODE_TIMEOUT
@@ -14,11 +16,25 @@ log = logging.getLogger("session")
 DEVICE = dict(device_model="AccStore", system_version="2.0",
               app_version="2.0", lang_code="en")
 
+_PROXY_RE = re.compile(r"(socks5|socks4|http)://(?:([^:@]+):([^@]+)@)?([^:]+):(\d+)")
+
+
+def normalize_phone(raw) -> str:
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    digits = "".join(ch for ch in text if ch.isdigit())
+    if text.startswith("00") and len(digits) > 2:
+        digits = digits[2:]
+    if not 8 <= len(digits) <= 17:
+        return ""
+    return "+" + digits
+
 
 def _proxy(cfg: str):
     if not cfg:
         return None
-    m = re.match(r"(socks5|socks4|http)://(?:([^:@]+):([^@]+)@)?([^:]+):(\d+)", cfg.strip())
+    m = _PROXY_RE.match(cfg.strip())
     if not m:
         return None
     import socks
@@ -50,10 +66,21 @@ async def _await_code(lzt, item_id: int, timeout: int) -> str:
 
 
 async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg: str = ""):
+    number = normalize_phone(phone)
+    if not number:
+        raise RuntimeError("no phone number on item")
+
     c = client("", proxy_cfg)
     await c.connect()
     try:
-        sent = await c.send_code_request(phone)
+        try:
+            sent = await c.send_code_request(number)
+        except FloodWaitError as e:
+            wait = min(int(e.seconds) + 2, 120)
+            log.info(f"flood wait {wait}s before sending code for {item_id}")
+            await asyncio.sleep(wait)
+            sent = await c.send_code_request(number)
+
         last: Exception | None = None
 
         for attempt in range(3):
@@ -61,7 +88,7 @@ async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg
             if not code:
                 raise RuntimeError("LZT login code not received")
             try:
-                await c.sign_in(phone=phone, code=code,
+                await c.sign_in(phone=number, code=code,
                                 phone_code_hash=sent.phone_code_hash)
                 break
             except SessionPasswordNeededError:
@@ -69,9 +96,15 @@ async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg
                     raise RuntimeError("2FA required but no password on item")
                 await c.sign_in(password=password)
                 break
-            except PhoneCodeInvalidError as e:
+            except (PhoneCodeInvalidError, PhoneCodeExpiredError) as e:
                 last = e
                 log.info(f"code rejected for {item_id}, retrying ({attempt + 1}/3)")
+                if isinstance(e, PhoneCodeExpiredError):
+                    try:
+                        sent = await c.send_code_request(number)
+                    except FloodWaitError as fw:
+                        await asyncio.sleep(min(int(fw.seconds) + 2, 120))
+                        sent = await c.send_code_request(number)
                 await asyncio.sleep(3)
         else:
             raise RuntimeError(f"login code rejected: {last}")
@@ -131,18 +164,42 @@ async def reset_others(c: TelegramClient) -> int:
             await c(functions.account.ResetAuthorizationRequest(hash=a.hash))
             killed += 1
             await asyncio.sleep(0.3)
+        except FloodWaitError as e:
+            await asyncio.sleep(min(int(e.seconds) + 2, 60))
+            try:
+                await c(functions.account.ResetAuthorizationRequest(hash=a.hash))
+                killed += 1
+            except Exception as inner:
+                log.info(f"reset auth {a.hash}: {inner}")
         except Exception as e:
             log.info(f"reset auth {a.hash}: {e}")
     return killed
 
 
 async def set_2fa(c: TelegramClient, password: str, current: str = ""):
-    await c.edit_2fa(new_password=password, current_password=current or None, hint="")
+    last: Exception | None = None
+    for attempt in (current or None, None):
+        try:
+            await c.edit_2fa(new_password=password, current_password=attempt, hint="")
+            return
+        except (PasswordHashInvalidError, SessionPasswordNeededError) as e:
+            last = e
+            continue
+    if last:
+        raise last
 
 
 async def spambot_status(c: TelegramClient) -> str:
     try:
         bot = await c.get_entity("spambot")
+    except Exception:
+        try:
+            bot = await c.get_input_entity("spambot")
+        except Exception as e:
+            log.info(f"spambot entity: {e}")
+            return ""
+
+    try:
         async with c.conversation(bot, timeout=30) as conv:
             await conv.send_message("/start")
             msg = await conv.get_response()
@@ -155,14 +212,18 @@ async def spambot_status(c: TelegramClient) -> str:
 async def device_list(c: TelegramClient) -> list[str]:
     try:
         auths = await c(functions.account.GetAuthorizationsRequest())
-    except Exception:
+    except Exception as e:
+        log.info(f"device list: {e}")
         return []
-    out = []
+
+    current: list[str] = []
+    other: list[str] = []
     for a in auths.authorizations:
-        mark = "🟢" if a.current else "⚪"
         place = ", ".join(x for x in (a.country, a.region) if x) or "unknown"
-        out.append(f"{mark} {a.device_model or 'Unknown'} ({a.platform}) [{place}]")
-    return out
+        line = (f"{'🟢' if a.current else '⚪'} {a.device_model or 'Unknown'}"
+                f" ({a.platform}) [{place}]")
+        (current if a.current else other).append(line)
+    return current + other
 
 
 async def owned_counts(c: TelegramClient) -> tuple[int, int, int]:
@@ -170,16 +231,16 @@ async def owned_counts(c: TelegramClient) -> tuple[int, int, int]:
     try:
         res = await c(functions.channels.GetAdminedPublicChannelsRequest())
         channels = len(res.chats)
-    except Exception:
-        pass
+    except Exception as e:
+        log.info(f"owned channels: {e}")
     try:
         async for d in c.iter_dialogs(limit=200):
             if d.is_group and getattr(d.entity, "creator", False):
                 groups += 1
             elif d.is_user and getattr(d.entity, "bot", False):
                 bots += 1
-    except Exception:
-        pass
+    except Exception as e:
+        log.info(f"owned dialogs: {e}")
     return channels, groups, bots
 
 
@@ -187,5 +248,11 @@ async def terminate(c: TelegramClient):
     await reset_others(c)
     try:
         await c.log_out()
+    except FloodWaitError as e:
+        await asyncio.sleep(min(int(e.seconds) + 2, 60))
+        try:
+            await c.log_out()
+        except Exception as inner:
+            log.warning(f"logout: {inner}")
     except Exception as e:
         log.warning(f"logout: {e}")
