@@ -8,15 +8,17 @@ the item flag is only enforced locally when the server was told to ignore spam.
 """
 from __future__ import annotations
 
+import math
 import re
 import time
+from decimal import Decimal, InvalidOperation
 
 from app.utils.timeutil import age_hours, parse_ts
 
 TARGET_FALLBACK = 24.0
 
 _FLAG_RE = re.compile("[\U0001F1E6-\U0001F1FF]{2}")
-_COUNTRY_RE = re.compile(r"\(([A-Z]{2})\)")
+_COUNTRY_RE = re.compile(r"\(([A-Za-z]{2})\)")
 _PHONE_RE = re.compile(r"\+\d{6,16}")
 
 _CREATED_KEYS = (
@@ -34,29 +36,39 @@ _PERIOD_HOURS = {
     "час": 1.0, "часа": 1.0, "часов": 1.0, "ч": 1.0,
     "day": 24.0, "days": 24.0, "d": 24.0,
     "д": 24.0, "дн": 24.0, "дня": 24.0, "дней": 24.0, "сут": 24.0, "суток": 24.0,
-    "month": 730.0, "months": 730.0, "mo": 730.0,
+    "week": 168.0, "weeks": 168.0, "w": 168.0, "нед": 168.0, "недели": 168.0,
+    "month": 730.0, "months": 730.0, "mo": 730.0, "mos": 730.0,
     "мес": 730.0, "месяц": 730.0, "месяца": 730.0, "месяцев": 730.0,
-    "year": 8760.0, "years": 8760.0, "y": 8760.0,
+    "year": 8760.0, "years": 8760.0, "y": 8760.0, "yr": 8760.0, "yrs": 8760.0,
     "г": 8760.0, "год": 8760.0, "года": 8760.0, "лет": 8760.0,
 }
 
+# longest-first so "months" wins over "mo" and "m"
+_UNIT_ALT = "|".join(re.escape(u) for u in sorted(_PERIOD_HOURS, key=len, reverse=True))
+
 _AGE_TEXT_RES = (
     re.compile(r"(?:session\s*age|возраст\s*сесси[ия]|сесси[яи])\s*[:\-–—]?\s*"
-               r"(\d+(?:[.,]\d+)?)\s*([A-Za-zА-Яа-я]+)?"),
-    re.compile(r"(\d+(?:[.,]\d+)?)\s*([A-Za-zА-Яа-я]+)?\s*(?:session|сесси[ия])"),
+               r"(\d+(?:[.,]\d+)?)\s*(" + _UNIT_ALT + r")?(?![A-Za-zА-Яа-я])"),
+    re.compile(r"(\d+(?:[.,]\d+)?)\s*(" + _UNIT_ALT + r")?\s*(?:session|сесси[ия])"),
 )
+
+_STRIP = str.maketrans({" ": "", "\u00a0": "", ",": ".", "$": "", "€": "", "₽": ""})
 
 _TRUE = {"1", "true", "yes", "y", "on", "да", "blocked", "ban", "spam"}
 _FALSE = {"0", "false", "no", "n", "off", "", "none", "nomatter", "-"}
 
 
 def _num(value) -> float | None:
-    if isinstance(value, bool):
+    if value is None or isinstance(value, bool):
         return None
+    if isinstance(value, (int, float)):
+        f = float(value)
+        return f if math.isfinite(f) else None
     try:
-        return float(str(value).replace(",", ".").strip())
-    except (TypeError, ValueError):
+        f = float(Decimal(str(value).translate(_STRIP)))
+    except (InvalidOperation, TypeError, ValueError):
         return None
+    return f if math.isfinite(f) else None
 
 
 def _flag(value) -> bool | None:
@@ -93,11 +105,11 @@ def country_of(item: dict) -> str:
     if flag:
         return _flag_to_iso(flag)
     m = _COUNTRY_RE.search(text)
-    return m.group(1) if m else ""
+    return m.group(1).upper() if m else ""
 
 
 def phone_of(item: dict) -> str:
-    m = _PHONE_RE.search(item.get("title", "") or "")
+    m = _PHONE_RE.search(str(item.get("title") or ""))
     return m.group(0) if m else ""
 
 
@@ -151,25 +163,24 @@ def _age_from_text(item: dict) -> float | None:
             mult = _PERIOD_HOURS.get(unit)
             if mult:
                 return amount * mult
-            if unit in ("", "s"):
-                return amount * 24.0
+            return amount * 24.0          # bare number on a market listing = days
     return None
 
 
 def session_hours(item: dict) -> float | None:
+    """Age from the numeric fields; unit comes from the period key or the key name."""
     for key in _AGE_NUM_KEYS:
-        raw = item.get(key)
-        v = _num(raw)
+        v = _num(item.get(key))
         if v is None or v <= 0:
             continue
         mult = _period_hours(item) or _unit_from_key(key)
         if mult:
             return v * mult
-        if v > 100_000:
+        if v > 100_000:                    # seconds
             return v / 3600
-        if v > 1_000:
+        if v > 1_000:                      # already hours
             return v
-        return v * 24.0
+        return v * 24.0                    # market convention: days
     return _age_from_text(item)
 
 
@@ -212,7 +223,7 @@ def mail_state(item: dict) -> bool | None:
             return state
     if "email_type" in item:
         et = str(item.get("email_type") or "").strip().lower()
-        return et not in ("", "no", "none")
+        return et not in ("", "no", "none", "nomatter", "-")
     return None
 
 
@@ -235,24 +246,26 @@ def _codes(raw: str) -> set[str]:
 
 def passes(item: dict, s: dict, authoritative: bool = False) -> tuple[bool, str]:
     """Returns (ok, reason). Unknown fields never reject."""
-    price = _num(item.get("price")) or 0.0
-    if price < (_num(s.get("price_min")) or 0.0):
-        return False, "price_min"
-    if price > (_num(s.get("price_max")) or float("inf")):
-        return False, "price_max"
+    price = _num(item.get("price"))
+    if price is not None:
+        floor = _num(s.get("price_min")) or 0.0
+        cap_price = _num(s.get("price_max")) or float("inf")
+        if price < floor:
+            return False, "price_min"
+        if price > cap_price:
+            return False, "price_max"
 
     if s.get("nsb_only") == "1" and _flag(item.get("nsb")) is False:
         return False, "resold"
 
     floor = _num(s.get("session_min_hours")) or 0.0
     cap = _num(s.get("session_max_hours")) or 0.0
-    if floor or cap:
-        age = age_hours_of(item)
-        if age is not None:
-            if floor and age < floor:
-                return False, "too_fresh"
-            if cap and age > cap:
-                return False, "too_old"
+    age = age_hours_of(item) if (floor or cap) else None
+    if age is not None:
+        if floor and age < floor:
+            return False, "too_fresh"
+        if cap and age > cap:
+            return False, "too_old"
 
     if not authoritative:
         return True, "ok"
@@ -302,7 +315,7 @@ def passes(item: dict, s: dict, authoritative: bool = False) -> tuple[bool, str]
     else:
         unknown = True
 
-    if floor and age_hours_of(item) is None:
+    if floor and age is None:
         unknown = True
 
     return True, ("ok_unknown" if unknown else "ok")
