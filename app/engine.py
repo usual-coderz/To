@@ -3,20 +3,20 @@ import logging
 import time
 from collections import Counter
 
-from app import db, keyboards as kb
-from app.config import (EXPIRY_RETRY, EXPIRY_RETRY_DELAY, LOGIN_CONCURRENCY,
-                        MAX_SCAN, QUEUE_TARGET_HOURS, TICK)
+from app import db
+from app.config import (EXPIRY_RETRY, EXPIRY_RETRY_DELAY, LOGIN_CONCURRENCY, MAX_SCAN,
+                        QUEUE_TARGET_HOURS, SESSION_RETRY, TICK)
 from app.lzt import LztError
 from app.mail_engine import IMAPMailClient, TempMailClient
-from app.session_manager import (change_email, client, device_list, login_with_lzt,
-                                normalize_phone, owned_counts, reset_others, set_2fa,
-                                spambot_status)
+from app.session_manager import (change_email, check_session, client, device_list,
+                                login_with_lzt, normalize_phone, owned_counts,
+                                reset_others, set_2fa, spambot_status)
 from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import (account_created_ts, age_hours_of, country_of, passes,
                               phone_of, spam_state)
 from app.utils.money import fmt_money, pick_for_buy
-from app.utils.texts import audit_text, bought_text, session_file
+from app.utils.texts import audit_text, bought_line, failed_line, session_file
 
 log = logging.getLogger("engine")
 
@@ -28,6 +28,10 @@ _NEXT_RUN: dict[int, float] = {}
 _SEM: asyncio.Semaphore | None = None
 
 PHONE_KEYS = ("login", "telegram_login", "phone", "telegram_phone")
+
+
+class SessionDead(RuntimeError):
+    pass
 
 
 def _sem() -> asyncio.Semaphore:
@@ -55,13 +59,6 @@ async def drain_bg(timeout: float = 8.0):
 
 async def _notify(bot, tg_id, text):
     await tg.send(bot, tg_id, text)
-
-
-async def _notify_card(bot, tg_id, p: dict, stage: str):
-    markup = kb.bought(p) if p.get("_id") else None
-    ok = await tg.send(bot, tg_id, bought_text(p, stage), markup)
-    if not ok:
-        log.warning(f"card {stage} not delivered tg={tg_id} pid={p.get('_id')}")
 
 
 async def _balance_warn(bot, tg_id, text):
@@ -99,14 +96,14 @@ async def _resolve_login(lzt, item_id: int, fresh: dict, res: dict) -> tuple[str
     bought = res.get("item") or {}
     phone = phone_of_item(bought) or phone_of_item(fresh)
     password = password_of_item(bought) or password_of_item(fresh)
-    if phone:
+    if phone and password:
         return phone, password
     try:
         full = await lzt.item(item_id)
     except LztError as e:
         log.info(f"item {item_id}: {e}")
-        return "", password
-    return phone_of_item(full), password or password_of_item(full)
+        return phone, password
+    return phone or phone_of_item(full), password or password_of_item(full)
 
 
 async def _fast_buy(lzt, item_id: int, price: float, balance_id: int):
@@ -120,13 +117,6 @@ async def _fast_buy(lzt, item_id: int, price: float, balance_id: int):
                 raise
             log.info(f"buy {item_id}: balance id rejected ({e}), retrying default")
     return await lzt.fast_buy(item_id, price)
-
-
-def _due_at(created: int, age_hours: float, target: float) -> int:
-    now = time.time()
-    if created:
-        return max(int(now), created + int(target * 3600))
-    return int(now + max(0.0, target - age_hours) * 3600)
 
 
 async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tuple[bool, str]:
@@ -163,8 +153,7 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         wallet = pick_for_buy(snap["entries"], currency, price)
     if wallet is None:
         await _balance_warn(bot, tg_id,
-                            f"💳 Low balance {fmt_money(snap['total'], currency)}"
-                            f" for {fmt_money(price, currency)}")
+                            f"💳 low balance {fmt_money(snap['total'], currency)}")
         return False, "no_balance"
 
     try:
@@ -179,44 +168,40 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         pass
 
     phone, password = await _resolve_login(lzt, item_id, fresh, res)
-
-    target = db.num(s.get("queue_target_hours"), QUEUE_TARGET_HOURS) or QUEUE_TARGET_HOURS
+    country = country_of(fresh)
     created = account_created_ts(fresh) or 0
-    age = age_hours_of(fresh)
-    if age is None:
-        age = db.num(s.get("session_min_hours")) if db.num(s.get("session_min_hours")) > 0 else 0.0
-    due = _due_at(created, age, target)
+    age = age_hours_of(fresh) or 0.0
+    target = db.num(s.get("queue_target_hours"), QUEUE_TARGET_HOURS) or QUEUE_TARGET_HOURS
+    due = db.due_from(created, age, target)
 
     pid = await db.add_purchase(
-        tg_id, item_id, phone, country_of(fresh), price,
+        tg_id, item_id, phone, country, price, password=password,
         expires_at=due, target_age_hours=target, age_at_buy_hours=age,
         account_created_ts=created, spam_flag=(soft == "spam_flag"), note="bought")
+
+    await _notify(bot, tg_id, bought_line(country))
 
     if not phone:
         log.info(f"buy {item_id}: no phone on item")
         await db.close_purchase(pid, "login_failed", "no phone number on item")
-        p = await db.get_purchase(pid)
-        if p:
-            await _notify_card(bot, tg_id, p, "failed")
+        await _notify(bot, tg_id, failed_line(country, "no phone on item"))
         return True, "no_phone"
 
     log.info(f"bought {item_id} pid={pid} age={age:.2f}h due_in={due - time.time():.0f}s")
-    _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, s))
+    _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s))
     return True, (soft or "bought")
 
 
-async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, s):
+async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s):
     async with _sem():
+        await db.set_purchase(pid, password=password)
         try:
             c, session_str, _uid = await login_with_lzt(
                 phone, password, item_id, lzt, s.get("proxy", ""))
         except Exception as e:
             log.info(f"login {item_id}: {e}")
             await db.close_purchase(pid, "login_failed", str(e)[:200])
-            p = await db.get_purchase(pid)
-            if p:
-                p["password"] = password
-                await _notify_card(bot, tg_id, p, "failed")
+            await _notify(bot, tg_id, failed_line(country, str(e)))
             return
 
         await db.set_session(pid, session_str)
@@ -246,52 +231,71 @@ async def _mail_client_for(p: dict, s: dict):
             if provider == "native":
                 return None, ""
     mc = TempMailClient()
-    return mc, await mc.create_temp_email(exclude_domains=[current] if current else None)
+    try:
+        addr = await mc.create_temp_email(exclude_domains=[current] if current else None)
+    except Exception as e:
+        log.info(f"temp mail: {e}")
+        await mc.close()
+        return None, ""
+    return mc, addr
 
 
 async def _send_audit(bot, tg_id, p, data):
     sup = await db.get_username(tg_id)
-    await tg.send(bot, tg_id, audit_text(p, data, sup), kb.audit(p))
+    await tg.send(bot, tg_id, audit_text(p, data, sup))
     name = (p.get("phone") or str(p["item_id"])).lstrip("+") or "session"
     await tg.send_document(bot, tg_id, session_file(p).encode(), f"{name}.py")
 
 
+async def _fail(bot, p, note: str):
+    await db.close_purchase(p["_id"], "failed", "; ".join(note)[:300])
+    await _notify(bot, p["tg_id"],
+                  failed_line(p.get("country"), "; ".join(note)[:200]))
+
+
 async def clean_purchase(bot, lzt, p: dict):
+    pid = p["_id"]
+    if not await db.claim_purchase(pid):
+        return
+
     s = await db.get_settings(p["tg_id"])
     tries = int(p.get("expiry_tries") or 0)
-    phone = p.get("phone") or p.get("item_id")
 
     if not p.get("session_string"):
         if tries < EXPIRY_RETRY:
-            await db.bump_expiry(p["_id"], EXPIRY_RETRY_DELAY, inc_tries=True)
+            await db.release_purchase(pid, EXPIRY_RETRY_DELAY, inc_tries=True)
             return
-        await db.close_purchase(p["_id"], "failed", "no session")
-        await _notify(bot, p["tg_id"],
-                      f"⚠️ <b>Clean failed</b> <code>{tg.esc(phone)}</code>\nno session")
+        await db.close_purchase(pid, "failed", "no session")
+        await _notify(bot, p["tg_id"], failed_line(p.get("country"), "no session"))
         return
 
-    data: dict = {}
+    data: dict = {"mail_ok": False, "twofa_ok": False}
     note: list[str] = []
     c = client(p["session_string"], s.get("proxy", ""))
     try:
         await c.connect()
         if not await c.is_user_authorized():
-            raise RuntimeError("session dead")
+            raise SessionDead("session dead")
 
         mc, addr = await _mail_client_for(p, s)
-        if mc is None:
-            addr = ""
+        try:
+            if addr and s.get("change_mail_on_expire") == "1":
+                try:
+                    await change_email(c, addr, mc)
+                    data["mail_ok"] = True
+                    data["mail"] = addr
+                    note.append("mail changed")
+                except Exception as e:
+                    note.append(f"mail fail: {e}")
+        finally:
+            if mc is not None and hasattr(mc, "close"):
+                await mc.close()
+
         password = s.get("twofa_password") or db.DEFAULT_2FA
-
-        if addr and s.get("change_mail_on_expire") == "1":
-            try:
-                await change_email(c, addr, mc)
-                note.append("mail changed")
-            except Exception as e:
-                note.append(f"mail fail: {e}")
-
         try:
             await set_2fa(c, password, p.get("password") or "")
+            data["twofa_ok"] = True
+            data["password"] = password
             note.append("2fa set")
         except Exception as e:
             note.append(f"2fa fail: {e}")
@@ -303,17 +307,19 @@ async def clean_purchase(bot, lzt, p: dict):
         data["spam"] = await spambot_status(c)
         data["devices"] = await device_list(c)
         data["owned"] = await owned_counts(c)
-        data["mail"] = addr
-        data["password"] = password
+    except SessionDead as e:
+        note.append(str(e))
+        if tries < EXPIRY_RETRY:
+            await db.release_purchase(pid, EXPIRY_RETRY_DELAY, inc_tries=True)
+            return
+        await _fail(bot, p, note)
+        return
     except Exception as e:
         note.append(f"clean err: {e}")
-        if tries < 3:
-            await db.bump_expiry(p["_id"], EXPIRY_RETRY_DELAY, inc_tries=True)
+        if tries < SESSION_RETRY:
+            await db.release_purchase(pid, EXPIRY_RETRY_DELAY, inc_tries=True)
             return
-        await db.close_purchase(p["_id"], "failed", "; ".join(note)[:300])
-        await _notify(bot, p["tg_id"],
-                      f"⚠️ <b>Clean failed</b> <code>{tg.esc(phone)}</code>\n"
-                      f"{tg.esc('; '.join(note)[:250])}")
+        await _fail(bot, p, note)
         return
     finally:
         try:
@@ -321,17 +327,31 @@ async def clean_purchase(bot, lzt, p: dict):
         except Exception:
             pass
 
-    try:
-        await lzt.reset_authorizations(p["item_id"])
-        note.append("lzt auth reset")
-    except LztError as e:
-        note.append(f"reset: {e}")
+    session_str = p["session_string"]
+    if s.get("terminate_on_expire") == "1":
+        try:
+            await lzt.reset_authorizations(p["item_id"])
+            note.append("all sessions reset")
+        except LztError as e:
+            note.append(f"reset: {e}")
 
-    await db.close_purchase(p["_id"], "ready", "; ".join(note)[:300],
-                            new_mail=data.get("mail", ""))
-    fresh = await db.get_purchase(p["_id"])
+        alive, _me = await check_session(session_str, s.get("proxy", ""))
+        if not alive:
+            try:
+                _, session_str, _uid = await login_with_lzt(
+                    p.get("phone"), p.get("password") or "", p["item_id"], lzt,
+                    s.get("proxy", ""))
+                await db.set_session(pid, session_str)
+                note.append("session reissued")
+            except Exception as e:
+                note.append(f"reissue fail: {e}")
+
+    new_mail = data.get("mail", "") if data.get("mail_ok") else ""
+    await db.close_purchase(pid, "ready", "; ".join(note)[:300], new_mail=new_mail)
+    fresh = await db.get_purchase(pid)
     if fresh:
-        fresh["password"] = data.get("password", "")
+        fresh["password"] = (data.get("password") if data.get("twofa_ok")
+                             else (p.get("password") or ""))
         await _send_audit(bot, p["tg_id"], fresh, data)
 
 
@@ -353,8 +373,7 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
     snap = await wallet_view.snapshot(lzt, currency)
     if snap["spendable"] < floor_price:
         await _balance_warn(bot, tg_id,
-                            f"💳 Low balance {fmt_money(snap['total'], currency)}"
-                            f" · spendable {fmt_money(snap['spendable'], currency)}")
+                            f"💳 low balance {fmt_money(snap['total'], currency)}")
         note = f"low spendable {snap['spendable']:.2f}/{floor_price:.2f}"
         if snap["error"]:
             note += f" · {snap['error'][:80]}"
@@ -385,12 +404,9 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
             log.exception(f"buy_one {it.get('item_id')}: {e}")
             reasons["error"] += 1
             continue
+        reasons[why] += 1
         if done:
             bought += 1
-            if why in ("spam_flag", "ok_unknown", "no_phone"):
-                reasons[why] += 1
-        else:
-            reasons[why] += 1
         if bought >= max_buys:
             break
         if cap > 0 and await db.spent_today(tg_id) >= cap:
