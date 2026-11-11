@@ -12,6 +12,7 @@ from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import mail_state, pass_state, spam_state
 from app.utils.money import fmt_money
+from app.utils.timeutil import fmt_age, fmt_left
 
 router = Router()
 
@@ -76,6 +77,39 @@ async def _run_once(bot, tg_id: int):
     await tg.send(bot, tg_id, "cycle: " + (" · ".join(bits) or "no data"))
 
 
+@router.message(Command("queue"))
+async def cmd_queue(m: Message):
+    if not _owner(m):
+        return
+    rows = await db.active_purchases(m.from_user.id, limit=20)
+    if not rows:
+        return await m.answer("queue empty")
+    lines = ["<b>Queue</b>"]
+    for p in rows:
+        state = p.get("status") or "?"
+        left = fmt_left(p.get("expires_at")) if state == "queued" else "cleaned"
+        lines.append(f"<code>{tg.esc(p['_id'])}</code> · {tg.esc(p.get('phone') or '—')}"
+                     f" · {state} · age {fmt_age(p.get('age_at_buy_hours'))}"
+                     f" · {left}")
+    await tg.send(m.bot, m.chat.id, "\n".join(lines))
+
+
+@router.message(Command("clean"))
+async def cmd_clean(m: Message):
+    if not _owner(m):
+        return
+    parts = (m.text or "").split()
+    if len(parts) < 2:
+        return await m.answer("Usage: /clean <purchase_id>")
+    p = await db.get_purchase(parts[1])
+    if not p:
+        return await m.answer("❌ purchase not found")
+    if p.get("status") != "queued":
+        return await m.answer(f"❌ status is {p.get('status')}")
+    await m.answer("🧼 cleaning…")
+    await engine.clean_purchase(m.bot, lzt, p)
+
+
 @router.message(Command("diag"))
 async def cmd_diag(m: Message):
     if not _owner(m):
@@ -83,11 +117,15 @@ async def cmd_diag(m: Message):
     s = await db.get_settings(m.from_user.id)
     snap = await wallet_view.snapshot(lzt, s["currency"])
     spent = await db.spent_today(m.from_user.id)
+    queued = await db.queue_count(m.from_user.id)
     kinds = ", ".join(f"{b['kind']}:{b['amount']:g}" for b in snap["entries"]) or "none"
     await m.answer(
         "<b>diag</b>\n"
         f"auto_buy {s['auto_buy']} · cap ${s['daily_spend_cap']} · spent {spent:.2f}\n"
         f"price {s['price_min']}–{s['price_max']} · currency {s['currency']}\n"
+        f"clean at {s['queue_target_hours']}h · queue {queued}\n"
+        f"2fa <code>{tg.esc(s['twofa_password'])}</code>"
+        f" · mail src {s['mail_provider']}\n"
         f"total {fmt_money(snap['total'], s['currency'])}"
         f" · spendable {fmt_money(snap['spendable'], s['currency'])}\n"
         f"entries {tg.esc(kinds)}\n"
@@ -98,7 +136,6 @@ async def cmd_diag(m: Message):
 
 @router.message(Command("peek"))
 async def cmd_peek(m: Message):
-    """Dump real check-account fields and how the filters read them."""
     if not _owner(m):
         return
     parts = (m.text or "").split()
