@@ -162,18 +162,35 @@ def normalize_settings(raw: dict) -> tuple[dict, dict]:
 
 async def init_db():
     global _client, _db
-    _client = AsyncMongoClient(MONGO_URI)
+    _client = AsyncMongoClient(MONGO_URI, tz_aware=False)
     _db = _client[MONGO_DB]
-    await _db.purchases.create_index([("status", ASCENDING), ("expires_at", ASCENDING)])
-    await _db.purchases.create_index([("tg_id", ASCENDING)])
-    await _db.ledger.create_index([("tg_id", ASCENDING), ("created_at", ASCENDING)])
-    await _db.settings.create_index([("tg_id", ASCENDING)], unique=True)
-    await _db.reports.create_index([("tg_id", ASCENDING), ("ts", DESCENDING)])
+    wanted = (
+        (_db.purchases, [("status", ASCENDING), ("expires_at", ASCENDING)]),
+        (_db.purchases, [("tg_id", ASCENDING)]),
+        (_db.purchases, [("tg_id", ASCENDING), ("phone", ASCENDING)]),
+        (_db.ledger, [("tg_id", ASCENDING), ("created_at", ASCENDING)]),
+        (_db.settings, [("tg_id", ASCENDING)]),
+        (_db.reports, [("tg_id", ASCENDING), ("ts", DESCENDING)]),
+    )
+    for coll, keys in wanted:
+        try:
+            await coll.create_index(keys)
+        except Exception as e:
+            log.warning(f"index {keys} on {coll.name}: {e}")
+    try:
+        await _db.settings.create_index([("tg_id", ASCENDING)], unique=True,
+                                        name="uniq_tg")
+    except Exception as e:
+        log.info(f"unique settings index: {e}")
 
 
 async def close_db():
+    global _client, _db
     if _client:
-        await _client.close()
+        try:
+            await _client.close()
+        finally:
+            _client, _db = None, None
 
 
 async def ensure_user(tg_id: int, username: str = ""):
@@ -215,12 +232,12 @@ async def all_owners() -> list[dict]:
 
 
 async def spent_today(tg_id: int) -> float:
-    cursor = await _db.purchases.aggregate([
-        {"$match": {"tg_id": tg_id, "started_at": {"$gte": _now() - 86_400}}},
-        {"$group": {"_id": None, "s": {"$sum": "$price"}}},
-    ])
-    res = await cursor.to_list(length=1)
-    return float(res[0]["s"]) if res else 0.0
+    total = 0.0
+    cursor = _db.purchases.find(
+        {"tg_id": tg_id, "started_at": {"$gte": _now() - 86_400}}, {"price": 1})
+    async for doc in cursor:
+        total += float(doc.get("price") or 0.0)
+    return total
 
 
 async def add_purchase(tg_id, item_id, phone, country, price, mail="", mail_password="",
@@ -229,8 +246,8 @@ async def add_purchase(tg_id, item_id, phone, country, price, mail="", mail_pass
                        status="active", note="") -> str:
     now = _now()
     pid = (await _db.purchases.insert_one({
-        "tg_id": tg_id, "item_id": item_id, "phone": phone, "country": country,
-        "price": float(price), "mail": mail, "mail_password": mail_password,
+        "tg_id": tg_id, "item_id": item_id, "phone": phone or "", "country": country or "",
+        "price": float(price), "mail": mail or "", "mail_password": mail_password or "",
         "session_string": session_string, "status": status,
         "started_at": now, "expires_at": int(expires_at),
         "target_age_hours": float(target_age_hours),
@@ -251,7 +268,7 @@ async def add_purchase(tg_id, item_id, phone, country, price, mail="", mail_pass
 async def due_purchases(limit: int = 200) -> list[dict]:
     return await _db.purchases.find(
         {"status": "active", "expires_at": {"$gt": 0, "$lte": _now()}}
-    ).limit(limit).to_list(None)
+    ).sort("expires_at", ASCENDING).limit(limit).to_list(None)
 
 
 async def active_purchases(tg_id: int) -> list[dict]:
@@ -269,7 +286,9 @@ async def get_purchase(pid) -> dict | None:
 
 
 async def find_by_phone(tg_id: int, needle: str) -> dict | None:
-    pattern = re.escape(needle.strip().lstrip("+"))
+    pattern = re.escape((needle or "").strip().lstrip("+"))
+    if not pattern:
+        return None
     return await _db.purchases.find_one(
         {"tg_id": tg_id, "phone": {"$regex": pattern}}, sort=[("_id", -1)])
 
@@ -327,20 +346,19 @@ async def ledger_rows(tg_id: int) -> list[dict]:
 
 
 async def ledger_stats(tg_id: int) -> dict:
-    cursor = await _db.ledger.aggregate([
-        {"$match": {"tg_id": tg_id}},
-        {"$group": {"_id": None, "total": {"$sum": 1},
-                    "spent": {"$sum": "$buy_price"},
-                    "revenue": {"$sum": "$sell_price"}}},
-    ])
-    res = await cursor.to_list(length=1)
-    row = res[0] if res else {"total": 0, "spent": 0.0, "revenue": 0.0}
-    spent, revenue = float(row["spent"]), float(row["revenue"])
+    total = done = 0
+    spent = revenue = 0.0
+    cursor = _db.ledger.find({"tg_id": tg_id},
+                             {"buy_price": 1, "sell_price": 1, "status": 1})
+    async for row in cursor:
+        total += 1
+        spent += float(row.get("buy_price") or 0.0)
+        revenue += float(row.get("sell_price") or 0.0)
+        if row.get("status") in ("terminated", "sold"):
+            done += 1
     profit = revenue - spent
-    done = await _db.ledger.count_documents(
-        {"tg_id": tg_id, "status": {"$in": ["terminated", "sold"]}})
-    return {"total": int(row["total"]), "spent": spent, "revenue": revenue,
-            "profit": profit, "roi": (profit / spent * 100) if spent else 0.0, "done": done}
+    return {"total": total, "spent": spent, "revenue": revenue, "profit": profit,
+            "roi": (profit / spent * 100) if spent else 0.0, "done": done}
 
 
 async def save_report(tg_id: int, *, scanned: int = 0, bought: int = 0,
@@ -349,7 +367,7 @@ async def save_report(tg_id: int, *, scanned: int = 0, bought: int = 0,
     await _db.reports.insert_one({
         "tg_id": tg_id, "ts": now, "scanned": int(scanned), "bought": int(bought),
         "skipped": int(sum((reasons or {}).values())), "reasons": reasons or {},
-        "note": note[:200], "error": error[:300],
+        "note": (note or "")[:200], "error": (error or "")[:300],
     })
     await _db.reports.delete_many(
         {"tg_id": tg_id, "ts": {"$lt": now - REPORT_KEEP_HOURS * 3600}})
