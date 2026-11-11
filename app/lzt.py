@@ -9,7 +9,7 @@ from app.utils.money import parse_balances, parse_user, same_currency
 
 log = logging.getLogger("lzt")
 
-PAYMENT_PATHS = ("/payments", "/balance/payments", "/user/payments")
+PAYMENT_PATHS = ("/user/payments", "/payments", "/balance/payments")
 
 
 class LztError(Exception):
@@ -174,6 +174,10 @@ class LztClient:
     async def search(self, s: dict) -> list[dict]:
         data = await self._get("/telegram", self._search_params(s))
         return data.get("items") or []
+
+    async def item(self, item_id: int) -> dict:
+        data = await self._get(f"/{int(item_id)}")
+        return data.get("item") or data
 
     async def check_account(self, item_id: int) -> dict:
         path = f"/{int(item_id)}/check-account"
