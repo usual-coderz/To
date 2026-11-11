@@ -1,4 +1,3 @@
-"""LZT Market API client — typed, retrying, tolerant."""
 import asyncio
 import logging
 
@@ -10,6 +9,8 @@ from app.utils.money import parse_balances, parse_user, same_currency
 
 log = logging.getLogger("lzt")
 
+PAYMENT_PATHS = ("/payments", "/balance/payments", "/user/payments")
+
 
 class LztError(Exception):
     def __init__(self, message: str, status: int = 0):
@@ -18,7 +19,6 @@ class LztError(Exception):
 
 
 def _message(payload) -> str:
-    """Dig the human message out of whatever shape the API used."""
     def dig(node, depth: int = 0) -> str:
         if depth > 4:
             return ""
@@ -64,6 +64,7 @@ class LztClient:
     async def _request(self, method: str, path: str, **kwargs) -> dict:
         delay = HTTP_BACKOFF
         last: LztError | None = None
+
         for attempt in range(HTTP_RETRIES):
             try:
                 r = await self._http.request(method, path, **kwargs)
@@ -85,7 +86,7 @@ class LztClient:
                 wait = delay
                 try:
                     wait = max(wait, float(r.headers.get("Retry-After") or 0))
-                except ValueError:
+                except (TypeError, ValueError):
                     pass
                 log.info(f"{path}: HTTP {r.status_code}, retry in {wait:.1f}s")
                 await asyncio.sleep(min(wait, 20.0))
@@ -101,6 +102,7 @@ class LztClient:
                     raise LztError(msg, r.status_code)
 
             return payload if isinstance(payload, dict) else {}
+
         raise last or LztError("request failed")
 
     async def _get(self, path: str, params: dict | None = None) -> dict:
@@ -109,8 +111,6 @@ class LztClient:
     async def _post(self, path: str, params: dict | None = None,
                     json: dict | None = None) -> dict:
         return await self._request("POST", path, params=params or {}, json=json)
-
-    # ── profile / balances ────────────────────────────────────────────────
 
     async def profile(self) -> dict:
         return parse_user(await self._get("/me"))
@@ -125,8 +125,17 @@ class LztClient:
         return max(0.0, user["balance"] - user["hold"])
 
     async def payments(self, page: int = 1) -> list[dict]:
-        data = await self._get("/payments", {"page": page, "limit": 20})
-        return data.get("payments") or []
+        params = {"page": int(page), "limit": 20}
+        for path in PAYMENT_PATHS:
+            try:
+                data = await self._get(path, params)
+            except LztError as e:
+                log.info(f"payments {path}: {e}")
+                continue
+            rows = data.get("payments") or data.get("items") or data.get("operations")
+            if isinstance(rows, list):
+                return [r for r in rows if isinstance(r, dict)]
+        return []
 
     async def exchange(self, from_id: int, to_id: int, amount: float) -> dict:
         return await self._post("/balance/exchange", {
@@ -134,8 +143,6 @@ class LztClient:
             "balance_id_to": int(to_id),
             "amount": float(amount),
         })
-
-    # ── market ────────────────────────────────────────────────────────────
 
     @staticmethod
     def _enum(value: str) -> str:
@@ -173,7 +180,6 @@ class LztClient:
         try:
             return await self._post(path)
         except LztError as e:
-            # a bare 403 is usually throttling, not a dead item
             if e.status == 403 and str(e).startswith("HTTP"):
                 await asyncio.sleep(1.5)
                 return await self._post(path)
