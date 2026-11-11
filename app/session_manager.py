@@ -96,9 +96,15 @@ def session_from_auth_key(raw: str) -> str:
     if len(key) < 200:
         raise ValueError("short auth key")
 
-    dc_id = int(data.get("dc_id") or data.get("dcId") or _FALLBACK_DC[0])
+    try:
+        dc_id = int(data.get("dc_id") or data.get("dcId") or _FALLBACK_DC[0])
+    except (TypeError, ValueError):
+        dc_id = _FALLBACK_DC[0]
     addr = str(data.get("server_address") or data.get("serverAddress") or _FALLBACK_DC[1])
-    port = int(data.get("port") or _FALLBACK_DC[2])
+    try:
+        port = int(data.get("port") or _FALLBACK_DC[2])
+    except (TypeError, ValueError):
+        port = _FALLBACK_DC[2]
 
     session = StringSession()
     session.set_dc(dc_id, addr, port)
@@ -150,9 +156,14 @@ async def _send_code(c: TelegramClient, number: str, previous: str = "") -> str:
                         phone_number=number, phone_code_hash=previous))
                     return previous
                 except FloodWaitError as fw:
+                    last = fw
                     await asyncio.sleep(min(int(fw.seconds) + 2, 120))
+                except PhoneCodeExpiredError:
+                    previous = ""
+                    await asyncio.sleep(2)
                 except RPCError as inner:
                     last = inner
+                    previous = ""
                     log.info(f"resend {number}: {inner}")
                     await asyncio.sleep(3)
             else:
@@ -173,7 +184,7 @@ async def _await_code(lzt, item_id: int, timeout: int) -> tuple[str, str]:
         except LztError as e:
             log.info(f"code poll {item_id}: {e}")
             value, mode = "", ""
-        if value and mode in ("auth_key", "authkey", "session", "key") and len(value) > 100:
+        if value and (mode == "auth_key" or len(value) > 100):
             return value, "auth_key"
         if value and len(value) >= 4:
             return value, "code"
@@ -206,20 +217,20 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
             if mode == "auth_key" and value:
                 try:
                     key_c, key_str = await _from_key(value, proxy_cfg)
-                    try:
-                        await c.disconnect()
-                    except Exception:
-                        pass
-                    return key_c, key_str, 0
                 except Exception as e:
                     last = e
                     continue
+                try:
+                    await c.disconnect()
+                except Exception:
+                    pass
+                return key_c, key_str, 0
 
             if not value:
                 if attempt < 2:
                     await _reset(lzt, item_id)
                     await asyncio.sleep(2.0)
-                    code_hash = await _send_code(c, number, code_hash)
+                    code_hash = await _send_code(c, number)
                     continue
                 raise RuntimeError("LZT login code not received")
 
@@ -235,7 +246,7 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
                 last = e
                 log.info(f"code rejected for {item_id} ({attempt + 1}/3)")
                 if isinstance(e, PhoneCodeExpiredError):
-                    code_hash = await _send_code(c, number, code_hash)
+                    code_hash = await _send_code(c, number)
                 await asyncio.sleep(3)
         else:
             raise RuntimeError(f"login code rejected: {last}")
@@ -267,13 +278,17 @@ async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg
     if key:
         try:
             c, session_str = await _from_key(key, proxy_cfg)
+        except Exception as e:
+            log.info(f"auth key login {item_id}: {e}")
+        else:
             await _reset(lzt, item_id)
             await asyncio.sleep(1.5)
             if await _alive(c):
                 return c, session_str, 0
-            await c.disconnect()
-        except Exception as e:
-            log.info(f"auth key login {item_id}: {e}")
+            try:
+                await c.disconnect()
+            except Exception:
+                pass
 
     await _reset(lzt, item_id)
     await asyncio.sleep(2.5)
