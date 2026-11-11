@@ -6,6 +6,17 @@ from app.utils.tg import esc
 BAR = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 
+def bought_line(country: str) -> str:
+    return f"✅ <b>{esc(country or '??')}</b> bought"
+
+
+def failed_line(country: str, reason: str = "") -> str:
+    body = f"⚠️ <b>{esc(country or '??')}</b> login failed"
+    if reason:
+        body += f"\n{esc(str(reason)[:150])}"
+    return body
+
+
 def menu_text(s: dict, profile: dict, total: float, spendable: float,
               queued: int, note: str = "") -> str:
     body = (
@@ -21,8 +32,7 @@ def menu_text(s: dict, profile: dict, total: float, spendable: float,
         f"{'🟢 running' if s['auto_buy'] == '1' else '🔴 stopped'}"
         f" · queue {queued}\n"
         f"price {s['price_min']}–{s['price_max']} · spam {s['spam_mode']}\n"
-        f"clean at {s['queue_target_hours']}h"
-        f" · min age {s['session_min_hours']}h\n"
+        f"target age {s['queue_target_hours']}h · min age {s['session_min_hours']}h\n"
         f"mail {s['mail_mode']} · 2fa {s['password_mode']}\n"
         f"include {esc(s['countries'] or 'all')} · exclude {esc(s['deny_countries'] or '—')}"
     )
@@ -49,7 +59,7 @@ def limits_text(s: dict) -> str:
         f"{BAR}\n"
         f"daily cap ${s['daily_spend_cap']} (0 = unlimited)\n"
         f"buys per cycle {s['max_buy_per_cycle']} · poll {s['poll_interval']}s\n"
-        f"clean at {s['queue_target_hours']}h\n"
+        f"target age {s['queue_target_hours']}h — short sessions wait out the rest\n"
         f"terminate {s['terminate_on_expire']} · change mail {s['change_mail_on_expire']}\n"
         f"mail source {s['mail_provider']} · 2fa <code>{esc(s['twofa_password'])}</code>\n"
         f"proxy {'set' if s.get('proxy') else 'off'}"
@@ -80,36 +90,6 @@ def wallet_text(snap: dict) -> str:
     return body
 
 
-def account_card(p: dict) -> str:
-    created = p.get("account_created_ts") or 0
-    lines = [
-        f"📱 <b>{esc(p.get('phone') or '—')}</b>",
-        f"🌍 <b>{esc(p.get('country') or '??')}</b> · item <code>{esc(p['item_id'])}</code>",
-        f"💵 {fmt_money(p.get('price') or 0.0)} · bought {fmt_dt(p.get('started_at'))}",
-        f"🗓 created {fmt_dt(created) if created else 'unknown'}"
-        f" · age {fmt_age(p.get('age_at_buy_hours'))}",
-    ]
-    if p.get("password"):
-        lines.append(f"🔑 <code>{esc(p['password'])}</code>")
-    if p.get("mail"):
-        lines.append(f"📧 {esc(p['mail'])}")
-    if p.get("expires_at"):
-        lines.append(f"⏳ cleaning in {fmt_left(p['expires_at'])}")
-    return "\n".join(lines)
-
-
-def bought_text(p: dict, stage: str = "bought") -> str:
-    head = {
-        "bought": "🛒 <b>Bought</b> — logging in…",
-        "queued": "⏳ <b>Queued</b> — waiting for the clean age",
-        "failed": "⚠️ <b>Login failed</b>",
-    }.get(stage, "🛒 <b>Bought</b>")
-    body = f"{head}\n{BAR}\n{account_card(p)}"
-    if p.get("note"):
-        body += f"\n📝 {esc(str(p['note'])[:150])}"
-    return body
-
-
 def _spam_line(reply: str) -> str:
     low = (reply or "").lower()
     if not low:
@@ -133,14 +113,17 @@ def audit_text(p: dict, d: dict, supervisor: str = "") -> str:
     if bt:
         owned.append(f"{bt} bot(s)")
     device_lines = "\n".join(devices) if devices else "—"
+    twofa = "ON" if d.get("twofa_ok") else "FAILED"
+    mail = f"Added ({esc(d.get('mail'))})" if d.get("mail_ok") else "not changed"
 
     return (
         f"🌟 <b>Audit Report</b> | {esc(p.get('phone') or p['item_id'])}\n"
         f"{BAR}\n"
+        f" ├ 🌍 Country: {esc(p.get('country') or '??')}\n"
         f" ├ 📅 Age: {fmt_year(created)}\n"
         f" ├ 🚦 Spam: {_spam_line(d.get('spam') or '')}\n"
-        f" ├ 🔐 2FA: ON\n"
-        f" ├ 📧 Mail: {'Added (' + esc(d['mail']) + ')' if d.get('mail') else 'not changed'}\n"
+        f" ├ 🔐 2FA: {twofa}\n"
+        f" ├ 📧 Mail: {mail}\n"
         f" └ 📱 Devices: {len(devices)} active\n"
         f"{BAR}\n"
         f"🤖 <b>SpamBot Reply:</b>\n"
@@ -150,8 +133,8 @@ def audit_text(p: dict, d: dict, supervisor: str = "") -> str:
         f"🏛️ <b>Owned Channels / Groups / Bots:</b> "
         f"{esc(', '.join(owned) if owned else 'None')}\n\n"
         f"👑 <b>Supervisor:</b> @{esc(supervisor or '—')}\n\n"
-        f"🔑 <b>2FA Password:</b> <code>{esc(d.get('password') or '')}</code>\n\n"
-        f"🎉 <b>Account Buyed Successfully</b>"
+        f"🔑 <b>2FA Password:</b> <code>{esc(d.get('password') or '—')}</code>\n\n"
+        f"🎉 <b>Account bought successfully</b>"
     )
 
 
@@ -171,8 +154,8 @@ def session_detail(p: dict, checked: str = "") -> str:
         f"created {fmt_dt(created) if created else 'unknown'}"
         f" · age {fmt_age(p.get('age_at_buy_hours'))} at buy\n"
         f"bought {fmt_dt(p.get('started_at'))} for {fmt_money(p.get('price') or 0.0)}\n"
-        f"state <b>{esc(state)}</b> · clean at {p.get('target_age_hours', 24):g}h\n"
-        f"⏳ {fmt_left(p.get('expires_at')) if state == 'queued' else 'cleaned'}\n"
+        f"state <b>{esc(state)}</b> · target {p.get('target_age_hours', 24):g}h\n"
+        f"⏳ {fmt_left(p.get('expires_at')) if state in ('queued', 'cleaning') else 'cleaned'}\n"
         f"session {esc(p.get('session_state') or 'pending')}"
         f" · checked {fmt_dt(p.get('checked_at')) if p.get('checked_at') else '—'}\n"
         f"📧 {esc(p.get('mail') or '—')}"
@@ -192,6 +175,7 @@ def session_file(p: dict) -> str:
         f"item_id = {p['item_id']}\n"
         f"country = {p.get('country') or ''}\n"
         f"mail = {p.get('mail') or ''}\n"
+        f"password = {p.get('password') or ''}\n"
         f"account_created = {fmt_dt(created) if created else 'unknown'}\n"
         f"age_at_buy_hours = {p.get('age_at_buy_hours', 0)}\n"
         f"bought_at = {fmt_dt(p.get('started_at'))}\n\n"
