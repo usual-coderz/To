@@ -1,15 +1,18 @@
 import asyncio
 import logging
+import time
 
 import httpx
 
-from app.config import HTTP_BACKOFF, HTTP_RETRIES, HTTP_TIMEOUT, LZT_BASE, LZT_TOKEN
+from app.config import (CACHE_TTL, HTTP_BACKOFF, HTTP_RETRIES, HTTP_TIMEOUT, LZT_BASE,
+                        LZT_TOKEN)
 from app.utils.filters import search_query
 from app.utils.money import parse_balances, parse_user, same_currency
 
 log = logging.getLogger("lzt")
 
 PAYMENT_PATHS = ("/user/payments", "/payments", "/balance/payments")
+AUTH_KEY_FIELDS = ("telegram_auth_key", "auth_key", "telegram_session", "session")
 
 
 class LztError(Exception):
@@ -47,12 +50,13 @@ def _message(payload) -> str:
 class LztClient:
     def __init__(self, token: str = LZT_TOKEN):
         self._token = token
+        self._cache: dict[str, tuple[float, object]] = {}
         self._http = httpx.AsyncClient(
             base_url=LZT_BASE,
             timeout=HTTP_TIMEOUT,
             headers={"Authorization": f"Bearer {token}",
                      "Accept": "application/json",
-                     "User-Agent": "AccStore/2.1"},
+                     "User-Agent": "AccStore/2.2"},
         )
 
     async def close(self):
@@ -60,6 +64,23 @@ class LztClient:
             await self._http.aclose()
         except Exception:
             pass
+
+    def invalidate(self):
+        self._cache.clear()
+
+    def _cached(self, key: str):
+        hit = self._cache.get(key)
+        if not hit:
+            return None
+        stamp, value = hit
+        if time.monotonic() - stamp > CACHE_TTL:
+            self._cache.pop(key, None)
+            return None
+        return value
+
+    def _store(self, key: str, value):
+        self._cache[key] = (time.monotonic(), value)
+        return value
 
     async def _request(self, method: str, path: str, **kwargs) -> dict:
         delay = HTTP_BACKOFF
@@ -97,9 +118,9 @@ class LztClient:
                 raise LztError(_message(payload) or f"HTTP {r.status_code}", r.status_code)
 
             if isinstance(payload, dict) and payload.get("errors"):
-                msg = _message(payload)
-                if msg:
-                    raise LztError(msg, r.status_code)
+                raise LztError(
+                    _message(payload) or f"errors: {payload.get('errors')!r}"[:300],
+                    r.status_code)
 
             return payload if isinstance(payload, dict) else {}
 
@@ -112,14 +133,24 @@ class LztClient:
                     json: dict | None = None) -> dict:
         return await self._request("POST", path, params=params or {}, json=json)
 
-    async def profile(self) -> dict:
-        return parse_user(await self._get("/me"))
+    async def profile(self, use_cache: bool = True) -> dict:
+        if use_cache:
+            hit = self._cached("me")
+            if hit is not None:
+                return dict(hit)
+        data = parse_user(await self._get("/me"))
+        return dict(self._store("me", data))
 
-    async def balances(self) -> list[dict]:
-        return parse_balances(await self._get("/balance/exchange"))
+    async def balances(self, use_cache: bool = True) -> list[dict]:
+        if use_cache:
+            hit = self._cached("balances")
+            if hit is not None:
+                return [dict(b) for b in hit]
+        data = parse_balances(await self._get("/balance/exchange"))
+        return [dict(b) for b in self._store("balances", data)]
 
     async def balance_total(self, currency: str = "usd") -> float:
-        user = parse_user(await self._get("/me"))
+        user = await self.profile()
         if not same_currency(user["currency"], currency):
             return 0.0
         return max(0.0, user["balance"] - user["hold"])
@@ -138,11 +169,13 @@ class LztClient:
         return []
 
     async def exchange(self, from_id: int, to_id: int, amount: float) -> dict:
-        return await self._post("/balance/exchange", {
+        data = await self._post("/balance/exchange", {
             "balance_id_from": int(from_id),
             "balance_id_to": int(to_id),
             "amount": float(amount),
         })
+        self.invalidate()
+        return data
 
     @staticmethod
     def _enum(value: str) -> str:
@@ -181,19 +214,25 @@ class LztClient:
 
     async def check_account(self, item_id: int) -> dict:
         path = f"/{int(item_id)}/check-account"
-        try:
-            return await self._post(path)
-        except LztError as e:
-            if e.status == 403 and str(e).startswith("HTTP"):
-                await asyncio.sleep(1.5)
+        last: LztError | None = None
+        for attempt in range(2):
+            try:
                 return await self._post(path)
-            raise
+            except LztError as e:
+                last = e
+                if e.status not in (403, 429) or attempt:
+                    raise
+                await asyncio.sleep(1.5)
+        raise last or LztError("check failed")
 
-    async def fast_buy(self, item_id: int, price: float, balance_id: int | None = None) -> dict:
+    async def fast_buy(self, item_id: int, price: float,
+                       balance_id: int | None = None) -> dict:
         params = {"price": float(price)}
         if balance_id:
             params["balance_id"] = int(balance_id)
-        return await self._post(f"/{int(item_id)}/fast-buy", params=params)
+        data = await self._post(f"/{int(item_id)}/fast-buy", params=params)
+        self.invalidate()
+        return data
 
     async def reset_authorizations(self, item_id: int) -> dict:
         return await self._post(f"/{int(item_id)}/reset-authorizations")
@@ -201,4 +240,26 @@ class LztClient:
     async def telegram_login_code(self, item_id: int) -> tuple[str, str]:
         data = await self._get(f"/{int(item_id)}/telegram-login-code")
         item = data.get("item") or data
-        return str(item.get("code") or ""), str(item.get("mode") or "")
+        value = str(item.get("code") or "").strip()
+        mode = str(item.get("mode") or "").strip().lower()
+        return value, mode
+
+    async def auth_key(self, item_id: int) -> str:
+        value, mode = await self.telegram_login_code(item_id)
+        if value and mode in ("auth_key", "authkey", "session"):
+            return value
+        try:
+            item = await self.item(item_id)
+        except LztError:
+            return ""
+        for key in AUTH_KEY_FIELDS:
+            raw = item.get(key)
+            if isinstance(raw, str) and len(raw) > 40:
+                return raw
+        data = item.get("loginData")
+        if isinstance(data, dict):
+            for key in AUTH_KEY_FIELDS:
+                raw = data.get(key)
+                if isinstance(raw, str) and len(raw) > 40:
+                    return raw
+        return ""
