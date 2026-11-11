@@ -10,6 +10,7 @@ from app import keyboards as kb
 from app.deps import lzt
 from app.handlers.menu import show
 from app.lzt import LztError
+from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.money import fmt_money, free_of
 from app.utils.texts import payment_text, wallet_text
@@ -35,13 +36,13 @@ def _touch(st: dict):
 
 
 def has_pending(uid: int) -> bool:
-    return bool(_st(uid)) and "to_id" in _st(uid)
+    return "to_id" in _st(uid)
 
 
 async def _snap_or_reply(target, edit: bool = False) -> dict | None:
     snap = await wallet_view.snapshot(lzt, "usd")
     if snap["error"] and not snap["entries"]:
-        text = f"error <code>{html.escape(snap['error'][:200])}</code>"
+        text = f"error <code>{tg.esc(snap['error'][:200])}</code>"
         if edit:
             await show(target, text, kb.back("m:main"))
         else:
@@ -60,12 +61,11 @@ async def _deliver(bot, uid: int, amount: float, chat_id: int = 0, message_id: i
     if chat_id and message_id:
         try:
             await bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id,
-                                        reply_markup=markup, disable_web_page_preview=True)
+                                        reply_markup=markup)
             return
         except Exception:
             pass
-    await bot.send_message(chat_id or uid, text, reply_markup=markup,
-                           disable_web_page_preview=True)
+    await tg.send(bot, chat_id or uid, text, markup)
 
 
 @router.message(Command("wallet"))
@@ -74,7 +74,8 @@ async def cmd_wallet(m: Message):
     snap = await _snap_or_reply(m)
     if snap is None:
         return
-    await m.answer(wallet_text(snap), reply_markup=kb.wallet(wallet_view.exchangable(snap)))
+    await tg.send(m.bot, m.chat.id, wallet_text(snap),
+                  kb.wallet(wallet_view.exchangable(snap)))
 
 
 @router.callback_query(F.data == "m:wallet")
@@ -92,7 +93,7 @@ async def cb_payments(cq: CallbackQuery):
     try:
         rows = await lzt.payments(page=1)
     except LztError as e:
-        await show(cq, f"error <code>{html.escape(str(e))}</code>", kb.back("m:wallet"))
+        await show(cq, f"error <code>{tg.esc(str(e))}</code>", kb.back("m:wallet"))
         return await cq.answer()
     body = "\n".join(payment_text(p) for p in rows[:10]) or "nothing"
     await show(cq, f"<b>Payments</b>\n{body}", kb.back("m:wallet"))
@@ -151,10 +152,12 @@ async def cb_step(cq: CallbackQuery):
 
     live = {b["balance_id"]: b for b in wallet_view.exchangable(snap) if b.get("balance_id")}
     pool = [b for b in st.get("pool") or [] if b.get("balance_id") in live]
+    if step == "to":
+        pool = [b for b in pool if b["balance_id"] != st.get("from_id")]
     if not pool:
         EXCH.pop(cq.from_user.id, None)
         return await cq.answer("balances changed, restart", show_alert=True)
-    st["pool"] = pool
+    st["pool"] = [b for b in st.get("pool") or [] if b.get("balance_id") in live]
     if idx >= len(pool):
         return await cq.answer("pick again", show_alert=True)
 
@@ -213,6 +216,7 @@ async def cb_amount_btn(cq: CallbackQuery):
         except ValueError:
             return await cq.answer("bad amount", show_alert=True)
 
+    st["busy"] = True
     chat_id, message_id = st.get("prompt") or (cq.message.chat.id, cq.message.message_id)
     await _deliver(cq.bot, cq.from_user.id, amount, chat_id, message_id)
     await cq.answer("done")
@@ -265,7 +269,8 @@ async def _do(uid: int, bot, amount: float) -> str:
     try:
         balances = await lzt.balances()
     except LztError as e:
-        return f"⚠️ {html.escape(str(e))}"
+        st["busy"] = False
+        return f"⚠️ {tg.esc(str(e))}"
 
     src = next((b for b in balances if b.get("balance_id") == st["from_id"]), None)
     if not src:
@@ -273,8 +278,10 @@ async def _do(uid: int, bot, amount: float) -> str:
         return "⚠️ source balance gone, restart"
     avail = free_of(src)
     if amount < 0.01:
+        st["busy"] = False
         return f"⚠️ minimum is {fmt_money(0.01, st['cur'])}"
     if amount > avail + 1e-9:
+        st["busy"] = False
         return f"⚠️ only {fmt_money(avail, st['cur'])} available"
 
     st["busy"] = True
@@ -282,7 +289,7 @@ async def _do(uid: int, bot, amount: float) -> str:
         await lzt.exchange(st["from_id"], st["to_id"], amount)
     except LztError as e:
         st["busy"] = False
-        return f"⚠️ failed: {html.escape(str(e))}"
+        return f"⚠️ failed: {tg.esc(str(e))}"
 
     EXCH.pop(uid, None)
     snap = await wallet_view.snapshot(lzt, st["cur"])
