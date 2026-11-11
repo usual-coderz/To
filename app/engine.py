@@ -9,7 +9,8 @@ from app.config import (EXPIRY_RETRY, EXPIRY_RETRY_DELAY, LOGIN_CONCURRENCY,
 from app.lzt import LztError
 from app.mail_engine import IMAPMailClient, TempMailClient
 from app.session_manager import (change_email, client, device_list, login_with_lzt,
-                                owned_counts, reset_others, set_2fa, spambot_status)
+                                normalize_phone, owned_counts, reset_others, set_2fa,
+                                spambot_status)
 from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import (account_created_ts, age_hours_of, country_of, passes,
@@ -25,6 +26,8 @@ WARN_COOLDOWN = 900.0
 _BG: set[asyncio.Task] = set()
 _NEXT_RUN: dict[int, float] = {}
 _SEM: asyncio.Semaphore | None = None
+
+PHONE_KEYS = ("login", "telegram_login", "phone", "telegram_phone")
 
 
 def _sem() -> asyncio.Semaphore:
@@ -66,6 +69,44 @@ async def _balance_warn(bot, tg_id, text):
         return
     _BAL_WARNED[tg_id] = time.time()
     await _notify(bot, tg_id, text)
+
+
+def phone_of_item(item: dict) -> str:
+    for key in PHONE_KEYS:
+        raw = str(item.get(key) or "").strip()
+        norm = normalize_phone(raw)
+        if norm and 8 <= len(norm) <= 17:
+            return norm
+    data = item.get("loginData")
+    if isinstance(data, dict):
+        norm = normalize_phone(data.get("login") or "")
+        if norm:
+            return norm
+    return normalize_phone(phone_of(item))
+
+
+def password_of_item(item: dict) -> str:
+    data = item.get("loginData")
+    if isinstance(data, dict) and data.get("password"):
+        return str(data["password"])
+    for key in ("telegram_password", "password"):
+        if item.get(key):
+            return str(item[key])
+    return ""
+
+
+async def _resolve_login(lzt, item_id: int, fresh: dict, res: dict) -> tuple[str, str]:
+    bought = res.get("item") or {}
+    phone = phone_of_item(bought) or phone_of_item(fresh)
+    password = password_of_item(bought) or password_of_item(fresh)
+    if phone:
+        return phone, password
+    try:
+        full = await lzt.item(item_id)
+    except LztError as e:
+        log.info(f"item {item_id}: {e}")
+        return "", password
+    return phone_of_item(full), password or password_of_item(full)
 
 
 async def _fast_buy(lzt, item_id: int, price: float, balance_id: int):
@@ -137,19 +178,27 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
     except Exception:
         pass
 
-    login_data = (res.get("item") or {}).get("loginData") or {}
-    phone = login_data.get("login") or phone_of(fresh) or phone_of(item)
-    password = login_data.get("password") or fresh.get("telegram_password") or ""
+    phone, password = await _resolve_login(lzt, item_id, fresh, res)
 
     target = db.num(s.get("queue_target_hours"), QUEUE_TARGET_HOURS) or QUEUE_TARGET_HOURS
     created = account_created_ts(fresh) or 0
-    age = age_hours_of(fresh) or 0.0
+    age = age_hours_of(fresh)
+    if age is None:
+        age = db.num(s.get("session_min_hours")) if db.num(s.get("session_min_hours")) > 0 else 0.0
     due = _due_at(created, age, target)
 
     pid = await db.add_purchase(
         tg_id, item_id, phone, country_of(fresh), price,
         expires_at=due, target_age_hours=target, age_at_buy_hours=age,
         account_created_ts=created, spam_flag=(soft == "spam_flag"), note="bought")
+
+    if not phone:
+        log.info(f"buy {item_id}: no phone on item")
+        await db.close_purchase(pid, "login_failed", "no phone number on item")
+        p = await db.get_purchase(pid)
+        if p:
+            await _notify_card(bot, tg_id, p, "failed")
+        return True, "no_phone"
 
     log.info(f"bought {item_id} pid={pid} age={age:.2f}h due_in={due - time.time():.0f}s")
     _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, s))
@@ -338,7 +387,7 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
             continue
         if done:
             bought += 1
-            if why in ("spam_flag", "ok_unknown"):
+            if why in ("spam_flag", "ok_unknown", "no_phone"):
                 reasons[why] += 1
         else:
             reasons[why] += 1
