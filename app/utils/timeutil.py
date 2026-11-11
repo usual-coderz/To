@@ -1,11 +1,3 @@
-"""Timestamp parsing + human formatting. Everything is UTC epoch seconds.
-
-Parsing is strict about range and shape: anything outside
-946684800..4102444800 (2000-01-01 .. 2100-01-01) is rejected, so a price or an
-item id can never be mistaken for a date.
-"""
-from __future__ import annotations
-
 import math
 import re
 import time
@@ -28,7 +20,7 @@ def _epoch(value) -> int | None:
         return None
     if not math.isfinite(v):
         return None
-    if v > 1e11:                 # milliseconds
+    if v > 1e11:
         v /= 1000.0
     return int(v) if _MIN_TS <= v <= _MAX_TS else None
 
@@ -114,6 +106,12 @@ def fmt_dt(ts: int | None) -> str:
     if not ts or not isinstance(ts, int) or not _MIN_TS <= ts <= _MAX_TS:
         return "—"
     return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def fmt_year(ts: int | None) -> str:
+    if not ts or not isinstance(ts, int) or not _MIN_TS <= ts <= _MAX_TS:
+        return "unknown"
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y")
 
 
 def fmt_left(expires_at: int | None) -> str:
