@@ -1,4 +1,3 @@
-"""Balance snapshot: authoritative market total + spendable entries."""
 import logging
 
 from app.utils.money import free_of, same_currency, spendable, total_of
@@ -11,7 +10,6 @@ def _coerce(entries) -> list[dict]:
 
 
 async def snapshot(lzt, currency: str) -> dict:
-    """{'total', 'spendable', 'entries', 'currency', 'note', 'error'}"""
     snap = {"total": 0.0, "spendable": 0.0, "entries": [], "currency": currency,
             "note": "", "error": ""}
 
