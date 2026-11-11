@@ -1,4 +1,3 @@
-"""MongoDB storage layer (pymongo async)."""
 import logging
 import re
 import time
@@ -143,7 +142,6 @@ def normalize_setting(key: str, value) -> str | None:
 
 
 def normalize_settings(raw: dict) -> tuple[dict, dict]:
-    """(clean, fixes) — fixes holds only keys that had to be repaired."""
     clean, fixes = {}, {}
     for key, default in DEFAULTS.items():
         norm = NORMALIZERS[key](raw.get(key, default))
@@ -160,28 +158,54 @@ def normalize_settings(raw: dict) -> tuple[dict, dict]:
     return clean, fixes
 
 
+_INDEXES = (
+    ("purchases", [("status", ASCENDING), ("expires_at", ASCENDING)], {}),
+    ("purchases", [("tg_id", ASCENDING)], {}),
+    ("purchases", [("tg_id", ASCENDING), ("phone", ASCENDING)], {}),
+    ("ledger", [("tg_id", ASCENDING), ("created_at", ASCENDING)], {}),
+    ("settings", [("tg_id", ASCENDING)], {"unique": True}),
+    ("reports", [("tg_id", ASCENDING), ("ts", DESCENDING)], {}),
+)
+
+
+def _spec_key(spec: dict) -> tuple:
+    return tuple((k, int(v)) for k, v in (spec.get("key") or {}).items() if k != "_id")
+
+
+async def _ensure_indexes():
+    for coll_name, keys, opts in _INDEXES:
+        coll = _db[coll_name]
+        try:
+            existing = [spec async for spec in coll.list_indexes()]
+        except Exception as e:
+            log.debug(f"list_indexes {coll_name}: {e}")
+            existing = []
+
+        want = tuple((k, int(d)) for k, d in keys)
+        hit = next((s for s in existing if _spec_key(s) == want), None)
+
+        if hit:
+            if opts.get("unique") and not hit.get("unique"):
+                try:
+                    await coll.drop_index(hit["name"])
+                    await coll.create_index(keys, name=hit["name"], **opts)
+                    log.info(f"{coll_name}: {hit['name']} upgraded to unique")
+                except Exception as e:
+                    log.warning(f"{coll_name}: unique upgrade failed: {e}")
+            continue
+
+        name = "_".join(f"{k}_{d}" for k, d in keys)
+        try:
+            await coll.create_index(keys, name=name, **opts)
+        except Exception as e:
+            log.warning(f"{coll_name}: index {name}: {e}")
+
+
 async def init_db():
     global _client, _db
     _client = AsyncMongoClient(MONGO_URI, tz_aware=False)
     _db = _client[MONGO_DB]
-    wanted = (
-        (_db.purchases, [("status", ASCENDING), ("expires_at", ASCENDING)]),
-        (_db.purchases, [("tg_id", ASCENDING)]),
-        (_db.purchases, [("tg_id", ASCENDING), ("phone", ASCENDING)]),
-        (_db.ledger, [("tg_id", ASCENDING), ("created_at", ASCENDING)]),
-        (_db.settings, [("tg_id", ASCENDING)]),
-        (_db.reports, [("tg_id", ASCENDING), ("ts", DESCENDING)]),
-    )
-    for coll, keys in wanted:
-        try:
-            await coll.create_index(keys)
-        except Exception as e:
-            log.warning(f"index {keys} on {coll.name}: {e}")
-    try:
-        await _db.settings.create_index([("tg_id", ASCENDING)], unique=True,
-                                        name="uniq_tg")
-    except Exception as e:
-        log.info(f"unique settings index: {e}")
+    await _ensure_indexes()
 
 
 async def close_db():
@@ -217,7 +241,6 @@ async def get_settings(tg_id: int) -> dict:
 
 
 async def set_setting(tg_id: int, key: str, value) -> str | None:
-    """Stores the normalized value. Returns it, or None for an unknown key."""
     norm = normalize_setting(key, value)
     if norm is None:
         return None
