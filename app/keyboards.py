@@ -108,19 +108,15 @@ def sessions(items: list[dict]) -> InlineKeyboardMarkup:
 
 def session_detail(p: dict) -> InlineKeyboardMarkup:
     pid = p["_id"]
-    rows = [[("Session file", f"f:{pid}"), ("Check", f"c:{pid}")]]
-    if p.get("status") == "queued":
-        rows.append([("Clean now", f"k:{pid}")])
-    rows.append([("Back", BACK_SESSIONS)])
-    return kb(rows)
+    return kb([
+        [("Session file", f"f:{pid}"), ("Check", f"c:{pid}")],
+        [("Back", BACK_SESSIONS)],
+    ])
 
 
 def bought(p: dict) -> InlineKeyboardMarkup:
     pid = p["_id"]
-    return kb([
-        [("Open", f"v:{pid}"), ("Session file", f"f:{pid}")],
-        [("Check", f"c:{pid}"), ("Clean now", f"k:{pid}")],
-    ])
+    return kb([[("Session file", f"f:{pid}"), ("Check", f"c:{pid}")]])
 
 
 def audit(p: dict) -> InlineKeyboardMarkup:
