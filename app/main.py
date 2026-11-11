@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import re
+import signal
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -8,7 +9,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.types import CallbackQuery, ErrorEvent, Message
 
 from app import db
-from app.config import BOT_TOKEN, MONGO_DB, MONGO_URI, OWNER_IDS
+from app.config import BOT_TOKEN, MONGO_DB, MONGO_URI, OWNER_IDS, PURCHASE_KEEP_DAYS
 from app.deps import lzt
 from app.engine import buy_loop, cleaner_loop, drain_bg
 from app.handlers import ROUTERS
@@ -54,6 +55,8 @@ async def _supervise(name: str, factory, bot, *args):
 async def main():
     if not BOT_TOKEN:
         sys.exit("BOT_TOKEN is not set")
+    if not OWNER_IDS:
+        sys.exit("OWNER_IDS is not set")
     log.info(f"mongo: {_mask(MONGO_URI)} db={MONGO_DB}")
 
     await db.init_db()
@@ -76,15 +79,33 @@ async def main():
     tasks = [asyncio.create_task(_supervise("buy_loop", buy_loop, bot, lzt)),
              asyncio.create_task(_supervise("cleaner_loop", cleaner_loop, bot, lzt))]
 
+    loop = asyncio.get_running_loop()
+    stop = asyncio.Event()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except (NotImplementedError, RuntimeError):
+            pass
+
     log.info("bot up")
+    polling = asyncio.create_task(
+        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()))
+    waiter = asyncio.create_task(stop.wait())
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await asyncio.wait({polling, waiter}, return_when=asyncio.FIRST_COMPLETED)
     finally:
         log.info("shutting down")
+        polling.cancel()
+        waiter.cancel()
+        await asyncio.gather(polling, waiter, return_exceptions=True)
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await drain_bg()
+        try:
+            await db.prune_purchases(PURCHASE_KEEP_DAYS)
+        except Exception as e:
+            log.warning(f"prune: {e}")
         await lzt.close()
         await db.close_db()
         await bot.session.close()
