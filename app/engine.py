@@ -3,17 +3,16 @@ import logging
 import time
 from collections import Counter
 
-from aiogram.types import BufferedInputFile
-
 from app import db, keyboards as kb
-from app.config import EXPIRY_LOGIN_GRACE, EXPIRY_RETRY, EXPIRY_RETRY_DELAY, TICK
+from app.config import (EXPIRY_LOGIN_GRACE, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
+                        LOGIN_CONCURRENCY, MAX_SCAN, TICK)
 from app.lzt import LztError
 from app.mail_engine import IMAPMailClient, TempMailClient
 from app.session_manager import change_email, client, login_with_lzt, terminate
+from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import (
     account_created_ts, age_hours_of, clean_delay_hours, country_of, passes, phone_of,
-    search_query, spam_state,
 )
 from app.utils.money import fmt_money, pick_for_buy
 from app.utils.texts import bought_text, session_file
@@ -25,6 +24,14 @@ WARN_COOLDOWN = 900.0
 
 _BG: set[asyncio.Task] = set()
 _NEXT_RUN: dict[int, float] = {}
+_SEM: asyncio.Semaphore | None = None
+
+
+def _sem() -> asyncio.Semaphore:
+    global _SEM
+    if _SEM is None:
+        _SEM = asyncio.Semaphore(LOGIN_CONCURRENCY)
+    return _SEM
 
 
 def _spawn(coro) -> asyncio.Task:
@@ -34,7 +41,7 @@ def _spawn(coro) -> asyncio.Task:
     return task
 
 
-async def drain_bg(timeout: float = 5.0):
+async def drain_bg(timeout: float = 8.0):
     if not _BG:
         return
     try:
@@ -44,32 +51,19 @@ async def drain_bg(timeout: float = 5.0):
 
 
 async def _notify(bot, tg_id, text):
-    try:
-        await bot.send_message(tg_id, text)
-    except Exception:
-        pass
+    await tg.send(bot, tg_id, text)
 
 
 async def _notify_card(bot, tg_id, p: dict, stage: str):
     """Purchase card. The ready stage also ships the session as a file."""
-    text = bought_text(p, stage)
     markup = kb.bought(p) if p.get("_id") else None
-    try:
-        await bot.send_message(tg_id, text, reply_markup=markup,
-                               disable_web_page_preview=True)
-    except Exception:
-        try:
-            await bot.send_message(tg_id, text)
-        except Exception:
-            return
-
+    ok = await tg.send(bot, tg_id, bought_text(p, stage), markup)
+    if not ok:
+        log.warning(f"card {stage} not delivered tg={tg_id} pid={p.get('_id')}")
+        return
     if stage == "ready" and p.get("session_string"):
         name = (p.get("phone") or str(p.get("item_id"))).lstrip("+") or "session"
-        try:
-            await bot.send_document(
-                tg_id, BufferedInputFile(session_file(p).encode(), filename=f"{name}.py"))
-        except Exception:
-            pass
+        await tg.send_document(bot, tg_id, session_file(p).encode(), f"{name}.py")
 
 
 async def _balance_warn(bot, tg_id, text):
@@ -77,14 +71,6 @@ async def _balance_warn(bot, tg_id, text):
         return
     _BAL_WARNED[tg_id] = time.time()
     await _notify(bot, tg_id, text)
-
-
-async def _search_items(lzt, s: dict) -> list[dict]:
-    q = dict(s)
-    age = search_query(s)
-    if age:
-        q.update(age)
-    return await lzt.search(q)
 
 
 async def _fast_buy(lzt, item_id: int, price: float, balance_id: int):
@@ -121,15 +107,17 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         return False, why
 
     soft = ""
-    if why == "ok" and s.get("spam_mode") == "no" and spam_state(fresh) is True:
-        soft = "spam_flag"
-        log.info(f"note {item_id}: spam flag set but server filter says clean")
-    elif why == "ok_unknown":
+    if s.get("spam_mode") == "no" and s.get("verify_spam", "1") == "1":
+        from app.utils.filters import spam_state
+        if spam_state(fresh) is True:
+            soft = "spam_flag"
+            log.info(f"note {item_id}: spam flag set but server filter says clean")
+    if why == "ok_unknown":
         log.info(f"note {item_id}: fields unknown, relying on server filters")
 
     wallet = pick_for_buy(snap["entries"], currency, price)
     if wallet is None:
-        snap = await wallet_view.snapshot(lzt, currency)
+        snap.update(await wallet_view.snapshot(lzt, currency))
         wallet = pick_for_buy(snap["entries"], currency, price)
     if wallet is None:
         await _balance_warn(bot, tg_id,
@@ -142,6 +130,12 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
     except LztError as e:
         log.info(f"buy {item_id}: {e}")
         return False, "buy_failed"
+
+    # balances changed — refresh for the next buy in this cycle
+    try:
+        snap.update(await wallet_view.snapshot(lzt, currency))
+    except Exception:
+        pass
 
     login_data = (res.get("item") or {}).get("loginData") or {}
     phone = login_data.get("login") or phone_of(fresh) or phone_of(item)
@@ -168,27 +162,29 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
 
 
 async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, s, delay):
-    try:
-        c, session_str, _uid = await login_with_lzt(phone, password, item_id, lzt, s["proxy"])
-    except Exception as e:
-        await db.close_purchase(pid, "login_failed", str(e)[:200])
+    async with _sem():
+        try:
+            c, session_str, _uid = await login_with_lzt(
+                phone, password, item_id, lzt, s.get("proxy", ""))
+        except Exception as e:
+            log.info(f"login {item_id}: {e}")
+            await db.close_purchase(pid, "login_failed", str(e)[:200])
+            p = await db.get_purchase(pid)
+            if p:
+                p["password"] = password
+                await _notify_card(bot, tg_id, p, "failed")
+            return
+
+        await db.set_session(pid, session_str)
         p = await db.get_purchase(pid)
         if p:
             p["password"] = password
-            await _notify_card(bot, tg_id, p, "failed")
-        return
+            await _notify_card(bot, tg_id, p, "ready")
 
-    await db.set_session(pid, session_str)
-    p = await db.get_purchase(pid)
-    if p:
-        p["password"] = password
-        await _notify_card(bot, tg_id, p, "ready")
-
-    try:
-        await c.disconnect()
-    except Exception:
-        pass
-    await asyncio.sleep(0)
+        try:
+            await c.disconnect()
+        except Exception:
+            pass
 
 
 async def _mail_client_for(p: dict, s: dict):
@@ -208,19 +204,20 @@ async def _mail_client_for(p: dict, s: dict):
 async def expire_purchase(bot, lzt, p: dict):
     s = await db.get_settings(p["tg_id"])
     tries = int(p.get("expiry_tries") or 0)
+    phone = p.get("phone") or p.get("item_id")
 
     if not p.get("session_string"):
-        young = time.time() - p["started_at"] < EXPIRY_LOGIN_GRACE
+        young = time.time() - (p.get("started_at") or 0) < EXPIRY_LOGIN_GRACE
         if tries < EXPIRY_RETRY and young:
             await db.bump_expiry(p["_id"], EXPIRY_RETRY_DELAY, inc_tries=True)
             return
         await db.close_purchase(p["_id"], "login_failed", "no session string")
-        await _notify(bot, p["tg_id"], f"⚠️ <b>No session</b> <code>{p['phone']}</code>")
+        await _notify(bot, p["tg_id"], f"⚠️ <b>No session</b> <code>{tg.esc(phone)}</code>")
         return
 
     new_mail, note = "", []
     hard_fail = False
-    c = client(p["session_string"], s["proxy"])
+    c = client(p["session_string"], s.get("proxy", ""))
     try:
         await c.connect()
         if not await c.is_user_authorized():
@@ -260,10 +257,11 @@ async def expire_purchase(bot, lzt, p: dict):
     except LztError as e:
         note.append(f"reset: {e}")
 
-    await db.close_purchase(p["_id"], "terminated", "; ".join(note)[:300], new_mail=new_mail)
+    joined = "; ".join(note)
+    await db.close_purchase(p["_id"], "terminated", joined[:300], new_mail=new_mail)
     await _notify(bot, p["tg_id"],
-                  f"🧼 <b>Cleaned</b> <code>{p['phone']}</code>\n"
-                  f"{'; '.join(note)}\n📧 <code>{new_mail or '-'}</code>")
+                  f"🧼 <b>Cleaned</b> <code>{tg.esc(phone)}</code>\n"
+                  f"{tg.esc(joined)}\n📧 <code>{tg.esc(new_mail or '-')}</code>")
 
 
 async def _cycle(bot, lzt, tg_id: int, s: dict):
@@ -293,7 +291,7 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
         return
 
     try:
-        items = await _search_items(lzt, s)
+        items = await lzt.search(s)
     except LztError as e:
         await db.save_report(tg_id, error=f"search: {e}")
         return
@@ -305,15 +303,20 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
     bought = 0
     max_buys = max(1, db.intval(s.get("max_buy_per_cycle"), 2))
 
-    for it in items[:80]:
+    for it in items[:MAX_SCAN]:
         ok, why = passes(it, s)
         if not ok:
             reasons[why] += 1
             continue
-        done, why = await buy_one(bot, lzt, tg_id, it, s, snap)
+        try:
+            done, why = await buy_one(bot, lzt, tg_id, it, s, snap)
+        except Exception as e:
+            log.exception(f"buy_one {it.get('item_id')}: {e}")
+            reasons["error"] += 1
+            continue
         if done:
             bought += 1
-            if why != "bought":
+            if why in ("spam_flag", "ok_unknown"):
                 reasons[why] += 1
         else:
             reasons[why] += 1
@@ -332,16 +335,28 @@ async def buy_loop(bot, lzt):
     while True:
         try:
             now = time.time()
-            for u in await db.all_owners():
-                tg_id = u["_id"]
+            owners = await db.all_owners()
+            live_ids = {u["_id"] for u in owners}
+            for stale in [k for k in _NEXT_RUN if k not in live_ids]:
+                _NEXT_RUN.pop(stale, None)
+            for tg_id in live_ids:
                 if _NEXT_RUN.get(tg_id, 0.0) > now:
                     continue
-                s = await db.get_settings(tg_id)
+                try:
+                    s = await db.get_settings(tg_id)
+                except Exception as e:
+                    log.warning(f"settings {tg_id}: {e}")
+                    _NEXT_RUN[tg_id] = now + TICK
+                    continue
                 if s["auto_buy"] != "1":
                     _NEXT_RUN[tg_id] = now + TICK
                     continue
                 _NEXT_RUN[tg_id] = now + max(5, db.intval(s.get("poll_interval"), 25))
-                await _cycle(bot, lzt, tg_id, s)
+                try:
+                    await _cycle(bot, lzt, tg_id, s)
+                except Exception as e:
+                    log.exception(f"cycle {tg_id}: {e}")
+                    await db.save_report(tg_id, error=f"cycle: {e}")
         except Exception as e:
             log.exception(f"buy_loop: {e}")
         await asyncio.sleep(TICK)
@@ -351,7 +366,10 @@ async def expiry_loop(bot, lzt):
     while True:
         try:
             for p in await db.due_purchases():
-                await expire_purchase(bot, lzt, p)
+                try:
+                    await expire_purchase(bot, lzt, p)
+                except Exception as e:
+                    log.exception(f"expire {p.get('_id')}: {e}")
         except Exception as e:
             log.exception(f"expiry_loop: {e}")
         await asyncio.sleep(20)
