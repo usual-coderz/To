@@ -5,7 +5,6 @@ from app.utils.money import free_of, fmt_money
 
 BACK_MAIN = "m:main"
 BACK_FILTERS = "m:filters"
-BACK_LIMITS = "m:limits"
 BACK_WALLET = "m:wallet"
 BACK_SESSIONS = "m:sessions"
 
@@ -47,11 +46,17 @@ def main(s: dict) -> InlineKeyboardMarkup:
 def filters(s: dict) -> InlineKeyboardMarkup:
     return kb([
         [(f"Price {s['price_min']}–{s['price_max']}", "m:price")],
-        [(f"Spam: {s['spam_mode']}", "m:spam"), (f"Mail: {s['mail_mode']}", "m:mail")],
-        [(f"2FA: {s['password_mode']}", "m:pass")],
-        [(f"Min age {s['session_min_hours']}h", "in:session_min_hours")],
-        [("Include countries", "in:countries"), ("Exclude countries", "in:deny_countries")],
-        [("Limits", BACK_LIMITS)],
+        [(f"Spam {s['spam_mode']}", "m:spam"), (f"Mail {s['mail_mode']}", "m:mail")],
+        [(f"2FA {s['password_mode']}", "m:pass")],
+        [(f"Min age {s['session_min_hours']}h", "in:session_min_hours"),
+         (f"Max age {s['session_max_hours'] or 'off'}", "in:session_max_hours")],
+        [("Include", "in:countries"), ("Exclude", "in:deny_countries")],
+        [(f"Cap ${s['daily_spend_cap']}", "in:daily_spend_cap")],
+        [(f"Terminate {_onoff(s['terminate_on_expire'], 'on', 'off')}",
+          "t:terminate_on_expire"),
+         (f"Mail chg {_onoff(s['change_mail_on_expire'], 'on', 'off')}",
+          "t:change_mail_on_expire")],
+        [(f"Mail src {s['mail_provider']}", "m:mailprov"), ("2FA pwd", "in:twofa_password")],
         [("Back", BACK_MAIN)],
     ])
 
@@ -61,22 +66,6 @@ def price() -> InlineKeyboardMarkup:
         [(f"max {v}", f"s:price_max:{v}") for v in ("0.10", "0.30", "1.00")],
         [(f"min {v}", f"s:price_min:{v}") for v in ("0.05", "0.15", "0.25")],
         [("custom max", "in:price_max"), ("custom min", "in:price_min")],
-        [("Back", BACK_FILTERS)],
-    ])
-
-
-def limits(s: dict) -> InlineKeyboardMarkup:
-    return kb([
-        [(f"Daily cap ${s['daily_spend_cap']}", "in:daily_spend_cap")],
-        [(f"Buys/cycle {s['max_buy_per_cycle']}", "in:max_buy_per_cycle"),
-         (f"Poll {s['poll_interval']}s", "in:poll_interval")],
-        [(f"Target age {s['queue_target_hours']}h", "in:queue_target_hours")],
-        [(f"Terminate {_onoff(s['terminate_on_expire'], 'on', 'off')}",
-          "t:terminate_on_expire"),
-         (f"Change mail {_onoff(s['change_mail_on_expire'], 'on', 'off')}",
-          "t:change_mail_on_expire")],
-        [(f"Mail src {s['mail_provider']}", "m:mailprov"),
-         (f"2FA pwd {s['twofa_password']}", "in:twofa_password")],
         [("Back", BACK_FILTERS)],
     ])
 
