@@ -15,6 +15,8 @@ log = logging.getLogger("db")
 DEFAULT_2FA = "AccStore2fa"
 LOGIN_STALE = 900
 
+ACTIVE = ("login", "queued", "cleaning", "ready")
+
 DEFAULTS = {
     "price_min": "0.05", "price_max": "1.00",
     "spam_mode": "no", "mail_mode": "yes", "password_mode": "no",
@@ -24,6 +26,7 @@ DEFAULTS = {
     "terminate_on_expire": "1", "change_mail_on_expire": "1",
     "verify_spam": "1", "currency": "usd", "proxy": "", "mail_provider": "auto",
     "twofa_password": (TWOFA_PASSWORD or DEFAULT_2FA),
+    "auto_sell": "1", "sell_confirm_seconds": "600", "sell_min_price": "0.00",
 }
 
 _TRUE = {"1", "true", "yes", "on", "y"}
@@ -125,6 +128,9 @@ NORMALIZERS = {
     "proxy": lambda v: str(v or "").strip()[:300],
     "mail_provider": _enum(("auto", "native", "temp"), "auto"),
     "twofa_password": _pwd(DEFAULTS["twofa_password"]),
+    "auto_sell": _flag("1"),
+    "sell_confirm_seconds": _f("600", 300.0, 7200.0),
+    "sell_min_price": _f("0.00", 0.0),
 }
 
 
@@ -162,6 +168,14 @@ _INDEXES = (
     ("ledger", [("purchase_id", ASCENDING)], {}),
     ("settings", [("tg_id", ASCENDING)], {"unique": True}),
     ("reports", [("tg_id", ASCENDING), ("ts", DESCENDING)], {}),
+    ("receivers", [("tg_id", ASCENDING), ("key", ASCENDING)], {"unique": True}),
+    ("receivers", [("tg_id", ASCENDING), ("enabled", ASCENDING)], {}),
+    ("prices", [("tg_id", ASCENDING), ("country", ASCENDING), ("ts", DESCENDING)], {}),
+    ("prices", [("receiver_id", ASCENDING), ("ts", DESCENDING)], {}),
+    ("sales", [("tg_id", ASCENDING), ("created_at", DESCENDING)], {}),
+    ("sales", [("purchase_id", ASCENDING)], {}),
+    ("sales", [("status", ASCENDING), ("created_at", ASCENDING)], {}),
+    ("charts", [("tg_id", ASCENDING), ("ts", DESCENDING)], {}),
 )
 
 
@@ -311,7 +325,7 @@ async def add_purchase(tg_id, item_id, phone, country, price, password="", mail=
         "account_created_ts": int(account_created_ts or 0),
         "spam_flag": bool(spam_flag),
         "expiry_tries": 0, "session_state": "pending", "checked_at": 0,
-        "closed_at": 0, "note": note,
+        "closed_at": 0, "note": note, "sell_state": "",
     })).inserted_id
     await _db.ledger.insert_one({
         "tg_id": tg_id, "purchase_id": pid, "item_id": item_id,
@@ -367,13 +381,60 @@ async def release_purchase(pid, seconds: int, inc_tries: bool = False):
 
 async def active_purchases(tg_id: int, limit: int = 30) -> list[dict]:
     return await _db.purchases.find(
-        {"tg_id": tg_id, "status": {"$in": ["login", "queued", "cleaning", "ready"]}}
+        {"tg_id": tg_id, "status": {"$in": list(ACTIVE)}}
     ).sort("started_at", DESCENDING).limit(limit).to_list(None)
+
+
+async def queue_purchases(tg_id: int, limit: int = 100) -> list[dict]:
+    return await _db.purchases.find(
+        {"tg_id": tg_id, "status": {"$in": ["login", "queued", "cleaning"]}}
+    ).sort("expires_at", ASCENDING).limit(limit).to_list(None)
+
+
+async def ready_purchases(tg_id: int, limit: int = 100) -> list[dict]:
+    return await _db.purchases.find(
+        {"tg_id": tg_id, "status": "ready"}
+    ).sort("closed_at", DESCENDING).limit(limit).to_list(None)
+
+
+async def over_age(tg_id: int, hours: float = TARGET_HOURS, limit: int = 500) -> list[dict]:
+    now = _now()
+    cutoff = now - int(hours * 3600)
+    rows = await _db.purchases.find(
+        {"tg_id": tg_id, "status": {"$in": list(ACTIVE)},
+         "$or": [{"account_created_ts": {"$gt": 0, "$lte": cutoff}},
+                 {"account_created_ts": 0, "started_at": {"$lte": cutoff}}]}
+    ).sort("started_at", ASCENDING).limit(limit).to_list(None)
+    return [p for p in rows if current_age(p, now) >= hours]
 
 
 async def queue_count(tg_id: int) -> int:
     return await _db.purchases.count_documents(
         {"tg_id": tg_id, "status": {"$in": ["login", "queued"]}})
+
+
+async def session_stats(tg_id: int) -> dict:
+    now = _now()
+    out = {"total": 0, "queue": 0, "over": 0, "ready": 0, "sold": 0, "live": 0}
+    cursor = _db.purchases.find(
+        {"tg_id": tg_id, "status": {"$in": list(ACTIVE) + ["sold"]}},
+        {"status": 1, "account_created_ts": 1, "started_at": 1, "age_at_buy_hours": 1,
+         "session_state": 1})
+    async for p in cursor:
+        state = p.get("status")
+        if state == "sold":
+            out["sold"] += 1
+            continue
+        out["total"] += 1
+        if state in ("login", "queued", "cleaning"):
+            out["queue"] += 1
+        if state == "ready":
+            out["ready"] += 1
+        if p.get("session_state") == "live":
+            out["live"] += 1
+        if current_age(p, now) >= TARGET_HOURS:
+            out["over"] += 1
+    return out
 
 
 async def get_purchase(pid) -> dict | None:
@@ -448,7 +509,8 @@ async def mark_sold(pid, sell_price: float, tg_id: int | None = None) -> bool:
         {"purchase_id": oid},
         {"$set": {"sell_price": float(sell_price), "status": "sold", "closed_at": now}})
     await _db.purchases.update_one(
-        {"_id": oid}, {"$set": {"status": "sold", "closed_at": now, "expires_at": 0}})
+        {"_id": oid},
+        {"$set": {"status": "sold", "closed_at": now, "expires_at": 0, "sell_state": "sold"}})
     return True
 
 
@@ -495,3 +557,152 @@ async def prune_purchases(days: int):
     await _db.purchases.delete_many(
         {"status": {"$in": ["sold", "failed", "ready"]},
          "closed_at": {"$gt": 0, "$lt": _now() - days * 86_400}})
+
+
+def receiver_key(username: str) -> str:
+    return str(username or "").strip().lstrip("@").lower()
+
+
+async def add_receiver(tg_id: int, username: str, kind: str = "", title: str = "") -> str | None:
+    key = receiver_key(username)
+    if not key:
+        return None
+    now = _now()
+    existing = await _db.receivers.find_one({"tg_id": tg_id, "key": key})
+    if existing:
+        await _db.receivers.update_one(
+            {"_id": existing["_id"]},
+            {"$set": {"title": title or existing.get("title") or key,
+                      "enabled": True}})
+        return str(existing["_id"])
+    rid = (await _db.receivers.insert_one({
+        "tg_id": tg_id, "key": key, "username": key, "kind": kind or "cm",
+        "title": title or key, "enabled": True, "cap": -1, "cap_at": 0,
+        "price_at": 0, "confirm_seconds": 0, "fails": 0, "created_at": now,
+    })).inserted_id
+    return str(rid)
+
+
+async def get_receiver(rid) -> dict | None:
+    oid = _oid(rid)
+    return await _db.receivers.find_one({"_id": oid}) if oid else None
+
+
+async def get_receiver_by_key(tg_id: int, key: str) -> dict | None:
+    return await _db.receivers.find_one({"tg_id": tg_id, "key": receiver_key(key)})
+
+
+async def list_receivers(tg_id: int, enabled_only: bool = False) -> list[dict]:
+    query = {"tg_id": tg_id}
+    if enabled_only:
+        query["enabled"] = True
+    return await _db.receivers.find(query).sort("kind", ASCENDING).to_list(None)
+
+
+async def set_receiver(rid, **fields):
+    oid = _oid(rid)
+    if oid and fields:
+        await _db.receivers.update_one({"_id": oid}, {"$set": fields})
+
+
+async def drop_receiver(rid) -> bool:
+    oid = _oid(rid)
+    if not oid:
+        return False
+    res = await _db.receivers.delete_one({"_id": oid})
+    await _db.prices.delete_many({"receiver_id": oid})
+    return bool(res.deleted_count)
+
+
+async def bump_receiver(rid, cap: int | None = None, confirm: int | None = None):
+    oid = _oid(rid)
+    if not oid:
+        return
+    upd = {"$set": {"fails": 0, "cap_at": _now()}}
+    if cap is not None:
+        upd["$set"]["cap"] = int(cap)
+    if confirm:
+        upd["$set"]["confirm_seconds"] = int(confirm)
+    await _db.receivers.update_one({"_id": oid}, upd)
+
+
+async def fail_receiver(rid):
+    oid = _oid(rid)
+    if oid:
+        await _db.receivers.update_one({"_id": oid}, {"$inc": {"fails": 1}})
+
+
+async def save_prices(tg_id: int, receiver_id, prices: dict):
+    if not prices:
+        return 0
+    now = _now()
+    rows = [{"tg_id": tg_id, "receiver_id": _oid(receiver_id), "country": cc,
+             "price": float(price), "ts": now} for cc, price in prices.items()]
+    await _db.prices.insert_many(rows)
+    await _db.prices.delete_many({"tg_id": tg_id, "ts": {"$lt": now - 172_800}})
+    return len(rows)
+
+
+async def latest_prices(tg_id: int, max_age: float) -> list[dict]:
+    cutoff = _now() - int(max_age)
+    pipeline = [
+        {"$match": {"tg_id": tg_id, "ts": {"$gte": cutoff}}},
+        {"$sort": {"ts": DESCENDING}},
+        {"$group": {"_id": {"receiver_id": "$receiver_id", "country": "$country"},
+                    "price": {"$first": "$price"}, "ts": {"$first": "$ts"}}},
+    ]
+    return await _db.prices.aggregate(pipeline).to_list(None)
+
+
+async def add_sale(tg_id: int, purchase_id, country: str, receiver_id, receiver: str,
+                   buy_price: float, sell_price: float, confirm_seconds: int) -> str:
+    now = _now()
+    sid = (await _db.sales.insert_one({
+        "tg_id": tg_id, "purchase_id": _oid(purchase_id), "country": country or "",
+        "receiver_id": _oid(receiver_id), "receiver": receiver_key(receiver),
+        "buy_price": float(buy_price), "sell_price": float(sell_price),
+        "confirm_seconds": int(confirm_seconds), "status": "pending",
+        "job": f"TRADE-{now:x}", "created_at": now, "closed_at": 0, "note": "",
+    })).inserted_id
+    await _db.purchases.update_one(
+        {"_id": _oid(purchase_id)},
+        {"$set": {"sell_state": "selling", "sell_receiver": receiver_key(receiver)}})
+    return str(sid)
+
+
+async def close_sale(sid, status: str, note: str = ""):
+    oid = _oid(sid)
+    if not oid:
+        return
+    await _db.sales.update_one(
+        {"_id": oid},
+        {"$set": {"status": status, "closed_at": _now(), "note": note[:300]}})
+
+
+async def sale_stats(tg_id: int) -> dict:
+    out = {"total": 0, "sold": 0, "failed": 0, "revenue": 0.0, "spent": 0.0}
+    cursor = _db.sales.find({"tg_id": tg_id},
+                            {"status": 1, "sell_price": 1, "buy_price": 1})
+    async for row in cursor:
+        out["total"] += 1
+        if row.get("status") == "sold":
+            out["sold"] += 1
+            out["revenue"] += float(row.get("sell_price") or 0.0)
+            out["spent"] += float(row.get("buy_price") or 0.0)
+        elif row.get("status") == "failed":
+            out["failed"] += 1
+    profit = out["revenue"] - out["spent"]
+    out["profit"] = profit
+    out["roi"] = (profit / out["spent"] * 100) if out["spent"] else 0.0
+    return out
+
+
+async def save_chart(tg_id: int, rows: list[dict]) -> str:
+    cid = (await _db.charts.insert_one(
+        {"tg_id": tg_id, "ts": _now(), "rows": rows})).inserted_id
+    await _db.charts.delete_many({"tg_id": tg_id, "ts": {"$lt": _now() - 604_800}})
+    return str(cid)
+
+
+async def recent_chart(tg_id: int) -> dict | None:
+    return await _db.charts.find_one({"tg_id": tg_id}, sort=[("ts", DESCENDING)])
