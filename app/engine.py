@@ -5,10 +5,11 @@ from collections import Counter
 
 from app import db
 from app.config import (CYCLE_INTERVAL, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
-                        LOGIN_CONCURRENCY, MAX_SCAN, SESSION_RETRY, TARGET_HOURS, TICK)
+                        LOGIN_CONCURRENCY, LOGIN_RETRY_DELAY, LOGIN_TRIES, MAX_SCAN,
+                        SESSION_RETRY, TARGET_HOURS, TICK)
 from app.lzt import LztError, classify, extract_auth_key, extract_dc_id
 from app.mail_engine import IMAPMailClient, TempMailClient
-from app.session_manager import (change_email, check_session, client, device_list,
+from app.session_manager import (change_email, check_session, clean_client, device_list,
                                  login_with_auth_key, normalize_phone, owned_counts,
                                  reset_others, set_2fa, spambot_status)
 from app.utils import tg
@@ -28,8 +29,6 @@ _NEXT_RUN: dict[int, float] = {}
 _SEM: asyncio.Semaphore | None = None
 
 PHONE_KEYS = ("login", "telegram_login", "phone", "telegram_phone")
-
-LOGIN_TRIES = 2
 
 CHECK_SOFT = ("check_failed",)
 
@@ -110,7 +109,7 @@ async def _resolve_login(lzt, item_id: int, fresh: dict, res: dict):
     phone = phone_of_item(bought) or phone_of_item(fresh)
     password = password_of_item(bought) or password_of_item(fresh)
 
-    if not (phone and password):
+    if not (phone and password and extract_auth_key(merged)):
         try:
             full = await lzt.item(item_id)
         except LztError as e:
@@ -215,7 +214,7 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         return True, "no_phone"
 
     log.info(f"bought {item_id} pid={pid} age={age:.2f}h key={'yes' if auth_key else 'no'}"
-             f" mature={age >= TARGET_HOURS}")
+             f" dc={auth_dc or '?'} mature={age >= TARGET_HOURS}")
     _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s,
                        merged, auth_key, auth_dc))
     return True, (soft or "bought")
@@ -226,8 +225,6 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s
     async with _sem():
         await db.set_purchase(pid, password=password)
         last: Exception | None = None
-        conn = None
-        session_str = ""
 
         for attempt in range(LOGIN_TRIES):
             try:
@@ -236,37 +233,36 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s
                     auth_key, auth_dc)
                 if not session_str:
                     raise RuntimeError("empty session string")
-                break
             except Exception as e:
                 last = e
                 log.info(f"login {item_id} attempt {attempt + 1}/{LOGIN_TRIES}: {e}")
                 if attempt + 1 < LOGIN_TRIES:
-                    await asyncio.sleep(10)
-        else:
-            await db.close_purchase(pid, "login_failed", str(last)[:200])
-            await _notify(bot, tg_id, failed_line(country, str(last)))
-            return
+                    await asyncio.sleep(LOGIN_RETRY_DELAY)
+                continue
 
-        await db.set_session(pid, session_str)
-        try:
-            if conn is not None:
+            await db.set_session(pid, session_str)
+            try:
                 await conn.disconnect()
-        except Exception:
-            pass
+            except Exception:
+                pass
 
-        p = await db.get_purchase(pid)
-        if not p:
+            p = await db.get_purchase(pid)
+            if not p:
+                return
+
+            age = db.current_age(p)
+            if age >= TARGET_HOURS:
+                await db.queue_purchase(pid, db._now())
+                fresh = await db.get_purchase(pid)
+                if fresh:
+                    await clean_purchase(bot, lzt, fresh)
+            else:
+                await db.queue_purchase(pid, db.due_from(age))
+                log.info(f"queued {item_id} for {db.due_from(age) - db._now()}s")
             return
 
-        age = db.current_age(p)
-        if age >= TARGET_HOURS:
-            await db.queue_purchase(pid, db._now())
-            fresh = await db.get_purchase(pid)
-            if fresh:
-                await clean_purchase(bot, lzt, fresh)
-        else:
-            await db.queue_purchase(pid, db.due_from(age))
-            log.info(f"queued {item_id} for {db.due_from(age) - db._now()}s")
+        await db.close_purchase(pid, "login_failed", str(last)[:200])
+        await _notify(bot, tg_id, failed_line(country, str(last)))
 
 
 async def _mail_client_for(p: dict, s: dict):
@@ -320,7 +316,7 @@ async def clean_purchase(bot, lzt, p: dict):
 
     data: dict = {"mail_ok": False, "twofa_ok": False}
     note: list[str] = []
-    conn = client(p["session_string"], s.get("proxy", ""))
+    conn = clean_client(p["session_string"], s.get("proxy", ""))
     try:
         await conn.connect()
         if not await conn.is_user_authorized():
