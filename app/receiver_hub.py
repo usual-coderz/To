@@ -89,19 +89,20 @@ async def send(username: str, text: str) -> bool:
         return False
 
 
-async def drain(username: str) -> None:
+async def drain(username: str) -> int:
     client = _client
     if client is None:
-        return
+        return 0
     entity = await _resolve(username)
     if entity is None:
-        return
+        return 0
     try:
         msgs = await client.get_messages(entity, limit=1)
-        if msgs:
-            _mark(username)
     except Exception:
-        pass
+        return _stamp(username)
+    if msgs:
+        _mark(username)
+    return _stamp(username)
 
 
 async def wait_reply(username: str, timeout: float, since: int | None = None) -> str:
@@ -154,9 +155,17 @@ async def start_bot(username: str, param: str = "") -> bool:
 async def command(username: str, cmd: str, timeout: float = 40.0) -> str:
     if _client is None:
         return ""
-    await drain(username)
-    since = _stamp(username)
+    since = await drain(username)
     if not await send(username, cmd):
+        return ""
+    return await wait_reply(username, timeout, since)
+
+
+async def start_and_read(username: str, param: str, timeout: float) -> str:
+    if _client is None:
+        return ""
+    since = await drain(username)
+    if not await start_bot(username, param):
         return ""
     return await wait_reply(username, timeout, since)
 
@@ -164,8 +173,7 @@ async def command(username: str, cmd: str, timeout: float = 40.0) -> str:
 async def send_and_wait(username: str, text: str, timeout: float) -> str:
     if _client is None:
         return ""
-    await drain(username)
-    since = _stamp(username)
+    since = await drain(username)
     if not await send(username, text):
         return ""
     return await wait_reply(username, timeout, since)
