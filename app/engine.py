@@ -4,12 +4,12 @@ import time
 from collections import Counter
 
 from app import db
-from app.config import (EXPIRY_RETRY, EXPIRY_RETRY_DELAY, LOGIN_CONCURRENCY, MAX_SCAN,
-                        QUEUE_TARGET_HOURS, SESSION_RETRY, TICK)
+from app.config import (CYCLE_INTERVAL, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
+                        LOGIN_CONCURRENCY, MAX_SCAN, SESSION_RETRY, TARGET_HOURS, TICK)
 from app.lzt import LztError, classify
 from app.mail_engine import IMAPMailClient, TempMailClient
 from app.session_manager import (change_email, check_session, client, device_list,
-                                 login_with_lzt, normalize_phone, owned_counts,
+                                 login_with_auth_key, normalize_phone, owned_counts,
                                  reset_others, set_2fa, spambot_status)
 from app.utils import tg
 from app.utils import wallet as wallet_view
@@ -176,12 +176,11 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
     country = country_of(fresh)
     age = age_for_queue(fresh)
     created = account_created_ts(fresh) or 0
-    target = db.num(s.get("queue_target_hours"), QUEUE_TARGET_HOURS) or QUEUE_TARGET_HOURS
-    due = db.due_from(age, target)
+    due = db.due_from(age)
 
     pid = await db.add_purchase(
         tg_id, item_id, phone, country, price, password=password,
-        expires_at=due, target_age_hours=target, age_at_buy_hours=age,
+        expires_at=due, age_at_buy_hours=age,
         account_created_ts=created, spam_flag=(soft == "spam_flag"), note="bought")
 
     await _notify(bot, tg_id, bought_line(country))
@@ -192,7 +191,7 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         await _notify(bot, tg_id, failed_line(country, "no phone on item"))
         return True, "no_phone"
 
-    log.info(f"bought {item_id} pid={pid} age={age:.2f}h due_in={due - time.time():.0f}s")
+    log.info(f"bought {item_id} pid={pid} age={age:.2f}h mature={age >= TARGET_HOURS}")
     _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s, fresh))
     return True, (soft or "bought")
 
@@ -206,7 +205,7 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s
 
         for attempt in range(LOGIN_TRIES):
             try:
-                conn, session_str, _uid = await login_with_lzt(
+                conn, session_str, _uid = await login_with_auth_key(
                     phone, password, item_id, lzt, s.get("proxy", ""), hint)
                 if not session_str:
                     raise RuntimeError("empty session string")
@@ -231,10 +230,16 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s
         p = await db.get_purchase(pid)
         if not p:
             return
-        if int(p.get("expires_at") or 0) <= time.time():
-            await clean_purchase(bot, lzt, p)
+
+        age = db.current_age(p)
+        if age >= TARGET_HOURS:
+            await db.queue_purchase(pid, db._now())
+            fresh = await db.get_purchase(pid)
+            if fresh:
+                await clean_purchase(bot, lzt, fresh)
         else:
-            log.info(f"queued {item_id} for {int(p['expires_at']) - int(time.time())}s")
+            await db.queue_purchase(pid, db.due_from(age))
+            log.info(f"queued {item_id} for {db.due_from(age) - db._now()}s")
 
 
 async def _mail_client_for(p: dict, s: dict):
@@ -355,7 +360,7 @@ async def clean_purchase(bot, lzt, p: dict):
         alive, _me = await check_session(session_str, s.get("proxy", ""))
         if not alive:
             try:
-                _c, session_str, _uid = await login_with_lzt(
+                _c, session_str, _uid = await login_with_auth_key(
                     p.get("phone"), p.get("password") or "", p["item_id"], lzt,
                     s.get("proxy", ""))
                 await db.set_session(pid, session_str)
@@ -415,7 +420,6 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
     reasons: Counter = Counter()
     bought = 0
     seen: set[int] = set()
-    max_buys = max(1, db.intval(s.get("max_buy_per_cycle"), 2))
 
     for it in items[:MAX_SCAN]:
         item_id = it.get("item_id")
@@ -435,8 +439,6 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
         reasons[why] += 1
         if done:
             bought += 1
-        if bought >= max_buys:
-            break
         if why == "check_limit":
             break
         if cap > 0 and await db.spent_today(tg_id) >= cap:
@@ -470,7 +472,7 @@ async def buy_loop(bot, lzt):
                 if s["auto_buy"] != "1":
                     _NEXT_RUN[tg_id] = now + TICK
                     continue
-                _NEXT_RUN[tg_id] = now + max(5, db.intval(s.get("poll_interval"), 25))
+                _NEXT_RUN[tg_id] = now + CYCLE_INTERVAL
                 try:
                     await _cycle(bot, lzt, tg_id, s)
                 except Exception as e:
@@ -491,4 +493,4 @@ async def cleaner_loop(bot, lzt):
                     log.exception(f"clean {p.get('_id')}: {e}")
         except Exception as e:
             log.exception(f"cleaner_loop: {e}")
-        await asyncio.sleep(20)
+        await asyncio.sleep(15)
