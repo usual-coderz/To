@@ -13,7 +13,7 @@ from app.utils.money import _num
 log = logging.getLogger("db")
 
 DEFAULT_2FA = "AccStore2fa"
-LOGIN_STALE = 600
+LOGIN_STALE = 900
 
 DEFAULTS = {
     "price_min": "0.05", "price_max": "1.00",
