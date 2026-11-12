@@ -13,6 +13,7 @@ from app.utils.money import _num
 log = logging.getLogger("db")
 
 DEFAULT_2FA = "AccStore2fa"
+LOGIN_STALE = 600
 
 DEFAULTS = {
     "price_min": "0.05", "price_max": "1.00",
@@ -69,20 +70,6 @@ def _f(default: str, lo: float | None = None, hi: float | None = None):
         if hi is not None:
             got = min(hi, got)
         return _fmt(got)
-    return norm
-
-
-def _i(default: str, lo: int | None = None, hi: int | None = None):
-    def norm(v) -> str:
-        got = _num(v, None)
-        if got is None:
-            return default
-        i = int(got)
-        if lo is not None:
-            i = max(lo, i)
-        if hi is not None:
-            i = min(hi, i)
-        return str(i)
     return norm
 
 
@@ -146,11 +133,12 @@ def normalize_setting(key: str, value) -> str | None:
     return None if fn is None else fn(value)
 
 
-def normalize_settings(raw: dict) -> tuple[dict, dict]:
+def normalize_settings(raw) -> tuple[dict, dict]:
+    source = raw if isinstance(raw, dict) else {}
     clean, fixes = {}, {}
     for key, default in DEFAULTS.items():
-        norm = NORMALIZERS[key](raw.get(key, default))
-        if key in raw and norm != str(raw.get(key)):
+        norm = NORMALIZERS[key](source.get(key, default))
+        if key in source and norm != str(source.get(key)):
             fixes[key] = norm
         clean[key] = norm
     if num(clean["price_max"]) < num(clean["price_min"]):
@@ -166,10 +154,12 @@ def normalize_settings(raw: dict) -> tuple[dict, dict]:
 _INDEXES = (
     ("purchases", [("status", ASCENDING), ("expires_at", ASCENDING)], {}),
     ("purchases", [("status", ASCENDING), ("checked_at", ASCENDING)], {}),
+    ("purchases", [("status", ASCENDING), ("started_at", ASCENDING)], {}),
     ("purchases", [("tg_id", ASCENDING)], {}),
     ("purchases", [("tg_id", ASCENDING), ("phone", ASCENDING)], {}),
     ("purchases", [("started_at", ASCENDING)], {}),
     ("ledger", [("tg_id", ASCENDING), ("created_at", ASCENDING)], {}),
+    ("ledger", [("purchase_id", ASCENDING)], {}),
     ("settings", [("tg_id", ASCENDING)], {"unique": True}),
     ("reports", [("tg_id", ASCENDING), ("ts", DESCENDING)], {}),
 )
@@ -225,15 +215,19 @@ async def close_db():
             _client, _db = None, None
 
 
+async def _seed_settings(tg_id: int):
+    clean, _ = normalize_settings({})
+    await _db.settings.update_one(
+        {"tg_id": tg_id}, {"$setOnInsert": {**clean, "tg_id": tg_id}}, upsert=True)
+
+
 async def ensure_user(tg_id: int, username: str = ""):
     await _db.users.update_one(
         {"_id": tg_id},
         {"$set": {"username": username or ""},
          "$setOnInsert": {"created_at": _now()}},
         upsert=True)
-    clean, _ = normalize_settings({})
-    await _db.settings.update_one(
-        {"tg_id": tg_id}, {"$setOnInsert": {**clean, "tg_id": tg_id}}, upsert=True)
+    await _seed_settings(tg_id)
 
 
 async def get_username(tg_id: int) -> str:
@@ -244,9 +238,8 @@ async def get_username(tg_id: int) -> str:
 async def get_settings(tg_id: int) -> dict:
     doc = await _db.settings.find_one({"tg_id": tg_id})
     if not doc:
+        await _seed_settings(tg_id)
         clean, _ = normalize_settings({})
-        await _db.settings.update_one(
-            {"tg_id": tg_id}, {"$setOnInsert": {**clean, "tg_id": tg_id}}, upsert=True)
         return clean
     clean, fixes = normalize_settings(doc)
     if fixes:
@@ -304,13 +297,14 @@ def current_age(p: dict, at: int | None = None) -> float:
 
 async def add_purchase(tg_id, item_id, phone, country, price, password="", mail="",
                        mail_password="", session_string="", expires_at=0,
-                       age_at_buy_hours=0.0, account_created_ts=0,
-                       spam_flag=False, status="login", note="") -> str:
+                       age_at_buy_hours=0.0, account_created_ts=0, auth_key="",
+                       auth_dc=0, spam_flag=False, status="login", note="") -> str:
     now = _now()
     pid = (await _db.purchases.insert_one({
         "tg_id": tg_id, "item_id": item_id, "phone": phone or "", "country": country or "",
         "price": float(price), "password": password or "", "mail": mail or "",
         "mail_password": mail_password or "", "session_string": session_string,
+        "auth_key": auth_key or "", "auth_dc": int(auth_dc or 0),
         "status": status, "started_at": now, "expires_at": int(expires_at),
         "target_age_hours": TARGET_HOURS,
         "age_at_buy_hours": float(age_at_buy_hours),
@@ -333,6 +327,7 @@ async def due_purchases(limit: int = 200) -> list[dict]:
         "$or": [
             {"status": "queued", "expires_at": {"$lte": now}},
             {"status": "cleaning", "checked_at": {"$lt": now - STALE_CLEAN_SECONDS}},
+            {"status": "login", "started_at": {"$lt": now - LOGIN_STALE}},
         ]
     }).sort("expires_at", ASCENDING).limit(limit).to_list(None)
 
@@ -345,7 +340,8 @@ async def claim_purchase(pid) -> bool:
     doc = await _db.purchases.find_one_and_update(
         {"_id": oid,
          "$or": [{"status": "queued"},
-                 {"status": "cleaning", "checked_at": {"$lt": now - STALE_CLEAN_SECONDS}}]},
+                 {"status": "cleaning", "checked_at": {"$lt": now - STALE_CLEAN_SECONDS}},
+                 {"status": "login", "started_at": {"$lt": now - LOGIN_STALE}}]},
         {"$set": {"status": "cleaning", "checked_at": now}})
     return bool(doc)
 
