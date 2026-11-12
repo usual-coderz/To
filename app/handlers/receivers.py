@@ -41,6 +41,14 @@ async def cb_add(cq: CallbackQuery):
     await cq.answer()
 
 
+@router.callback_query(F.data == "r:warm")
+async def cb_warm(cq: CallbackQuery):
+    await cq.answer("warming…")
+    done = await receivers.warm(cq.from_user.id)
+    rows = await db.list_receivers(cq.from_user.id)
+    await show(cq, f"/start sent to {done}\n\n" + receivers_text(rows), kb.receivers(rows))
+
+
 @router.callback_query(F.data == "r:sync")
 async def cb_sync(cq: CallbackQuery):
     await cq.answer("syncing…")
@@ -58,7 +66,7 @@ async def cb_detail(cq: CallbackQuery):
     r = await db.get_receiver(rid)
     if not r or r["tg_id"] != cq.from_user.id:
         return await cq.answer("gone", show_alert=True)
-    count = len((await db.latest_prices(cq.from_user.id, pricing.PRICE_TTL)))
+    count = len(await pricing.receiver_table(cq.from_user.id, rid))
     await show(cq, receiver_detail_text(r, count), kb.receiver_detail(r))
     await cq.answer()
 
@@ -66,28 +74,47 @@ async def cb_detail(cq: CallbackQuery):
 @router.callback_query(F.data.startswith("rc:"))
 async def cb_cap(cq: CallbackQuery):
     rid = cq.data.split(":", 1)[1]
-    await cq.answer("checking…")
+    r = await db.get_receiver(rid)
+    if not r:
+        return await cq.answer("gone", show_alert=True)
+    if r.get("kind") == "lion":
+        return await cq.answer("lion uses the price link", show_alert=True)
+    await cq.answer("/cap sent…")
     cap = await receivers.capacity(cq.from_user.id, rid)
     r = await db.get_receiver(rid)
     if not r:
         return
-    await show(cq, receiver_detail_text(r, cap), kb.receiver_detail(r))
+    note = "no reply" if cap < 0 else f"cap {cap}"
+    await show(cq, receiver_detail_text(r) + f"\n\n🔄 {note}", kb.receiver_detail(r))
 
 
 @router.callback_query(F.data.startswith("rp:"))
 async def cb_prices(cq: CallbackQuery):
     rid = cq.data.split(":", 1)[1]
     r = await db.get_receiver(rid)
+    if not r or r["tg_id"] != cq.from_user.id:
+        return await cq.answer("gone", show_alert=True)
+    await cq.answer("fetching…")
+    await receivers.capacity(cq.from_user.id, rid)
+    rows = await pricing.receiver_table(cq.from_user.id, rid)
+    r = await db.get_receiver(rid)
+    if not r:
+        return
+    body = prices_text(rows) if rows else "<b>Prices</b>\nno live prices"
+    await show(cq, receiver_detail_text(r, len(rows)) + "\n\n" + body,
+               kb.receiver_detail(r))
+
+
+@router.callback_query(F.data.startswith("rw:"))
+async def cb_warm_one(cq: CallbackQuery):
+    rid = cq.data.split(":", 1)[1]
+    ok = await receivers.warm(cq.from_user.id, rid)
+    r = await db.get_receiver(rid)
     if not r:
         return await cq.answer("gone", show_alert=True)
-    rows = await pricing.offers_for(cq.from_user.id, r.get("username") and "")
-    offers = await pricing.offers_map(cq.from_user.id)
-    mine = [{"country": cc, "offers": [o for o in v if o["receiver_id"] == rid]}
-            for cc, v in offers.items()]
-    mine = [m for m in mine if m["offers"]]
-    mine.sort(key=lambda m: -m["offers"][0]["price"])
-    await show(cq, prices_text(mine), kb.receiver_detail(r))
-    await cq.answer()
+    await show(cq, receiver_detail_text(r) + ("\n\n✅ /start sent" if ok else "\n\n❌ failed"),
+               kb.receiver_detail(r))
+    await cq.answer("done")
 
 
 @router.callback_query(F.data.startswith("rs:"))
@@ -97,6 +124,7 @@ async def cb_confirm(cq: CallbackQuery):
     if not r:
         return await cq.answer("gone", show_alert=True)
     await db.set_receiver(rid, confirm_seconds=0)
+    r = await db.get_receiver(rid)
     await show(cq, receiver_detail_text(r), kb.receiver_detail(r))
     await cq.answer("confirm reset to auto")
 
@@ -134,5 +162,5 @@ async def on_text(m: Message):
     if not rid:
         return await m.answer("bad username · /cancel")
     PENDING.pop(m.from_user.id, None)
-    await m.answer(f"✅ added @{key}")
+    await m.answer(f"✅ added @{key} as {pricing.kind_of(key)}")
     await _render(m.bot, m.chat.id, m.from_user.id)
