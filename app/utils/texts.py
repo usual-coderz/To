@@ -98,7 +98,7 @@ def _spam_line(reply: str) -> str:
 def audit_text(p: dict, d: dict, supervisor: str = "") -> str:
     created = p.get("account_created_ts") or 0
     devices = d.get("devices") or []
-    ch, gr, bt = d.get("owned") or (0, 0, 0)
+    ch, gr, bt = (d.get("owned") or (0, 0, 0))[:3]
     owned = []
     if ch:
         owned.append(f"{ch} channel(s)")
@@ -164,7 +164,6 @@ def session_detail(p: dict, checked: str = "") -> str:
 def session_file(p: dict) -> str:
     created = p.get("account_created_ts") or 0
     return (
-        f"# AccStore session\n"
         f"phone = {p.get('phone') or ''}\n"
         f"item_id = {p['item_id']}\n"
         f"country = {p.get('country') or ''}\n"
