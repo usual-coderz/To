@@ -651,7 +651,8 @@ async def latest_prices(tg_id: int, max_age: float) -> list[dict]:
         {"$group": {"_id": {"receiver_id": "$receiver_id", "country": "$country"},
                     "price": {"$first": "$price"}, "ts": {"$first": "$ts"}}},
     ]
-    return await _db.prices.aggregate(pipeline).to_list(None)
+    cursor = await _db.prices.aggregate(pipeline)
+    return await cursor.to_list(None)
 
 
 async def add_sale(tg_id: int, purchase_id, country: str, receiver_id, receiver: str,
