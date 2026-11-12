@@ -5,9 +5,8 @@ import re
 import time
 from decimal import Decimal, InvalidOperation
 
+from app.config import TARGET_HOURS
 from app.utils.timeutil import age_hours, parse_ts
-
-TARGET_FALLBACK = 24.0
 
 _FLAG_RE = re.compile("[\U0001F1E6-\U0001F1FF]{2}")
 _COUNTRY_RE = re.compile(r"\(([A-Za-z]{2})\)")
@@ -211,6 +210,11 @@ def age_for_queue(item: dict) -> float:
     return 0.0
 
 
+def is_mature(item: dict, target: float = TARGET_HOURS) -> bool:
+    age = age_hours_of(item)
+    return age is not None and age >= target
+
+
 def search_query(s: dict) -> dict:
     floor = _num(s.get("session_min_hours")) or 0.0
     days = int(floor // 24)
@@ -276,6 +280,14 @@ def passes(item: dict, s: dict, authoritative: bool = False) -> tuple[bool, str]
     if s.get("nsb_only") == "1" and _flag(item.get("nsb")) is False:
         return False, "resold"
 
+    cc = country_of(item)
+    if cc:
+        if cc in _codes(s.get("deny_countries", "")):
+            return False, "country_excluded"
+        allow = _codes(s.get("countries", ""))
+        if allow and cc not in allow:
+            return False, "country_not_included"
+
     floor = _num(s.get("session_min_hours")) or 0.0
     cap = _num(s.get("session_max_hours")) or 0.0
     age = age_hours_of(item) if (floor or cap) else None
@@ -321,14 +333,7 @@ def passes(item: dict, s: dict, authoritative: bool = False) -> tuple[bool, str]
     elif mode == "no" and has_pw is True:
         return False, "has_2fa"
 
-    cc = country_of(item)
-    if cc:
-        if cc in _codes(s.get("deny_countries", "")):
-            return False, "country_excluded"
-        allow = _codes(s.get("countries", ""))
-        if allow and cc not in allow:
-            return False, "country_not_included"
-    else:
+    if not cc:
         unknown = True
 
     if floor and age is None:
@@ -337,7 +342,7 @@ def passes(item: dict, s: dict, authoritative: bool = False) -> tuple[bool, str]
     return True, ("ok_unknown" if unknown else "ok")
 
 
-def clean_delay_hours(item: dict, target: float = TARGET_FALLBACK,
+def clean_delay_hours(item: dict, target: float = TARGET_HOURS,
                       early: bool = True) -> float:
     target = max(0.0, float(target))
     if not early:
