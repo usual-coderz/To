@@ -12,27 +12,38 @@ from app.utils.money import parse_balances, parse_user, same_currency
 log = logging.getLogger("lzt")
 
 PAYMENT_PATHS = ("/user/payments", "/payments", "/balance/payments")
-AUTH_KEY_FIELDS = ("telegram_auth_key", "auth_key", "telegram_session", "session",
-                   "authKey", "auth_key_json")
-CODE_FIELDS = ("telegram_login_code", "telegramLoginCode", "login_code", "loginCode",
-               "code")
-MODE_FIELDS = ("mode", "kind", "type")
-HASH_FIELDS = ("phone_code_hash", "phoneCodeHash", "code_hash", "codeHash")
-KEY_MODES = ("auth_key", "authkey", "session", "key")
+AUTH_KEY_FIELDS = ("auth_key", "telegram_auth_key", "telegram_session", "session",
+                   "authKey")
+LOGIN_DATA_KEY_FIELDS = ("auth_key", "telegram_auth_key", "authKey")
 
-RESET_PATHS = ("/{}/reset-authorizations", "/{}/telegram-reset-authorizations",
-               "/telegram/{}/reset-authorizations", "/{}/reset-sessions",
-               "/{}/telegram-reset-sessions")
-AUTH_KEY_PATHS = ("/{}/telegram-auth-key", "/{}/auth-key", "/{}/telegram-session",
-                  "/{}/telegram-auth-key-json")
+RESET_PATH = "/{}/telegram-reset-authorizations"
+CODE_PATH = "/{}/telegram-login-code"
+CHECK_PATH = "/{}/check-account"
+BUY_PATH = "/{}/fast-buy"
 
-SOFT_STATUS = (403, 404, 405)
+RETRY_ATTEMPTS = 40
+RETRY_DELAY = 0.4
 
 
 class LztError(Exception):
     def __init__(self, message: str, status: int = 0):
         super().__init__(message)
         self.status = status
+
+
+def classify(e: LztError) -> str:
+    text = str(e).lower()
+    if "daily limit" in text or "limit of checks" in text:
+        return "check_limit"
+    if "is sold" in text or "sold." in text:
+        return "sold"
+    if "removed" in text or "deleted" in text:
+        return "deleted"
+    if "blacklist" in text:
+        return "blacklist"
+    if "enough money" in text or "balance" in text:
+        return "no_balance"
+    return "check_failed"
 
 
 def _message(payload) -> str:
@@ -61,67 +72,16 @@ def _message(payload) -> str:
     return dig(payload)[:300]
 
 
-def _dig_field(node, fields: tuple[str, ...], depth: int = 0) -> str:
-    if depth > 4:
-        return ""
-    if isinstance(node, dict):
-        for key in fields:
-            if key in node:
-                found = _dig_field(node[key], fields, depth + 1)
-                if found:
-                    return found
-        for value in node.values():
-            found = _dig_field(value, fields, depth + 1)
-            if found:
-                return found
-    elif isinstance(node, list):
-        for value in node:
-            found = _dig_field(value, fields, depth + 1)
-            if found:
-                return found
-    elif isinstance(node, (str, int)) and not isinstance(node, bool):
-        return str(node).strip()
+def _long(value) -> str:
+    if isinstance(value, str) and len(value.strip()) > 100:
+        return value.strip()
     return ""
-
-
-def _dig_key(node, depth: int = 0) -> str:
-    if depth > 4:
-        return ""
-    if isinstance(node, dict):
-        for key in AUTH_KEY_FIELDS:
-            raw = node.get(key)
-            if isinstance(raw, str) and len(raw) > 40:
-                return raw.strip()
-        for value in node.values():
-            found = _dig_key(value, depth + 1)
-            if found:
-                return found
-    elif isinstance(node, list):
-        for value in node:
-            found = _dig_key(value, depth + 1)
-            if found:
-                return found
-    return ""
-
-
-def _parse_code(data) -> tuple[str, str, str]:
-    value = _dig_field(data, CODE_FIELDS)
-    mode = _dig_field(data, MODE_FIELDS).lower()
-    code_hash = _dig_field(data, HASH_FIELDS)
-    if code_hash and (len(code_hash) < 8 or code_hash == value):
-        code_hash = ""
-    if value and (mode in KEY_MODES or len(value) > 100):
-        return value, "auth_key", ""
-    return value, mode, code_hash
 
 
 class LztClient:
     def __init__(self, token: str = LZT_TOKEN):
         self._token = token
         self._cache: dict[str, tuple[float, object]] = {}
-        self._reset_path: str = ""
-        self._key_path: str = ""
-        self._code_verb: str = ""
         self._http = httpx.AsyncClient(
             base_url=LZT_BASE,
             timeout=HTTP_TIMEOUT,
@@ -204,21 +164,18 @@ class LztClient:
                     json: dict | None = None) -> dict:
         return await self._request("POST", path, params=params or {}, json=json)
 
-    async def _probe(self, templates: tuple[str, ...], item_id: int,
-                     verbs: tuple[str, ...]) -> tuple[dict, str]:
+    async def _buy_call(self, path: str, payload: dict | None) -> dict:
         last: LztError | None = None
-        for template in templates:
-            path = template.format(int(item_id))
-            for verb in verbs:
-                try:
-                    data = await self._request(verb, path)
-                except LztError as e:
-                    last = e
-                    if e.status in SOFT_STATUS:
-                        continue
-                    raise
-                return data, template
-        raise last or LztError("endpoint not found", 404)
+        for attempt in range(RETRY_ATTEMPTS):
+            try:
+                return await self._request("POST", path, json=payload)
+            except LztError as e:
+                last = e
+                if e.status == 403 and "retry_request" in str(e).lower():
+                    await asyncio.sleep(min(RETRY_DELAY + attempt * 0.1, 3.0))
+                    continue
+                raise
+        raise last or LztError("retry_request exhausted", 403)
 
     async def profile(self, use_cache: bool = True) -> dict:
         if use_cache:
@@ -300,85 +257,58 @@ class LztClient:
         return data.get("item") or data
 
     async def check_account(self, item_id: int) -> dict:
-        path = f"/{int(item_id)}/check-account"
-        last: LztError | None = None
-        for attempt in range(2):
-            try:
-                return await self._post(path)
-            except LztError as e:
-                last = e
-                if e.status != 429 or attempt:
-                    raise
-                await asyncio.sleep(1.5)
-        raise last or LztError("check failed")
+        return await self._buy_call(CHECK_PATH.format(int(item_id)), None)
 
     async def fast_buy(self, item_id: int, price: float,
                        balance_id: int | None = None) -> dict:
-        params = {"price": float(price)}
+        payload: dict = {"price": float(price)}
         if balance_id:
-            params["balance_id"] = int(balance_id)
-        data = await self._post(f"/{int(item_id)}/fast-buy", params=params)
+            payload["balance_id"] = int(balance_id)
+        data = await self._buy_call(BUY_PATH.format(int(item_id)), payload)
         self.invalidate()
         return data
 
     async def reset_authorizations(self, item_id: int) -> dict:
-        if self._reset_path:
-            try:
-                return await self._request("POST", self._reset_path.format(int(item_id)))
-            except LztError as e:
-                if e.status not in SOFT_STATUS:
-                    raise
-                self._reset_path = ""
-        data, template = await self._probe(RESET_PATHS, item_id, ("POST", "GET"))
-        self._reset_path = template
-        log.info(f"reset endpoint resolved: {template}")
-        return data
+        return await self._post(RESET_PATH.format(int(item_id)))
 
-    async def telegram_login_code(self, item_id: int) -> tuple[str, str, str]:
-        path = f"/{int(item_id)}/telegram-login-code"
-        verbs = [self._code_verb] if self._code_verb else []
-        verbs += [v for v in ("GET", "POST") if v not in verbs]
-        last: LztError | None = None
-        for verb in verbs:
-            try:
-                data = await self._request(verb, path)
-            except LztError as e:
-                last = e
-                if e.status in SOFT_STATUS:
-                    if verb == self._code_verb:
-                        self._code_verb = ""
-                    continue
-                raise
-            self._code_verb = verb
-            return _parse_code(data)
-        if last and last.status not in SOFT_STATUS:
-            log.info(f"code {item_id}: {last}")
-        return "", "", ""
+    async def telegram_login_code(self, item_id: int) -> tuple[str, int]:
+        try:
+            data = await self._get(CODE_PATH.format(int(item_id)))
+        except LztError as e:
+            if e.status == 404:
+                return "", 0
+            raise
+        codes = data.get("codes")
+        if not isinstance(codes, dict):
+            return "", 0
+        code = str(codes.get("code") or "").strip()
+        try:
+            date = int(codes.get("date") or 0)
+        except (TypeError, ValueError):
+            date = 0
+        if not code:
+            return "", 0
+        return code, date
 
-    async def auth_key(self, item_id: int) -> str:
-        value, mode, _hash = await self.telegram_login_code(item_id)
-        if value and (mode in KEY_MODES or len(value) > 100):
-            return value
-
-        templates = tuple(t for t in AUTH_KEY_PATHS if t != self._key_path)
-        if self._key_path:
-            templates = (self._key_path,) + templates
-        for template in templates:
+    async def auth_key(self, item_id: int, hint: dict | None = None) -> str:
+        item = hint if isinstance(hint, dict) and hint else None
+        if item is None:
             try:
-                data = await self._request("GET", template.format(int(item_id)))
+                item = await self.item(item_id)
             except LztError as e:
-                if e.status in SOFT_STATUS:
-                    if template == self._key_path:
-                        self._key_path = ""
-                    continue
-                raise
-            found = _dig_key(data)
+                log.info(f"auth key item {item_id}: {e}")
+                return ""
+
+        for key in AUTH_KEY_FIELDS:
+            found = _long(item.get(key))
             if found:
-                self._key_path = template
                 return found
 
-        try:
-            item = await self.item(item_id)
-        except LztError:
-            return ""
-        return _dig_key(item)
+        data = item.get("loginData")
+        if isinstance(data, dict):
+            for key in LOGIN_DATA_KEY_FIELDS:
+                found = _long(data.get(key))
+                if found:
+                    return found
+
+        return _long(item.get("login"))
