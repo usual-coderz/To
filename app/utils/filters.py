@@ -200,13 +200,15 @@ def age_hours_of(item: dict, at: int | None = None) -> float | None:
     return None
 
 
-def age_for_queue(item: dict) -> float:
+def age_for_queue(item: dict, floor: float = 0.0) -> float:
     declared = session_hours(item)
     if declared is not None:
         return max(0.0, declared)
     created = account_created_ts(item)
     if created:
         return age_hours(created) or 0.0
+    if floor and floor >= TARGET_HOURS:
+        return max(0.0, floor)
     return 0.0
 
 
