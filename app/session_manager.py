@@ -3,6 +3,7 @@ import base64
 import json
 import logging
 import re
+import time
 
 from telethon import TelegramClient, functions
 from telethon.crypto import AuthKey
@@ -25,7 +26,8 @@ _FALLBACK_DC = (2, "149.154.167.51", 443)
 
 _RESEND_HINTS = ("RESEND_CODE", "ALL AVAILABLE OPTIONS", "SEND_CODE_UNAVAILABLE")
 
-CODE_POLL = 3
+CODE_POLL = 2
+CODE_SKEW = 5
 
 
 def normalize_phone(raw) -> str:
@@ -177,33 +179,22 @@ async def _send_code(c: TelegramClient, number: str, previous: str = "") -> str:
     raise RuntimeError("send code failed")
 
 
-async def _peek(lzt, item_id: int) -> tuple[str, str, str]:
-    try:
-        value, mode, code_hash = await lzt.telegram_login_code(item_id)
-    except LztError as e:
-        log.info(f"code peek {item_id}: {e}")
-        return "", "", ""
-    if mode == "auth_key" or len(value) > 100:
-        return value, "auth_key", ""
-    return value, mode, code_hash
-
-
-async def _await_code(lzt, item_id: int, timeout: int,
-                      skip: str = "") -> tuple[str, str, str]:
+async def _await_code(lzt, item_id: int, sent_at: int, timeout: int) -> str:
     loop = asyncio.get_running_loop()
     end = loop.time() + timeout
+    newest = ("", 0)
     while loop.time() < end:
         try:
-            value, mode, code_hash = await lzt.telegram_login_code(item_id)
+            code, date = await lzt.telegram_login_code(item_id)
         except LztError as e:
             log.info(f"code poll {item_id}: {e}")
-            value, mode, code_hash = "", "", ""
-        if value and (mode == "auth_key" or len(value) > 100):
-            return value, "auth_key", ""
-        if value and len(value) >= 4 and (code_hash or value != skip):
-            return value, "code", code_hash
+            code, date = "", 0
+        if code and date >= sent_at - CODE_SKEW:
+            return code
+        if code and date > newest[1]:
+            newest = (code, date)
         await asyncio.sleep(CODE_POLL)
-    return "", "", ""
+    return newest[0]
 
 
 async def _from_key(raw: str, proxy_cfg: str):
@@ -223,45 +214,25 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
     await c.connect()
     try:
         last: BaseException | None = None
-        trust_market = True
 
         for attempt in range(3):
-            code_hash = ""
-            before, before_mode, before_hash = await _peek(lzt, item_id)
-
-            if before and before_mode == "auth_key":
-                value, mode, market_hash = before, "auth_key", ""
-            elif trust_market and before and before_hash:
-                value, mode, market_hash = before, "code", before_hash
-            else:
+            sent_at = int(time.time())
+            try:
                 code_hash = await _send_code(c, number)
-                value, mode, market_hash = await _await_code(lzt, item_id,
-                                                             CODE_TIMEOUT, before)
+            except Exception as e:
+                last = e
+                log.info(f"send code {item_id} ({attempt + 1}/3): {e}")
+                await asyncio.sleep(3)
+                continue
 
-            if mode == "auth_key" and value:
-                try:
-                    key_c, key_str = await _from_key(value, proxy_cfg)
-                except Exception as e:
-                    last = e
-                    await asyncio.sleep(2)
-                    continue
-                try:
-                    await c.disconnect()
-                except Exception:
-                    pass
-                return key_c, key_str, 0
-
-            if not value:
-                if attempt < 2:
-                    await _reset(lzt, item_id)
-                    await asyncio.sleep(2.0)
-                    trust_market = False
-                    continue
-                raise RuntimeError("LZT login code not received")
+            code = await _await_code(lzt, item_id, sent_at, CODE_TIMEOUT)
+            if not code:
+                last = RuntimeError("LZT login code not received")
+                log.info(f"code missing for {item_id} ({attempt + 1}/3)")
+                continue
 
             try:
-                await c.sign_in(phone=number, code=value,
-                                phone_code_hash=market_hash or code_hash)
+                await c.sign_in(phone=number, code=code, phone_code_hash=code_hash)
                 break
             except SessionPasswordNeededError:
                 if not password:
@@ -271,8 +242,6 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
             except (PhoneCodeInvalidError, PhoneCodeExpiredError) as e:
                 last = e
                 log.info(f"code rejected for {item_id} ({attempt + 1}/3)")
-                if market_hash:
-                    trust_market = False
                 await asyncio.sleep(2)
         else:
             raise RuntimeError(f"login code rejected: {last}")
@@ -290,13 +259,14 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
         raise
 
 
-async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg: str = ""):
+async def login_with_lzt(phone: str, password: str, item_id: int, lzt,
+                         proxy_cfg: str = "", hint: dict | None = None):
     number = normalize_phone(phone)
     if not number:
         raise RuntimeError("no phone number on item")
 
     try:
-        key = await lzt.auth_key(item_id)
+        key = await lzt.auth_key(item_id, hint)
     except LztError as e:
         log.info(f"auth key {item_id}: {e}")
         key = ""
@@ -308,7 +278,6 @@ async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg
             log.info(f"auth key login {item_id}: {e}")
         else:
             await _reset(lzt, item_id)
-            await asyncio.sleep(1.5)
             if await _alive(c):
                 return c, session_str, 0
             try:
@@ -316,13 +285,10 @@ async def login_with_lzt(phone: str, password: str, item_id: int, lzt, proxy_cfg
             except Exception:
                 pass
 
-    await _reset(lzt, item_id)
-    await asyncio.sleep(2.5)
-
     c, session_str, uid = await _code_login(number, password, item_id, lzt, proxy_cfg)
 
     await _reset(lzt, item_id)
-    await asyncio.sleep(1.5)
+    await asyncio.sleep(1.0)
     if await _alive(c):
         return c, session_str, uid
 
@@ -428,13 +394,10 @@ async def spambot_status(c: TelegramClient) -> str:
 
 async def device_list(c: TelegramClient) -> list[str]:
     try:
-        auths = await c.functions.account.GetAuthorizationsRequest()
-    except Exception:
-        try:
-            auths = await c(functions.account.GetAuthorizationsRequest())
-        except Exception as e:
-            log.info(f"device list: {e}")
-            return []
+        auths = await c(functions.account.GetAuthorizationsRequest())
+    except Exception as e:
+        log.info(f"device list: {e}")
+        return []
 
     current: list[str] = []
     other: list[str] = []
