@@ -7,6 +7,8 @@ BACK_MAIN = "m:main"
 BACK_FILTERS = "m:filters"
 BACK_WALLET = "m:wallet"
 BACK_SESSIONS = "m:sessions"
+BACK_RECEIVERS = "m:receivers"
+BACK_SELL = "m:sell"
 
 MAX_DATA = 64
 
@@ -37,7 +39,9 @@ def _onoff(flag: str, on: str, off: str) -> str:
 def main(s: dict) -> InlineKeyboardMarkup:
     return kb([
         [("⏸ Stop" if s["auto_buy"] == "1" else "▶️ Start", "t:auto_buy")],
+        [("Auto sell " + _onoff(s["auto_sell"], "on", "off"), "t:auto_sell")],
         [("Filters", BACK_FILTERS), ("Sessions", BACK_SESSIONS)],
+        [("Receivers", BACK_RECEIVERS), ("Sell", BACK_SELL)],
         [("Wallet", BACK_WALLET), ("Report", "m:report")],
         [("Stats", "m:stats")],
     ])
@@ -84,22 +88,63 @@ def pick(prefix: str, values: list[str], back_to: str = BACK_FILTERS) -> InlineK
     return kb(rows)
 
 
-def sessions(items: list[dict]) -> InlineKeyboardMarkup:
-    rows = []
-    for p in items:
-        state = "✅" if p.get("status") == "ready" else "⏳"
-        label = f"{state} {p.get('phone') or p['item_id']}"
-        rows.append([(label[:40], f"v:{p['_id']}")])
-    rows.append([("Refresh", BACK_SESSIONS)])
-    rows.append([("Back", BACK_MAIN)])
-    return kb(rows)
+def sessions(stats: dict) -> InlineKeyboardMarkup:
+    return kb([
+        [(f"Queue {stats['queue']}", "q:list")],
+        [(f"24h+ {stats['over']}", "q:over")],
+        [("Stats", "q:stats"), ("Ready", "q:ready")],
+        [("Back", BACK_MAIN)],
+    ])
+
+
+def session_list(rows: list[dict], page: str) -> InlineKeyboardMarkup:
+    out = []
+    for p in rows:
+        label = f"{p.get('phone') or p['item_id']} · {p.get('status')}"
+        out.append([(label[:38], f"v:{p['_id']}")])
+    out.append([("Download txt", f"t:{page}"), ("Refresh", f"q:{page}")])
+    out.append([("Back", BACK_SESSIONS)])
+    return kb(out)
 
 
 def session_detail(p: dict) -> InlineKeyboardMarkup:
     pid = p["_id"]
+    rows = [[("Session file", f"f:{pid}"), ("Check", f"c:{pid}")]]
+    if p.get("status") == "ready":
+        rows.append([("Sell now", f"sell:{pid}")])
+    rows.append([("Back", BACK_SESSIONS)])
+    return kb(rows)
+
+
+def receivers(rows: list[dict]) -> InlineKeyboardMarkup:
+    out = []
+    for r in rows:
+        mark = "🟢" if r.get("enabled") else "⚪"
+        cap = r.get("cap")
+        cap_text = "?" if cap is None or cap < 0 else str(cap)
+        out.append([(f"{mark} @{r['username']} · cap {cap_text}",
+                     f"rv:{r['_id']}")])
+    out.append([("Add receiver", "r:add"), ("Refresh", "r:sync")])
+    out.append([("Back", BACK_MAIN)])
+    return kb(out)
+
+
+def receiver_detail(r: dict) -> InlineKeyboardMarkup:
+    rid = r["_id"]
     return kb([
-        [("Session file", f"f:{pid}"), ("Check", f"c:{pid}")],
-        [("Back", BACK_SESSIONS)],
+        [("Check capacity", f"rc:{rid}"), ("Prices", f"rp:{rid}")],
+        [("Confirm " + str(r.get("confirm_seconds") or "auto"), f"rs:{rid}")],
+        [("🟢 On" if r.get("enabled") else "⚪ Off", f"rt:{rid}"),
+         ("Delete", f"rd:{rid}")],
+        [("Back", BACK_RECEIVERS)],
+    ])
+
+
+def sell_menu(s: dict, ready: int) -> InlineKeyboardMarkup:
+    return kb([
+        [("Auto sell " + _onoff(s["auto_sell"], "on", "off"), "t:auto_sell")],
+        [(f"Sell ready ({ready})", "sl:all")],
+        [("Prices", "sl:prices"), ("Back", BACK_MAIN)],
     ])
 
 
