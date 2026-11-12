@@ -8,7 +8,8 @@ from aiogram.types import Message
 from app import db, engine
 from app.config import OWNER_IDS, TARGET_HOURS
 from app.deps import lzt
-from app.session_manager import login_with_auth_key
+from app.lzt import extract_auth_key, extract_dc_id
+from app.session_manager import dc_addr, login_with_auth_key
 from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import mail_state, pass_state, spam_state
@@ -20,6 +21,11 @@ router = Router()
 
 def _owner(m: Message) -> bool:
     return not OWNER_IDS or m.from_user.id in OWNER_IDS
+
+
+def _dc_hint(dc: int) -> str:
+    hit = dc_addr(dc) if dc else None
+    return f"{hit[0]}:{hit[1]}" if hit else "unknown, will sweep"
 
 
 @router.message(Command("addowner"))
@@ -79,7 +85,8 @@ async def cmd_relogin(m: Message):
     await m.answer("🔑 logging in…")
     try:
         c, session_str, _uid = await login_with_auth_key(
-            p["phone"], p.get("password") or "", p["item_id"], lzt, s.get("proxy", ""))
+            p["phone"], p.get("password") or "", p["item_id"], lzt,
+            s.get("proxy", ""), p, p.get("auth_key") or "", int(p.get("auth_dc") or 0))
     except Exception as e:
         return await m.answer(f"❌ {html.escape(str(e)[:200])}")
     await db.set_session(p["_id"], session_str)
@@ -194,12 +201,15 @@ async def cmd_peek(m: Message):
     except Exception as e:
         return await m.answer(f"error {html.escape(str(e))}")
     item = chk.get("item") or {}
+    key = extract_auth_key(item)
+    dc = extract_dc_id(item)
     keep = ("price", "telegram_spam_block", "spam_block", "telegram_email", "email_type",
             "telegram_password", "country", "created_at", "registration_date",
-            "telegram_session_age", "session_age", "session_age_period", "nsb",
-            "telegram_auth_key", "telegram_dc_id")
+            "telegram_session_age", "session_age", "session_age_period", "nsb")
     lines = [f"{k} = {item.get(k)!r}" for k in keep if k in item]
     lines.append("—")
+    lines.append(f"auth_key = {'present len ' + str(len(key)) if key else 'MISSING'}")
+    lines.append(f"dc_id = {dc or 'MISSING'} -> {_dc_hint(dc)}")
     lines.append(f"spam_state = {spam_state(item)!r}")
     lines.append(f"email_state = {mail_state(item)!r}")
     lines.append(f"pass_state = {pass_state(item)!r}")
