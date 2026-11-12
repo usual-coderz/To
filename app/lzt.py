@@ -41,8 +41,10 @@ def classify(e: LztError) -> str:
         return "deleted"
     if "blacklist" in text:
         return "blacklist"
-    if "enough money" in text or "balance" in text:
+    if "enough money" in text or "enough balance" in text:
         return "no_balance"
+    if "session is invalid" in text or "logged out" in text or "blocked" in text:
+        return "dead"
     return "check_failed"
 
 
