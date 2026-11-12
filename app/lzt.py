@@ -94,6 +94,30 @@ def _deep_long(item: dict, keys: tuple[str, ...]) -> str:
     return ""
 
 
+def extract_auth_key(item) -> str:
+    if not isinstance(item, dict):
+        return ""
+    return _deep_long(item, AUTH_KEY_FIELDS)
+
+
+def extract_dc_id(item) -> int:
+    if not isinstance(item, dict):
+        return 0
+    sources = [item]
+    data = item.get("loginData")
+    if isinstance(data, dict):
+        sources.append(data)
+    for src in sources:
+        for key in DC_KEYS:
+            try:
+                value = int(src.get(key) or 0)
+            except (TypeError, ValueError):
+                value = 0
+            if value:
+                return value
+    return 0
+
+
 class LztClient:
     def __init__(self, token: str = LZT_TOKEN):
         self._token = token
@@ -103,7 +127,7 @@ class LztClient:
             timeout=HTTP_TIMEOUT,
             headers={"Authorization": f"Bearer {token}",
                      "Accept": "application/json",
-                     "User-Agent": "AccStore/3.0"},
+                     "User-Agent": "AccStore/3.1"},
         )
 
     async def close(self):
@@ -292,44 +316,22 @@ class LztClient:
                                 json={"challenge": challenge})
 
     async def auth_key(self, item_id: int, hint: dict | None = None) -> str:
-        item = hint if isinstance(hint, dict) and hint else None
-        if item is not None:
-            found = _deep_long(item, AUTH_KEY_FIELDS)
-            if found:
-                return found
+        found = extract_auth_key(hint)
+        if found:
+            return found
         try:
             full = await self.item(item_id)
         except LztError as e:
             log.info(f"auth key item {item_id}: {e}")
             return ""
-        return _deep_long(full, AUTH_KEY_FIELDS)
+        return extract_auth_key(full)
 
     async def dc_id(self, item_id: int, hint: dict | None = None) -> int:
-        sources = []
-        if isinstance(hint, dict):
-            sources.append(hint)
-            if isinstance(hint.get("loginData"), dict):
-                sources.append(hint["loginData"])
-        for src in sources:
-            for key in DC_KEYS:
-                try:
-                    value = int(src.get(key) or 0)
-                except (TypeError, ValueError):
-                    value = 0
-                if value:
-                    return value
+        found = extract_dc_id(hint)
+        if found:
+            return found
         try:
             full = await self.item(item_id)
         except LztError:
             return 0
-        for src in (full, full.get("loginData") or {}):
-            if not isinstance(src, dict):
-                continue
-            for key in DC_KEYS:
-                try:
-                    value = int(src.get(key) or 0)
-                except (TypeError, ValueError):
-                    value = 0
-                if value:
-                    return value
-        return 0
+        return extract_dc_id(full)
