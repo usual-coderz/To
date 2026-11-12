@@ -7,12 +7,12 @@ import time
 
 from telethon import TelegramClient, functions
 from telethon.crypto import AuthKey
-from telethon.errors import (FloodWaitError, PasswordHashInvalidError, RPCError,
+from telethon.errors import (FloodWaitError, PasswordHashInvalidError,
                              SessionPasswordNeededError)
 from telethon.sessions import StringSession
 
 from app.config import API_HASH, API_ID, CODE_TIMEOUT
-from app.lzt import LztError
+from app.lzt import LztError, extract_auth_key, extract_dc_id
 
 log = logging.getLogger("session")
 
@@ -21,7 +21,7 @@ DEVICE = dict(device_model="AccStore", system_version="2.1",
 
 _PROXY_RE = re.compile(r"(socks5|socks4|http)://(?:([^:@]+):([^@]+)@)?([^:]+):(\d+)")
 
-_FALLBACK_DC = (2, "149.167.51.0".replace(".0", ".51"), 443)
+_FALLBACK_DC = (2, "149.154.167.51", 443)
 
 
 def normalize_phone(raw) -> str:
@@ -133,52 +133,49 @@ async def _drop(c: TelegramClient):
         pass
 
 
-async def login_with_auth_key(phone: str, password: str, item_id: int, lzt,
-                              proxy_cfg: str = "", hint: dict | None = None):
-    last: BaseException | None = None
-    dc = 0
+async def _try_key(raw: str, dc: int, proxy_cfg: str):
+    session_str = session_from_auth_key(raw, dc)
+    conn = client(session_str, proxy_cfg)
     try:
-        dc = await lzt.dc_id(item_id, hint)
+        await conn.connect()
+        if await _alive(conn):
+            return conn, conn.session.save()
     except Exception:
-        dc = 0
-
-    for attempt in range(2):
-        raw = ""
-        try:
-            raw = await lzt.auth_key(item_id, hint)
-        except LztError as e:
-            last = e
-            log.info(f"auth key {item_id}: {e}")
-
-        if not raw:
-            last = last or RuntimeError("no auth key on item")
-            await _reset(lzt, item_id)
-            await asyncio.sleep(2)
-            continue
-
-        try:
-            session_str = session_from_auth_key(raw, dc)
-        except ValueError as e:
-            last = e
-            log.info(f"auth key parse {item_id}: {e}")
-            await _reset(lzt, item_id)
-            await asyncio.sleep(1.5)
-            continue
-
-        conn = client(session_str, proxy_cfg)
-        try:
-            await conn.connect()
-            if await _alive(conn):
-                return conn, conn.session.save(), 0
-            last = RuntimeError("auth key rejected")
-        except Exception as e:
-            last = e
-            log.info(f"auth key connect {item_id}: {e}")
         await _drop(conn)
-        await _reset(lzt, item_id)
-        await asyncio.sleep(2)
+        raise
+    await _drop(conn)
+    raise RuntimeError("auth key rejected")
 
-    raise RuntimeError(str(last or "auth key login failed"))
+
+async def login_with_auth_key(phone: str, password: str, item_id: int, lzt,
+                              proxy_cfg: str = "", hint: dict | None = None,
+                              raw_key: str = "", dc: int = 0):
+    key = (raw_key or "").strip() or extract_auth_key(hint)
+    dc = int(dc or 0) or extract_dc_id(hint)
+
+    if key:
+        try:
+            conn, session_str = await _try_key(key, dc, proxy_cfg)
+            return conn, session_str, 0
+        except Exception as e:
+            log.info(f"auth key login {item_id}: {e}")
+
+    await _reset(lzt, item_id)
+    await asyncio.sleep(1.5)
+
+    try:
+        fresh = await lzt.item(item_id)
+    except LztError as e:
+        log.info(f"auth key refetch {item_id}: {e}")
+        fresh = {}
+
+    key = extract_auth_key(fresh) or key
+    dc = extract_dc_id(fresh) or dc
+    if not key:
+        raise RuntimeError("no auth key on item")
+
+    conn, session_str = await _try_key(key, dc, proxy_cfg)
+    return conn, session_str, 0
 
 
 async def check_session(session_string: str, proxy_cfg: str = ""):
