@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import inspect
 import json
 import logging
 import re
@@ -14,6 +15,11 @@ from telethon.network import (ConnectionTcpAbridged, ConnectionTcpFull,
                               ConnectionTcpIntermediate)
 from telethon.sessions import StringSession
 from telethon.tl.types import EmailVerifyPurposeLoginChange
+
+try:
+    from telethon.tl.types import EmailVerificationCode
+except ImportError:
+    EmailVerificationCode = None
 
 from app.config import (API_HASH, API_ID, AUTH_CLEAN_TIMEOUT, AUTH_DC_SWEEP, AUTH_KEY_LEN,
                         AUTH_PROBE_DEADLINE, AUTH_PROBE_TIMEOUT, CODE_TIMEOUT)
@@ -298,22 +304,68 @@ async def check_session(session_string: str, proxy_cfg: str = ""):
         await _drop(c)
 
 
+# --- email change -----------------------------------------------------------
+# Telethon >=1.36: VerifyEmailRequest(purpose, verification=EmailVerificationCode(code))
+# Telethon <1.36:  VerifyEmailRequest(purpose, code)
+# Signature is introspected once per call instead of guessed at runtime, so the
+# request is always built against the installed version.
+
+def _send_verify_request(purpose, email):
+    params = inspect.signature(
+        functions.account.SendVerifyEmailCodeRequest.__init__).parameters
+    if "purpose" in params:
+        return functions.account.SendVerifyEmailCodeRequest(purpose=purpose, email=email)
+    return functions.account.SendVerifyEmailCodeRequest(email=email)
+
+
+def _verify_email_request(purpose, code):
+    params = inspect.signature(
+        functions.account.VerifyEmailRequest.__init__).parameters
+    if "verification" in params and EmailVerificationCode is not None:
+        return functions.account.VerifyEmailRequest(
+            purpose=purpose, verification=EmailVerificationCode(code=code))
+    if "verification" in params:
+        return functions.account.VerifyEmailRequest(purpose=purpose, verification=code)
+    return functions.account.VerifyEmailRequest(purpose=purpose, code=code)
+
+
 async def change_email(c: TelegramClient, new_email: str, mail_client,
                        code_timeout: int = CODE_TIMEOUT) -> str:
     purpose = EmailVerifyPurposeLoginChange()
-    try:
-        await c(functions.account.SendVerifyEmailCodeRequest(purpose=purpose,
-                                                             email=new_email))
-    except TypeError:
-        await c(functions.account.SendVerifyEmailCodeRequest(email=new_email))
 
-    code = await mail_client.fetch_verification_code(new_email, timeout=code_timeout,
-                                                     expected_length=6)
-    try:
-        await c(functions.account.VerifyEmailRequest(purpose=purpose, code=code))
-    except TypeError:
-        await c(functions.account.VerifyEmailRequest(code=code))
-    return code
+    last: Exception | None = None
+    for _ in range(3):
+        try:
+            await c(_send_verify_request(purpose, new_email))
+            last = None
+            break
+        except FloodWaitError as e:
+            last = e
+            await asyncio.sleep(min(int(e.seconds) + 2, 60))
+        except Exception as e:
+            last = e
+            log.info(f"send verify code {new_email}: {e}")
+            await asyncio.sleep(2.0)
+    if last is not None:
+        raise last
+
+    code = await mail_client.fetch_verification_code(
+        new_email, timeout=code_timeout, expected_length=6)
+    log.info(f"verify code for {new_email}: {code}")
+
+    last = None
+    for _ in range(3):
+        try:
+            await c(_verify_email_request(purpose, code))
+            return code
+        except FloodWaitError as e:
+            last = e
+            await asyncio.sleep(min(int(e.seconds) + 2, 60))
+        except Exception as e:
+            last = e
+            log.info(f"verify email code {new_email}: {e}")
+            await asyncio.sleep(2.0)
+    raise last or RuntimeError("verify email failed")
 
 
 async def reset_others(c: TelegramClient) -> int:
