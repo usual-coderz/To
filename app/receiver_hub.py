@@ -137,16 +137,23 @@ async def start_bot(username: str, param: str = "") -> bool:
     client = _client
     if client is None:
         return False
+
     entity = await _resolve(username)
     if entity is None:
         return False
+
     try:
-        if param:
-            await client(functions.messages.StartBotRequest(
-                bot=entity, peer=entity, start_param=param))
-        else:
-            await client(functions.messages.StartBotRequest(bot=entity, peer=entity))
+        import secrets
+
+        await client(functions.messages.StartBotRequest(
+            bot=entity,
+            peer=entity,
+            random_id=secrets.randbits(63),
+            start_param=param or ""
+        ))
+
         return True
+
     except Exception as e:
         log.info(f"start_bot {username}: {e}")
         return False
