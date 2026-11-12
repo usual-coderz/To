@@ -37,10 +37,14 @@ LZT_BASE: str = "https://api.lzt.market"
 HTTP_TIMEOUT: int = 40
 HTTP_RETRIES: int = 3
 HTTP_BACKOFF: float = 1.6
+
 TICK: float = 10.0
 CYCLE_INTERVAL: float = 20.0
-CODE_TIMEOUT: int = 150
-LOGIN_CONCURRENCY: int = 4
+MAX_SCAN: int = 80
+TARGET_HOURS: float = 24.0
+CACHE_TTL: float = 20.0
+
+LOGIN_CONCURRENCY: int = _int(os.getenv("LOGIN_CONCURRENCY"), 4)
 LOGIN_TRIES: int = 2
 LOGIN_RETRY_DELAY: float = 5.0
 
@@ -50,11 +54,6 @@ AUTH_PROBE_DEADLINE: float = 45.0
 AUTH_DC_SWEEP: int = 3
 AUTH_CLEAN_TIMEOUT: int = 30
 
-MAX_SCAN: int = 80
-TARGET_HOURS: float = 24.0
-
-CACHE_TTL: float = 20.0
-
 EXPIRY_RETRY: int = 8
 EXPIRY_RETRY_DELAY: int = 300
 SESSION_RETRY: int = 3
@@ -63,9 +62,13 @@ STALE_CLEAN_SECONDS: int = 900
 REPORT_KEEP_HOURS: int = 72
 PURCHASE_KEEP_DAYS: int = _int(os.getenv("PURCHASE_KEEP_DAYS"), 90)
 
-MAIL_TIMEOUT: int = _int(os.getenv("MAIL_TIMEOUT"), 120)
-MAIL_POLL: float = 3.0
-MAIL_PROXY_RETRY: float = 6.0
-MAIL_PREFER_DOMAIN: str = os.getenv("MAIL_PREFER_DOMAIN", "maxxspace.com").strip().lower()
+CODE_TIMEOUT: int = _int(os.getenv("CODE_TIMEOUT"), 150)
+MAIL_TIMEOUT: int = _int(os.getenv("MAIL_TIMEOUT"), CODE_TIMEOUT)
+MAIL_POLL: float = _float(os.getenv("MAIL_POLL"), 3.0)
+MAIL_PROXY_RETRY: float = _float(os.getenv("MAIL_PROXY_RETRY"), 8.0)
+MAIL_PREFER_DOMAIN: str = os.getenv("MAIL_PREFER_DOMAIN", "").strip().lower()
+MAIL_USE_PROXY: int = _int(os.getenv("MAIL_USE_PROXY"), 0)
+MAIL_PROVIDERS: str = os.getenv(
+    "MAIL_PROVIDERS", "guerrilla,dropmail,mailtm,mailgw,plus").strip().lower()
 
 TWOFA_PASSWORD: str = (os.getenv("TWOFA_PASSWORD", "AccStore2fa").strip() or "AccStore2fa")
