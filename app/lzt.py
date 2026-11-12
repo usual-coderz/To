@@ -18,6 +18,7 @@ LOGIN_DATA_KEY_FIELDS = ("auth_key", "telegram_auth_key", "authKey")
 
 RESET_PATH = "/{}/telegram-reset-authorizations"
 CODE_PATH = "/{}/telegram-login-code"
+QR_PATH = "/{}/qr-login"
 CHECK_PATH = "/{}/check-account"
 BUY_PATH = "/{}/fast-buy"
 
@@ -272,6 +273,10 @@ class LztClient:
 
     async def reset_authorizations(self, item_id: int) -> dict:
         return await self._post(RESET_PATH.format(int(item_id)))
+
+    async def qr_login(self, item_id: int, challenge: str) -> dict:
+        return await self._post(QR_PATH.format(int(item_id)),
+                                json={"challenge": challenge})
 
     async def telegram_login_code(self, item_id: int) -> tuple[str, int]:
         try:
