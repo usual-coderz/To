@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import urllib.parse
 
@@ -69,7 +70,15 @@ _RAW = """
 """
 
 SCHEMES = ("socks5h", "socks5", "socks4", "http", "https")
-DEFAULT_SCHEME = "http"
+DEFAULT_SCHEME = (os.getenv("PROXY_SCHEME") or "http").strip().lower()
+if DEFAULT_SCHEME not in SCHEMES:
+    DEFAULT_SCHEME = "http"
+
+MAX_COOLDOWN = 3600.0
+PRUNE_AFTER = 7200.0
+
+_BRACKET_RE = re.compile(r"^\[([0-9A-Fa-f:.]+)\]:(\d{1,5})$")
+_HOST_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 _COOLDOWN: dict[str, float] = {}
 POOL: list[str] = []
@@ -86,40 +95,59 @@ def _split_scheme(raw: str) -> tuple[str, str]:
         prefix = scheme + "://"
         if low.startswith(prefix):
             return scheme, raw[len(prefix):]
+    if "://" in low:
+        head, _, rest = raw.partition("://")
+        return DEFAULT_SCHEME, rest
     return "", raw
 
 
+def _split_hostport(text: str) -> tuple[str, str]:
+    m = _BRACKET_RE.match(text)
+    if m:
+        return m.group(1), m.group(2)
+    host, sep, port = text.rpartition(":")
+    if not sep:
+        return text, "80"
+    return host, port
+
+
+def _split_creds(text: str) -> tuple[str, str, str]:
+    if "@" in text:
+        creds, _, rest = text.rpartition("@")
+        user, _, pwd = creds.partition(":")
+        return rest, user, pwd
+    if "[" in text:
+        return text, "", ""
+    parts = text.split(":")
+    if len(parts) == 4:
+        return f"{parts[0]}:{parts[1]}", parts[2], parts[3]
+    if len(parts) == 3:
+        return f"{parts[0]}:{parts[1]}", parts[2], ""
+    return text, "", ""
+
+
 def normalize(raw: str) -> str:
-    text = raw.strip().strip('"').strip("'")
+    text = str(raw or "").strip().strip('"').strip("'")
     if not text:
         return ""
 
     scheme, text = _split_scheme(text)
-    scheme = DEFAULT_SCHEME if not scheme else scheme
+    scheme = (scheme or DEFAULT_SCHEME).lower()
     if scheme == "socks5h":
         scheme = "socks5"
+    if scheme not in SCHEMES:
+        scheme = DEFAULT_SCHEME
 
-    user = ""
-    pwd = ""
-    if "@" in text:
-        creds, _, text = text.rpartition("@")
-        user, _, pwd = creds.partition(":")
-    else:
-        parts = text.split(":")
-        if len(parts) == 4:
-            text, user, pwd = f"{parts[0]}:{parts[1]}", parts[2], parts[3]
-        elif len(parts) == 3:
-            text, user = f"{parts[0]}:{parts[1]}", parts[2]
-
-    host, _, port = text.rpartition(":")
-    if not host:
-        host, port = text, "80"
+    text, user, pwd = _split_creds(text)
+    host, port = _split_hostport(text.strip())
     host = host.strip().strip("[]")
     if not host:
         return ""
+    if not (_HOST_RE.match(host) or ":" in host):
+        return ""
     try:
         number = int(port)
-    except ValueError:
+    except (TypeError, ValueError):
         return ""
     if not 1 <= number <= 65535:
         return ""
@@ -153,6 +181,13 @@ def _source() -> str:
     return os.getenv("PROXIES") or _RAW
 
 
+def _prune(now: float | None = None):
+    now = time.time() if now is None else now
+    for proxy in [p for p, until in _COOLDOWN.items()
+                  if until <= now - PRUNE_AFTER or proxy not in POOL]:
+        _COOLDOWN.pop(proxy, None)
+
+
 def reload() -> list[str]:
     global POOL
     POOL = _dedupe([normalize(x) for x in _lines(_source())])
@@ -160,13 +195,18 @@ def reload() -> list[str]:
     return POOL
 
 
+def is_cooling(proxy: str) -> bool:
+    return _COOLDOWN.get(proxy, 0.0) > time.time()
+
+
 def get(index: int) -> str:
-    if not POOL:
-        return ""
-    return POOL[index % len(POOL)]
+    """Cooldown-aware single pick; '' when nothing is free."""
+    proxy, _ = pick(index)
+    return proxy
 
 
 def rotate(index: int) -> tuple[str, int]:
+    """Raw round-robin, cooldown ignored."""
     if not POOL:
         return "", index
     i = index % len(POOL)
@@ -174,14 +214,20 @@ def rotate(index: int) -> tuple[str, int]:
 
 
 def mark(proxy: str, seconds: float):
-    if proxy:
-        _COOLDOWN[proxy] = time.time() + max(0.0, float(seconds))
+    if not proxy:
+        return
+    try:
+        delay = max(0.0, min(float(seconds), MAX_COOLDOWN))
+    except (TypeError, ValueError):
+        delay = 60.0
+    _COOLDOWN[proxy] = time.time() + delay
 
 
 def pick(index: int) -> tuple[str, int]:
     if not POOL:
         return "", index
     now = time.time()
+    _prune(now)
     for _ in range(len(POOL)):
         proxy, index = rotate(index)
         if _COOLDOWN.get(proxy, 0.0) <= now:
@@ -189,9 +235,32 @@ def pick(index: int) -> tuple[str, int]:
     return "", index
 
 
+def pick_many(count: int, index: int = 0) -> tuple[list[str], int]:
+    out: list[str] = []
+    for _ in range(max(0, count)):
+        proxy, index = pick(index)
+        if not proxy:
+            break
+        out.append(proxy)
+    return out, index
+
+
 def healthy() -> list[str]:
     now = time.time()
+    _prune(now)
     return [p for p in POOL if _COOLDOWN.get(p, 0.0) <= now]
+
+
+def health() -> tuple[int, int]:
+    """(available, cooling)"""
+    now = time.time()
+    _prune(now)
+    free = sum(1 for p in POOL if _COOLDOWN.get(p, 0.0) <= now)
+    return free, len(POOL) - free
+
+
+def clear():
+    _COOLDOWN.clear()
 
 
 reload()
