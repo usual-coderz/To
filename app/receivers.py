@@ -1,8 +1,7 @@
 import logging
 
-from app import db, receiver_hub
+from app import db, pricing, receiver_hub
 from app.config import CAP_REFRESH, PRICE_REFRESH
-from app.pricing import kind_of, refresh_all
 
 log = logging.getLogger("receivers")
 
@@ -11,7 +10,7 @@ async def add(tg_id: int, username: str, title: str = "") -> str | None:
     key = str(username or "").strip().lstrip("@")
     if not key:
         return None
-    return await db.add_receiver(tg_id, key, kind_of(key), title)
+    return await db.add_receiver(tg_id, key, pricing.kind_of(key), title)
 
 
 async def remove(tg_id: int, rid: str) -> bool:
@@ -29,24 +28,34 @@ async def toggle(tg_id: int, rid: str) -> bool:
     return True
 
 
+async def warm(tg_id: int, rid: str = "") -> int:
+    if not receiver_hub.running():
+        await receiver_hub.start()
+    rows = ([await db.get_receiver(rid)] if rid else await db.list_receivers(tg_id))
+    done = 0
+    for receiver in rows:
+        if not receiver or receiver["tg_id"] != tg_id:
+            continue
+        if await receiver_hub.start_bot(receiver["username"]):
+            done += 1
+    return done
+
+
 async def capacity(tg_id: int, rid: str) -> int:
     receiver = await db.get_receiver(rid)
     if not receiver or receiver["tg_id"] != tg_id:
         return -1
     if not receiver_hub.running():
         await receiver_hub.start()
-    for cmd in ("/cap", "/capacity"):
-        reply = await receiver_hub.command(receiver["username"], cmd)
-        if not reply:
-            continue
-        from app.pricing import parse_cap, parse_confirm
-        cap = parse_cap(reply)
-        confirm = parse_confirm(reply)
-        if cap >= 0:
-            await db.bump_receiver(rid, cap, confirm or None)
-            return cap
-    await db.fail_receiver(rid)
-    return -1
+    out = await pricing.probe(receiver)
+    if out["prices"]:
+        await db.save_prices(tg_id, rid, out["prices"])
+        await db.set_receiver(rid, price_at=db._now())
+    if out["cap"] < 0:
+        await db.fail_receiver(rid)
+        return -1
+    await db.bump_receiver(rid, out["cap"], out["confirm"] or None)
+    return out["cap"]
 
 
 async def capacity_all(tg_id: int) -> dict:
@@ -60,7 +69,7 @@ async def capacity_all(tg_id: int) -> dict:
 
 
 async def sync(tg_id: int) -> dict:
-    return await refresh_all(tg_id)
+    return await pricing.refresh_all(tg_id)
 
 
 def stale(receiver: dict, now: int) -> bool:
