@@ -29,8 +29,13 @@ _RESEND_HINTS = ("RESEND_CODE", "ALL AVAILABLE OPTIONS", "SEND_CODE_UNAVAILABLE"
 
 CODE_POLL = 3
 CODE_SKEW = 2
-QUICK_WINDOW = 45
+REFRESH_WAIT = 2.5
+QUICK_WINDOW = 40
 UNAVAILABLE_PAUSE = 10
+
+QR_WAIT = 12
+QR_TOTAL = 80
+QR_PUSH_FAILS = 3
 
 
 def normalize_phone(raw) -> str:
@@ -142,6 +147,13 @@ async def _alive(c: TelegramClient) -> bool:
         return False
 
 
+async def _drop(c: TelegramClient):
+    try:
+        await c.disconnect()
+    except Exception:
+        pass
+
+
 async def _send_code(c: TelegramClient, number: str) -> str:
     last: BaseException | None = None
 
@@ -187,13 +199,12 @@ async def _resend(c: TelegramClient, number: str, code_hash: str) -> str:
     return await _send_code(c, number)
 
 
-async def _peek_date(lzt, item_id: int) -> int:
+async def _peek(lzt, item_id: int) -> tuple[str, int]:
     try:
-        code, date = await lzt.telegram_login_code(item_id)
+        return await lzt.telegram_login_code(item_id)
     except LztError as e:
         log.info(f"code peek {item_id}: {e}")
-        return 0
-    return date if code else 0
+        return "", 0
 
 
 async def _await_code(lzt, item_id: int, baseline: int, sent_at: int,
@@ -208,7 +219,7 @@ async def _await_code(lzt, item_id: int, baseline: int, sent_at: int,
             log.info(f"code poll {item_id}: {e}")
             code, date = "", 0
         if code and date:
-            if (baseline and date > baseline) or date >= sent_at - CODE_SKEW:
+            if date > baseline or date >= sent_at - CODE_SKEW:
                 return code
             if date > newest[1]:
                 newest = (code, date)
@@ -222,12 +233,55 @@ async def _from_key(raw: str, proxy_cfg: str):
     c = client(session_from_auth_key(raw), proxy_cfg)
     await c.connect()
     if not await _alive(c):
-        try:
-            await c.disconnect()
-        except Exception:
-            pass
+        await _drop(c)
         raise RuntimeError("auth key rejected")
     return c, c.session.save()
+
+
+async def _qr_login(lzt, item_id: int, password: str, proxy_cfg: str):
+    c = client("", proxy_cfg)
+    await c.connect()
+    try:
+        deadline = time.time() + QR_TOTAL
+        fails = 0
+
+        while time.time() < deadline:
+            try:
+                qr = await c.qr_login()
+            except SessionPasswordNeededError:
+                if not password:
+                    raise RuntimeError("2FA required but no password on item")
+                await c.sign_in(password=password)
+                me = await c.get_me()
+                return c, c.session.save(), me.id
+
+            try:
+                await lzt.qr_login(item_id, qr.url)
+                fails = 0
+            except LztError as e:
+                fails += 1
+                log.info(f"qr push {item_id}: {e}")
+                if fails >= QR_PUSH_FAILS:
+                    raise RuntimeError(f"qr push rejected: {e}")
+
+            try:
+                me = await qr.wait(timeout=QR_WAIT)
+            except asyncio.TimeoutError:
+                continue
+            except SessionPasswordNeededError:
+                if not password:
+                    raise RuntimeError("2FA required but no password on item")
+                await c.sign_in(password=password)
+                me = await c.get_me()
+
+            if not await c.is_user_authorized():
+                raise RuntimeError("qr accepted but not authorized")
+            return c, c.session.save(), me.id
+
+        raise RuntimeError("qr login timed out")
+    except Exception:
+        await _drop(c)
+        raise
 
 
 async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: str):
@@ -238,16 +292,16 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
         code_hash = ""
 
         for attempt in range(3):
-            if attempt < 2:
-                await _reset(lzt, item_id)
-                await asyncio.sleep(1.5)
-                code_hash = ""
+            _, baseline = await _peek(lzt, item_id)
+            if baseline:
+                await asyncio.sleep(REFRESH_WAIT)
+                _, newer = await _peek(lzt, item_id)
+                if newer > baseline:
+                    baseline = newer
 
-            baseline = await _peek_date(lzt, item_id)
             sent_at = int(time.time())
-
             try:
-                if code_hash:
+                if code_hash and attempt:
                     code_hash = await _resend(c, number, code_hash)
                 else:
                     code_hash = await _send_code(c, number)
@@ -275,6 +329,7 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
                 break
             except (PhoneCodeInvalidError, PhoneCodeExpiredError) as e:
                 last = e
+                code_hash = ""
                 log.info(f"code rejected for {item_id} ({attempt + 1}/3)")
                 await asyncio.sleep(2)
         else:
@@ -286,18 +341,13 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
         me = await c.get_me()
         return c, c.session.save(), me.id
     except Exception:
-        try:
-            await c.disconnect()
-        except Exception:
-            pass
+        await _drop(c)
         raise
 
 
 async def login_with_lzt(phone: str, password: str, item_id: int, lzt,
                          proxy_cfg: str = "", hint: dict | None = None):
     number = normalize_phone(phone)
-    if not number:
-        raise RuntimeError("no phone number on item")
 
     try:
         key = await lzt.auth_key(item_id, hint)
@@ -314,22 +364,28 @@ async def login_with_lzt(phone: str, password: str, item_id: int, lzt,
             await _reset(lzt, item_id)
             if await _alive(c):
                 return c, session_str, 0
-            try:
-                await c.disconnect()
-            except Exception:
-                pass
+            await _drop(c)
 
-    c, session_str, uid = await _code_login(number, password, item_id, lzt, proxy_cfg)
+    c = session_str = None
+    uid = 0
+
+    try:
+        c, session_str, uid = await _qr_login(lzt, item_id, password, proxy_cfg)
+        log.info(f"qr login ok {item_id}")
+    except Exception as e:
+        log.info(f"qr login {item_id}: {e}")
+
+    if c is None:
+        if not number:
+            raise RuntimeError("no phone number on item")
+        c, session_str, uid = await _code_login(number, password, item_id, lzt, proxy_cfg)
 
     await _reset(lzt, item_id)
     await asyncio.sleep(1.0)
     if await _alive(c):
         return c, session_str, uid
 
-    try:
-        await c.disconnect()
-    except Exception:
-        pass
+    await _drop(c)
     log.info(f"session died after reset {item_id}, reissuing")
     return await _code_login(number, password, item_id, lzt, proxy_cfg)
 
@@ -347,10 +403,7 @@ async def check_session(session_string: str, proxy_cfg: str = ""):
         log.info(f"check_session: {e}")
         return False, None
     finally:
-        try:
-            await c.disconnect()
-        except Exception:
-            pass
+        await _drop(c)
 
 
 async def change_email(c: TelegramClient, new_email: str, mail_client,
