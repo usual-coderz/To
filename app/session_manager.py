@@ -9,7 +9,8 @@ from telethon import TelegramClient, functions
 from telethon.crypto import AuthKey
 from telethon.errors import (FloodWaitError, PasswordHashInvalidError,
                              PhoneCodeExpiredError, PhoneCodeInvalidError,
-                             RPCError, SessionPasswordNeededError)
+                             RPCError, SendCodeUnavailableError,
+                             SessionPasswordNeededError)
 from telethon.sessions import StringSession
 
 from app.config import API_HASH, API_ID, CODE_TIMEOUT
@@ -26,8 +27,10 @@ _FALLBACK_DC = (2, "149.154.167.51", 443)
 
 _RESEND_HINTS = ("RESEND_CODE", "ALL AVAILABLE OPTIONS", "SEND_CODE_UNAVAILABLE")
 
-CODE_POLL = 2
-CODE_SKEW = 5
+CODE_POLL = 3
+CODE_SKEW = 2
+QUICK_WINDOW = 45
+UNAVAILABLE_PAUSE = 10
 
 
 def normalize_phone(raw) -> str:
@@ -139,10 +142,10 @@ async def _alive(c: TelegramClient) -> bool:
         return False
 
 
-async def _send_code(c: TelegramClient, number: str, previous: str = "") -> str:
+async def _send_code(c: TelegramClient, number: str) -> str:
     last: BaseException | None = None
 
-    for _ in range(3):
+    for _ in range(4):
         try:
             sent = await c.send_code_request(number)
             return sent.phone_code_hash
@@ -151,35 +154,50 @@ async def _send_code(c: TelegramClient, number: str, previous: str = "") -> str:
             wait = min(int(e.seconds) + 2, 120)
             log.info(f"flood wait {wait}s")
             await asyncio.sleep(wait)
+        except SendCodeUnavailableError as e:
+            last = e
+            log.info(f"send code unavailable {number}, second resend")
+            await asyncio.sleep(UNAVAILABLE_PAUSE)
         except RPCError as e:
             last = e
-            text = _hint(e)
-            if previous and any(h in text for h in _RESEND_HINTS):
-                try:
-                    await c(functions.auth.ResendCodeRequest(
-                        phone_number=number, phone_code_hash=previous))
-                    return previous
-                except FloodWaitError as fw:
-                    last = fw
-                    await asyncio.sleep(min(int(fw.seconds) + 2, 120))
-                except PhoneCodeExpiredError:
-                    previous = ""
-                    await asyncio.sleep(2)
-                except RPCError as inner:
-                    last = inner
-                    previous = ""
-                    log.info(f"resend {number}: {inner}")
-                    await asyncio.sleep(3)
-            else:
-                log.info(f"send code {number}: {e}")
-                await asyncio.sleep(5)
+            log.info(f"send code {number}: {e}")
+            await asyncio.sleep(5)
 
     if last:
         raise last
     raise RuntimeError("send code failed")
 
 
-async def _await_code(lzt, item_id: int, sent_at: int, timeout: int) -> str:
+async def _resend(c: TelegramClient, number: str, code_hash: str) -> str:
+    for _ in range(2):
+        try:
+            await c(functions.auth.ResendCodeRequest(phone_number=number,
+                                                     phone_code_hash=code_hash))
+            return code_hash
+        except FloodWaitError as e:
+            await asyncio.sleep(min(int(e.seconds) + 2, 120))
+        except SendCodeUnavailableError:
+            log.info(f"resend unavailable {number}, second resend")
+            await asyncio.sleep(UNAVAILABLE_PAUSE)
+        except PhoneCodeExpiredError:
+            return await _send_code(c, number)
+        except RPCError as e:
+            log.info(f"resend {number}: {e}")
+            return await _send_code(c, number)
+    return await _send_code(c, number)
+
+
+async def _peek_date(lzt, item_id: int) -> int:
+    try:
+        code, date = await lzt.telegram_login_code(item_id)
+    except LztError as e:
+        log.info(f"code peek {item_id}: {e}")
+        return 0
+    return date if code else 0
+
+
+async def _await_code(lzt, item_id: int, baseline: int, sent_at: int,
+                      timeout: int) -> str:
     loop = asyncio.get_running_loop()
     end = loop.time() + timeout
     newest = ("", 0)
@@ -189,12 +207,15 @@ async def _await_code(lzt, item_id: int, sent_at: int, timeout: int) -> str:
         except LztError as e:
             log.info(f"code poll {item_id}: {e}")
             code, date = "", 0
-        if code and date >= sent_at - CODE_SKEW:
-            return code
-        if code and date > newest[1]:
-            newest = (code, date)
+        if code and date:
+            if (baseline and date > baseline) or date >= sent_at - CODE_SKEW:
+                return code
+            if date > newest[1]:
+                newest = (code, date)
         await asyncio.sleep(CODE_POLL)
-    return newest[0]
+    if newest[0] and newest[1] >= sent_at - 300:
+        return newest[0]
+    return ""
 
 
 async def _from_key(raw: str, proxy_cfg: str):
@@ -214,18 +235,31 @@ async def _code_login(number: str, password: str, item_id: int, lzt, proxy_cfg: 
     await c.connect()
     try:
         last: BaseException | None = None
+        code_hash = ""
 
         for attempt in range(3):
+            if attempt < 2:
+                await _reset(lzt, item_id)
+                await asyncio.sleep(1.5)
+                code_hash = ""
+
+            baseline = await _peek_date(lzt, item_id)
             sent_at = int(time.time())
+
             try:
-                code_hash = await _send_code(c, number)
+                if code_hash:
+                    code_hash = await _resend(c, number, code_hash)
+                else:
+                    code_hash = await _send_code(c, number)
             except Exception as e:
                 last = e
                 log.info(f"send code {item_id} ({attempt + 1}/3): {e}")
-                await asyncio.sleep(3)
+                code_hash = ""
+                await asyncio.sleep(4)
                 continue
 
-            code = await _await_code(lzt, item_id, sent_at, CODE_TIMEOUT)
+            window = QUICK_WINDOW if attempt < 2 else CODE_TIMEOUT
+            code = await _await_code(lzt, item_id, baseline, sent_at, window)
             if not code:
                 last = RuntimeError("LZT login code not received")
                 log.info(f"code missing for {item_id} ({attempt + 1}/3)")
