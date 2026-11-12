@@ -236,7 +236,8 @@ async def login_with_auth_key(phone: str, password: str, item_id: int, lzt,
 
     if key:
         try:
-            return await _try_key(key, dc, proxy_cfg)
+            conn, session_str = await _try_key(key, dc, proxy_cfg)
+            return conn, session_str, 0
         except DeadKey as e:
             errors.append(f"dead: {e}")
             log.info(f"auth key dead {item_id}: {e}")
@@ -249,7 +250,8 @@ async def login_with_auth_key(phone: str, password: str, item_id: int, lzt,
     fresh_dc = extract_dc_id(fresh)
     if fresh_key and (fresh_key != key or fresh_dc != dc):
         try:
-            return await _try_key(fresh_key, fresh_dc or dc, proxy_cfg)
+            conn, session_str = await _try_key(fresh_key, fresh_dc or dc, proxy_cfg)
+            return conn, session_str, 0
         except Exception as e:
             errors.append(f"fresh: {e}")
             log.info(f"auth key refetch rejected {item_id}: {e}")
@@ -272,7 +274,8 @@ async def login_with_auth_key(phone: str, password: str, item_id: int, lzt,
     if new_key:
         key, dc = new_key, new_dc or dc
 
-    return await _try_key(key, dc, proxy_cfg)
+    conn, session_str = await _try_key(key, dc, proxy_cfg)
+    return conn, session_str, 0
 
 
 async def check_session(session_string: str, proxy_cfg: str = ""):
