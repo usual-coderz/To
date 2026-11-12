@@ -6,8 +6,8 @@ import time
 
 import httpx
 
-from app.config import (CACHE_TTL, HTTP_BACKOFF, HTTP_RETRIES, HTTP_TIMEOUT, LZT_BASE,
-                        LZT_TOKEN)
+from app.config import (AUTH_KEY_LEN, CACHE_TTL, HTTP_BACKOFF, HTTP_RETRIES, HTTP_TIMEOUT,
+                        LZT_BASE, LZT_TOKEN)
 from app.utils.filters import search_query
 from app.utils.money import parse_balances, parse_user, same_currency
 
@@ -78,19 +78,21 @@ def _message(payload) -> str:
     return dig(payload)[:300]
 
 
-def _looks_like_key(text: str) -> bool:
-    if len(text) == 512 and all(c in "0123456789abcdefABCDEF" for c in text):
+def key_ok(text) -> bool:
+    raw = "".join(str(text or "").split()).strip('"').strip("'")
+    if len(raw) == AUTH_KEY_LEN * 2 and all(c in "0123456789abcdefABCDEF" for c in raw):
         return True
     try:
-        raw = base64.b64decode(text + "=" * (-len(text) % 4))
+        blob = base64.b64decode(raw + "=" * (-len(raw) % 4), validate=True)
     except Exception:
         return False
-    return len(raw) == 256
+    return len(blob) == AUTH_KEY_LEN
 
 
 def _candidate(value) -> str:
     if isinstance(value, dict):
-        if value.get("auth_key") or value.get("authKey") or value.get("key"):
+        inner = value.get("auth_key") or value.get("authKey") or value.get("key")
+        if inner and key_ok(inner):
             try:
                 return json.dumps(value)
             except Exception:
@@ -99,7 +101,16 @@ def _candidate(value) -> str:
     if not isinstance(value, str):
         return ""
     text = value.strip().strip('"').strip("'")
-    return text if len(text) >= 100 else ""
+    if not text:
+        return ""
+    if text.startswith("{"):
+        try:
+            parsed = json.loads(text)
+        except Exception:
+            parsed = None
+        if isinstance(parsed, dict):
+            return _candidate(parsed)
+    return text if key_ok(text) else ""
 
 
 def _walk_keys(node, depth: int = 0, named_only: bool = False) -> str:
@@ -107,13 +118,16 @@ def _walk_keys(node, depth: int = 0, named_only: bool = False) -> str:
         return ""
     if isinstance(node, dict):
         for key, value in node.items():
-            cand = _candidate(value)
-            if not cand:
+            if str(key).lower() not in AUTH_KEY_NAMES:
                 continue
-            if str(key).lower() in AUTH_KEY_NAMES:
+            cand = _candidate(value)
+            if cand:
                 return cand
-            if not named_only and _looks_like_key(cand):
-                return cand
+        if not named_only:
+            for value in node.values():
+                cand = _candidate(value)
+                if cand:
+                    return cand
         for value in node.values():
             found = _walk_keys(value, depth + 1, named_only)
             if found:
@@ -137,13 +151,14 @@ def _walk_dc(node, depth: int = 0) -> int:
         return 0
     if isinstance(node, dict):
         for key, value in node.items():
-            if str(key).lower() in DC_NAMES:
-                try:
-                    number = int(value)
-                except (TypeError, ValueError):
-                    number = 0
-                if 1 <= number <= 5:
-                    return number
+            if str(key).lower() not in DC_NAMES:
+                continue
+            try:
+                number = int(str(value).strip())
+            except (TypeError, ValueError):
+                continue
+            if 1 <= number <= 5:
+                return number
         for value in node.values():
             found = _walk_dc(value, depth + 1)
             if found:
@@ -178,8 +193,12 @@ class LztClient:
         except Exception:
             pass
 
-    def invalidate(self):
-        self._cache.clear()
+    def invalidate(self, key: str | None = None):
+        if key is None:
+            self._cache.clear()
+            return
+        for k in [k for k in self._cache if k.startswith(key)]:
+            self._cache.pop(k, None)
 
     def _cached(self, key: str):
         hit = self._cache.get(key)
@@ -334,12 +353,23 @@ class LztClient:
         data = await self._get("/telegram", self._search_params(s))
         return data.get("items") or []
 
-    async def item(self, item_id: int) -> dict:
+    async def item(self, item_id: int, use_cache: bool = False) -> dict:
+        key = f"item:{int(item_id)}"
+        if use_cache:
+            hit = self._cached(key)
+            if hit is not None:
+                return dict(hit)
         data = await self._get(f"/{int(item_id)}")
-        return data.get("item") or data
+        item = data.get("item") or data
+        self._store(key, item)
+        return item
 
     async def check_account(self, item_id: int) -> dict:
-        return await self._buy_call(CHECK_PATH.format(int(item_id)), None)
+        data = await self._buy_call(CHECK_PATH.format(int(item_id)), None)
+        item = data.get("item")
+        if isinstance(item, dict):
+            self._store(f"item:{int(item_id)}", item)
+        return data
 
     async def fast_buy(self, item_id: int, price: float,
                        balance_id: int | None = None) -> dict:
@@ -347,11 +377,14 @@ class LztClient:
         if balance_id:
             payload["balance_id"] = int(balance_id)
         data = await self._buy_call(BUY_PATH.format(int(item_id)), payload)
-        self.invalidate()
+        self.invalidate("item:")
+        self.invalidate("balances")
         return data
 
     async def reset_authorizations(self, item_id: int) -> dict:
-        return await self._post(RESET_PATH.format(int(item_id)))
+        data = await self._post(RESET_PATH.format(int(item_id)))
+        self.invalidate(f"item:{int(item_id)}")
+        return data
 
     async def qr_login(self, item_id: int, challenge: str) -> dict:
         return await self._post(QR_PATH.format(int(item_id)),
