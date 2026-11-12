@@ -1,4 +1,4 @@
-from app.config import API_HASH, API_ID
+from app.config import API_HASH, API_ID, TARGET_HOURS
 from app.utils.money import fmt_money
 from app.utils.timeutil import fmt_age, fmt_dt, fmt_left, fmt_year
 from app.utils.tg import esc
@@ -32,8 +32,10 @@ def menu_text(s: dict, profile: dict, total: float, spendable: float,
         f"{'🟢 running' if s['auto_buy'] == '1' else '🔴 stopped'}"
         f" · queue {queued}\n"
         f"price {s['price_min']}–{s['price_max']} · spam {s['spam_mode']}\n"
-        f"target age {s['queue_target_hours']}h · min age {s['session_min_hours']}h\n"
-        f"mail {s['mail_mode']} · 2fa {s['password_mode']}\n"
+        f"target {TARGET_HOURS:g}h · min age {s['session_min_hours']}h"
+        f" · max age {s['session_max_hours'] or 'off'}\n"
+        f"mail {s['mail_mode']} · 2fa {s['password_mode']}"
+        f" · cap ${s['daily_spend_cap']}\n"
         f"include {esc(s['countries'] or 'all')} · exclude {esc(s['deny_countries'] or '—')}"
     )
     if note:
@@ -47,22 +49,14 @@ def filters_text(s: dict) -> str:
         f"{BAR}\n"
         f"price {s['price_min']} – {s['price_max']}\n"
         f"spam {s['spam_mode']} · mail {s['mail_mode']} · 2fa {s['password_mode']}\n"
-        f"min age {s['session_min_hours']}h\n"
+        f"min age {s['session_min_hours']}h · max age {s['session_max_hours'] or 'off'}\n"
         f"include {esc(s['countries'] or 'all')}\n"
-        f"exclude {esc(s['deny_countries'] or '—')}"
-    )
-
-
-def limits_text(s: dict) -> str:
-    return (
-        "<b>Limits</b>\n"
+        f"exclude {esc(s['deny_countries'] or '—')}\n"
+        f"cap ${s['daily_spend_cap']} · terminate {s['terminate_on_expire']}"
+        f" · mail chg {s['change_mail_on_expire']}\n"
+        f"mail src {s['mail_provider']} · 2fa <code>{esc(s['twofa_password'])}</code>\n"
         f"{BAR}\n"
-        f"daily cap ${s['daily_spend_cap']} (0 = unlimited)\n"
-        f"buys per cycle {s['max_buy_per_cycle']} · poll {s['poll_interval']}s\n"
-        f"target age {s['queue_target_hours']}h — short sessions wait out the rest\n"
-        f"terminate {s['terminate_on_expire']} · change mail {s['change_mail_on_expire']}\n"
-        f"mail source {s['mail_provider']} · 2fa <code>{esc(s['twofa_password'])}</code>\n"
-        f"proxy {'set' if s.get('proxy') else 'off'}"
+        f"age ≥ {TARGET_HOURS:g}h → straight to audit, else queued"
     )
 
 
@@ -154,7 +148,7 @@ def session_detail(p: dict, checked: str = "") -> str:
         f"created {fmt_dt(created) if created else 'unknown'}"
         f" · age {fmt_age(p.get('age_at_buy_hours'))} at buy\n"
         f"bought {fmt_dt(p.get('started_at'))} for {fmt_money(p.get('price') or 0.0)}\n"
-        f"state <b>{esc(state)}</b> · target {p.get('target_age_hours', 24):g}h\n"
+        f"state <b>{esc(state)}</b> · target {TARGET_HOURS:g}h\n"
         f"⏳ {fmt_left(p.get('expires_at')) if state in ('queued', 'cleaning') else 'cleaned'}\n"
         f"session {esc(p.get('session_state') or 'pending')}"
         f" · checked {fmt_dt(p.get('checked_at')) if p.get('checked_at') else '—'}\n"
