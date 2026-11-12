@@ -1,6 +1,7 @@
 import asyncio
 import email as emaillib
 import email.header
+import html
 import imaplib
 import json
 import logging
@@ -13,8 +14,8 @@ import time
 import httpx
 
 from app import proxies
-from app.config import (DATA_DIR, MAIL_POLL, MAIL_PREFER_DOMAIN, MAIL_PROXY_RETRY,
-                        MAIL_TIMEOUT)
+from app.config import (DATA_DIR, MAIL_POLL, MAIL_PREFER_DOMAIN, MAIL_PROVIDERS,
+                        MAIL_PROXY_RETRY, MAIL_TIMEOUT, MAIL_USE_PROXY)
 
 log = logging.getLogger("mail")
 
@@ -23,15 +24,18 @@ CODE_LEN = 5
 VAULT_MAX = 400
 MAILTM = "https://api.mail.tm"
 MAILGW = "https://api.mail.gw"
+GUERRILLA = "https://api.guerrillamail.com/ajax.php"
+DROPMail = "https://dropmail.me/api/graphql"
 PLUS = "https://tempmail.plus/api"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 PLUS_DOMAINS = ["fexbox.org", "fexpost.com", "mailbox.in.ua", "chitthi.in",
                 "rover.info", "mailto.plus", "fextemp.com", "anyalias.com"]
 
 RETRY_STATUS = {402, 403, 408, 425, 429, 500, 502, 503, 504}
-RETRY_TRIES = 6
-DOWN_COOLDOWN = 300.0
-PROVIDERS = (("mailtm", MAILTM), ("mailgw", MAILGW))
+RETRY_TRIES = 4
+DOWN_COOLDOWN = 240.0
+PROVIDERS = tuple(p.strip() for p in MAIL_PROVIDERS.split(",") if p.strip()) or (
+    "guerrilla", "dropmail", "mailtm", "mailgw", "plus")
 
 _DOWN: dict[str, float] = {}
 
@@ -51,7 +55,8 @@ class MailError(Exception):
 def extract_telegram_code(text: str, expected_length: int = None):
     if not text:
         return None
-    t = text.replace("&nbsp;", " ").replace("\u00a0", " ").replace("\u200b", " ")
+    t = html.unescape(text)
+    t = t.replace("&nbsp;", " ").replace("\u00a0", " ").replace("\u200b", " ")
     t = re.sub(r"<[^>]+>", " ", t)
     ctx = (r"(?:your\s+(?:telegram\s+)?code|verification\s+code|login\s+code"
            r"|telegram\s+code|security\s+code|confirm(?:ation)?\s+code|código|код|رمز\w*)")
@@ -103,10 +108,11 @@ class TempMailClient:
     def __init__(self):
         self._email = ""
         self._token = ""
+        self._sid = ""
+        self._url_token = ""
         self._base = ""
         self._provider = ""
         self._index = random.randrange(max(1, len(proxies.POOL) or 1))
-        self._cooldown: dict[str, float] = {}
         self._clients: dict[str, httpx.AsyncClient] = {}
 
     def _http(self, proxy: str) -> httpx.AsyncClient:
@@ -126,33 +132,28 @@ class TempMailClient:
                 pass
         self._clients.clear()
 
-    def _pick(self) -> str:
-        if not proxies.POOL:
-            return ""
-        now = time.time()
-        for _ in range(len(proxies.POOL)):
-            proxy, self._index = proxies.rotate(self._index)
-            if self._cooldown.get(proxy, 0.0) <= now:
-                return proxy
-        return ""
+    def _targets(self) -> list[str]:
+        if not MAIL_USE_PROXY or not proxies.POOL:
+            return [""]
+        proxy, self._index = proxies.pick(self._index)
+        return [proxy, ""] if proxy else [""]
 
     async def _request(self, method: str, url: str, **kw) -> httpx.Response:
         last: Exception | None = None
         for _ in range(RETRY_TRIES):
-            proxy = self._pick()
-            try:
-                r = await self._http(proxy).request(method, url, **kw)
-            except httpx.HTTPError as e:
-                last = e
-                self._cooldown[proxy] = time.time() + 2.0
-                await asyncio.sleep(0.3)
-                continue
-            if r.status_code in RETRY_STATUS:
-                last = MailError(f"{r.status_code} {url}")
-                self._cooldown[proxy] = time.time() + MAIL_PROXY_RETRY
-                await asyncio.sleep(0.5)
-                continue
-            return r
+            for proxy in self._targets():
+                try:
+                    r = await self._http(proxy).request(method, url, **kw)
+                except httpx.HTTPError as e:
+                    last = e
+                    proxies.mark(proxy, MAIL_PROXY_RETRY)
+                    continue
+                if r.status_code in RETRY_STATUS:
+                    last = MailError(f"{r.status_code} {url}")
+                    proxies.mark(proxy, MAIL_PROXY_RETRY)
+                    continue
+                return r
+            await asyncio.sleep(0.4)
         raise MailError(f"request failed: {last}")
 
     @staticmethod
@@ -192,46 +193,119 @@ class TempMailClient:
             return ""
         return (t.json() or {}).get("token") or ""
 
-    async def claim(self, address: str, password: str = "", base: str = MAILTM,
-                    name: str = "mailtm") -> bool:
-        pwd = password or self._rand("AccStore_", 16)
-        body = {"address": address, "password": pwd}
+    async def _create_api(self, base: str, name: str, exclude: set) -> str:
+        doms = [d for d in await self._domains(base, name) if d.lower() not in exclude]
+        doms.sort(key=lambda d: 0 if d.lower() == MAIL_PREFER_DOMAIN else 1)
+        for domain in doms[:4]:
+            for _ in range(2):
+                address = self._rand("tg_", 12) + "@" + domain
+                pwd = self._rand("AccStore_", 16)
+                try:
+                    r = await self._request("POST", f"{base}/accounts",
+                                            json={"address": address, "password": pwd})
+                except MailError as e:
+                    log.info(f"claim {address}: {e}")
+                    _down(name)
+                    return ""
+                if r.status_code not in (200, 201, 422):
+                    _down(name)
+                    return ""
+                token = await self._token_for(base, address, pwd)
+                if not token:
+                    continue
+                self._token, self._base, self._provider = token, base, name
+                self._remember(address, pwd, name)
+                return address
+        return ""
+
+    async def _create_guerrilla(self, exclude: set) -> str:
         try:
-            r = await self._request("POST", f"{base}/accounts", json=body)
+            r = await self._request("GET", f"{GUERRILLA}?f=get_email_address&lang=en")
         except MailError as e:
-            log.info(f"claim {address}: {e}")
-            _down(name)
-            return False
-        if r.status_code not in (200, 201, 422):
-            _down(name)
-            return False
-        token = await self._token_for(base, address, pwd)
-        if not token:
-            return False
-        self._email, self._token, self._base, self._provider = address, token, base, name
-        self._remember(address, pwd, name)
-        return True
+            log.info(f"guerrilla start: {e}")
+            _down("guerrilla")
+            return ""
+        if r.status_code != 200:
+            _down("guerrilla")
+            return ""
+        data = r.json() or {}
+        sid = str(data.get("sid_token") or "")
+        address = str(data.get("email_addr") or "")
+        if not sid:
+            _down("guerrilla")
+            return ""
+        name = self._rand("tg", 10)
+        try:
+            r2 = await self._request(
+                "GET", f"{GUERRILLA}?f=set_email_user&email_user={name}"
+                       f"&sid_token={sid}&lang=en")
+            if r2.status_code == 200:
+                got = str((r2.json() or {}).get("email_addr") or "")
+                if "@" in got:
+                    address = got
+        except MailError:
+            pass
+        if "@" not in address:
+            _down("guerrilla")
+            return ""
+        self._token, self._sid, self._provider = sid, sid, "guerrilla"
+        self._remember(address, "", "guerrilla")
+        return address
+
+    async def _create_dropmail(self, exclude: set) -> str:
+        url_token = "accstore-" + self._rand("", 12)
+        query = {"query": "mutation {introduceSession {id, expiresAt, addresses {address}}}"}
+        try:
+            r = await self._request("POST", f"{DROPMail}/{url_token}", json=query)
+        except MailError as e:
+            log.info(f"dropmail start: {e}")
+            _down("dropmail")
+            return ""
+        if r.status_code != 200:
+            _down("dropmail")
+            return ""
+        session = ((r.json() or {}).get("data") or {}).get("introduceSession") or {}
+        sid = str(session.get("id") or "")
+        addrs = session.get("addresses") or []
+        address = str((addrs[0] or {}).get("address") or "") if addrs else ""
+        if not (sid and address):
+            _down("dropmail")
+            return ""
+        self._token, self._sid = sid, sid
+        self._url_token = url_token
+        self._provider = "dropmail"
+        self._remember(address, "", "dropmail")
+        return address
 
     async def create_temp_email(self, exclude_domains: list = None) -> str:
         exclude = {d.lower().strip() for d in (exclude_domains or []) if d}
-        order = [p for p in PROVIDERS if not _is_down(p[0])] or list(PROVIDERS)
+        order = [p for p in PROVIDERS if not _is_down(p)] or list(PROVIDERS)
 
-        for name, base in order:
-            doms = [d for d in await self._domains(base, name) if d.lower() not in exclude]
-            doms.sort(key=lambda d: 0 if d.lower() == MAIL_PREFER_DOMAIN else 1)
-            for domain in doms[:4]:
-                for _ in range(2):
-                    address = self._rand("tg_", 12) + "@" + domain
-                    if await self.claim(address, base=base, name=name):
-                        return address
+        for name in order:
+            address = ""
+            try:
+                if name == "mailtm":
+                    address = await self._create_api(MAILTM, name, exclude)
+                elif name == "mailgw":
+                    address = await self._create_api(MAILGW, name, exclude)
+                elif name == "guerrilla":
+                    address = await self._create_guerrilla(exclude)
+                elif name == "dropmail":
+                    address = await self._create_dropmail(exclude)
+            except Exception as e:
+                log.info(f"create {name}: {e}")
+            if address:
+                self._email = address
+                log.info(f"mailbox {address} via {name}")
+                return address
 
-        if _is_down("plus"):
-            _DOWN.pop("plus", None)
         pool = [d for d in PLUS_DOMAINS if d.lower() not in exclude] or PLUS_DOMAINS
         random.shuffle(pool)
         address = self._rand("tg_", 12) + "@" + pool[0]
-        self._email, self._token, self._base, self._provider = address, "", "", "plus"
+        self._email, self._token, self._sid = address, "", ""
+        self._base, self._url_token, self._provider = "", "", "plus"
         self._remember(address, "", "plus")
+        log.info(f"mailbox {address} via plus")
         return address
 
     async def fetch_verification_code(self, target_email: str = None,
@@ -253,16 +327,72 @@ class TempMailClient:
         raise TimeoutError(f"no code in {timeout}s for {target}")
 
     async def _check_inbox(self, target: str, expected_length=None):
+        want = expected_length or CODE_LEN
+        if self._provider == "guerrilla" and self._sid:
+            code = await self._check_guerrilla(want)
+            if code:
+                return code
+        if self._provider == "dropmail" and self._sid:
+            code = await self._check_dropmail(want)
+            if code:
+                return code
         if self._token and self._base and not _is_down(self._provider):
-            code = await self._check_api(self._base, self._provider, expected_length)
+            code = await self._check_api(self._base, self._provider, want)
             if code:
                 return code
         if not _is_down("plus"):
-            code = await self._check_plus(target, expected_length)
+            return await self._check_plus(target, want)
+        return None
+
+    async def _check_guerrilla(self, expected_length=None):
+        try:
+            r = await self._request(
+                "GET", f"{GUERRILLA}?f=check_email&seq=0&sid_token={self._sid}")
+        except MailError as e:
+            log.info(f"guerrilla list: {e}")
+            _down("guerrilla")
+            return None
+        if r.status_code != 200:
+            _down("guerrilla")
+            return None
+        for m in (r.json() or {}).get("list", []) or []:
+            mid = m.get("mail_id")
+            if not mid:
+                continue
+            try:
+                full = await self._request(
+                    "GET", f"{GUERRILLA}?f=fetch_email&email_id={mid}"
+                           f"&sid_token={self._sid}")
+            except MailError:
+                continue
+            if full.status_code != 200:
+                continue
+            data = full.json() or {}
+            code = extract_telegram_code(
+                f"{data.get('mail_subject', '')} {data.get('mail_body', '')}",
+                expected_length)
             if code:
                 return code
-        if self._token and self._base:
-            return await self._check_api(self._base, self._provider, expected_length)
+        return None
+
+    async def _check_dropmail(self, expected_length=None):
+        query = {"query": "query($id: ID!){session(id:$id){mails{fromAddr,headerSubject,text}}}",
+                 "variables": {"id": self._sid}}
+        try:
+            r = await self._request("POST", f"{DROPMail}/{self._url_token}", json=query)
+        except MailError as e:
+            log.info(f"dropmail list: {e}")
+            _down("dropmail")
+            return None
+        if r.status_code != 200:
+            _down("dropmail")
+            return None
+        session = ((r.json() or {}).get("data") or {}).get("session") or {}
+        for m in session.get("mails") or []:
+            code = extract_telegram_code(
+                f"{m.get('headerSubject', '')} {m.get('text', '')}", expected_length)
+            if code:
+                return code
         return None
 
     async def _check_api(self, base: str, name: str, expected_length=None):
@@ -291,7 +421,7 @@ class TempMailClient:
                 continue
             data = full.json() or {}
             body = f"{data.get('subject', '')} {data.get('text', '') or data.get('html', '')}"
-            code = extract_telegram_code(body, expected_length or CODE_LEN)
+            code = extract_telegram_code(body, expected_length)
             if code:
                 return code
         return None
@@ -318,8 +448,7 @@ class TempMailClient:
                 continue
             data = full.json() or {}
             code = extract_telegram_code(
-                f"{data.get('subject', '')} {data.get('text', '')}",
-                expected_length or CODE_LEN)
+                f"{data.get('subject', '')} {data.get('text', '')}", expected_length)
             if code:
                 return code
         return None
@@ -369,8 +498,7 @@ class IMAPMailClient:
                                 body += payload.decode("utf-8", "replace")
                     else:
                         body = (msg.get_payload(decode=True) or b"").decode("utf-8", "replace")
-                    code = extract_telegram_code(f"{subj} {body}",
-                                                 expected_length or 6)
+                    code = extract_telegram_code(f"{subj} {body}", expected_length or 6)
                     if code:
                         return code
                 time.sleep(3)
