@@ -20,7 +20,8 @@ from app.config import (DATA_DIR, MAIL_POLL, MAIL_PREFER_DOMAIN, MAIL_PROVIDERS,
 log = logging.getLogger("mail")
 
 VAULT = os.path.join(DATA_DIR, "temp_mail_vault.json")
-CODE_LEN = 5
+BLOCKED_FILE = os.path.join(DATA_DIR, "blocked_mail_domains.json")
+CODE_LEN = 6
 VAULT_MAX = 400
 MAILTM = "https://api.mail.tm"
 MAILGW = "https://api.mail.gw"
@@ -30,6 +31,20 @@ PLUS = "https://tempmail.plus/api"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 PLUS_DOMAINS = ["fexbox.org", "fexpost.com", "mailbox.in.ua", "chitthi.in",
                 "rover.info", "mailto.plus", "fextemp.com", "anyalias.com"]
+
+# domains Telegram answers EMAIL_NOT_ALLOWED for. guerrillamailblock.com is what
+# Guerrilla hands out by default, so it is dead on arrival and seeded as such.
+SEED_BLOCKED = {
+    "guerrillamailblock.com", "grr.la", "sharklasers.com", "spam4.me",
+    "pokemail.net", "guerrillamail.biz", "guerrillamail.net",
+    "guerrillamail.org", "guerrillamail.de", "guerrillamail.info",
+}
+GUERRILLA_DOMAINS = (
+    "guerrillamail.com", "guerrillamail.info", "guerrillamail.de",
+    "guerrillamail.net", "guerrillamail.org", "guerrillamail.biz",
+    "sharklasers.com", "grr.la", "spam4.me", "pokemail.net",
+    "guerrillamailblock.com",
+)
 
 RETRY_STATUS = {402, 403, 408, 425, 429, 500, 502, 503, 504}
 RETRY_TRIES = 4
@@ -46,6 +61,39 @@ def _down(name: str):
 
 def _is_down(name: str) -> bool:
     return _DOWN.get(name, 0.0) > time.time()
+
+
+def _norm_domain(value: str) -> str:
+    return str(value or "").lower().split("@")[-1].strip()
+
+
+def blocked_domains() -> set[str]:
+    out = set(SEED_BLOCKED)
+    try:
+        if os.path.exists(BLOCKED_FILE):
+            with open(BLOCKED_FILE, encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                out |= {str(d).lower().strip() for d in data if d}
+    except Exception as e:
+        log.info(f"blocked read: {e}")
+    return out
+
+
+def block_domain(value: str):
+    domain = _norm_domain(value)
+    if not domain:
+        return
+    data = blocked_domains()
+    if domain in data:
+        return
+    data.add(domain)
+    try:
+        with open(BLOCKED_FILE, "w", encoding="utf-8") as f:
+            json.dump(sorted(data), f, indent=2)
+        log.info(f"domain blocked: {domain}")
+    except Exception as e:
+        log.info(f"blocked write: {e}")
 
 
 class MailError(Exception):
@@ -113,8 +161,20 @@ class TempMailClient:
         self._base = ""
         self._provider = ""
         self._seen: set[str] = set()
+        self._blocked: set[str] = blocked_domains()
         self._index = random.randrange(max(1, len(proxies.POOL) or 1))
         self._clients: dict[str, httpx.AsyncClient] = {}
+
+    @property
+    def current_email(self) -> str:
+        return self._email
+
+    def block_domain(self, value: str):
+        domain = _norm_domain(value)
+        if not domain:
+            return
+        self._blocked.add(domain)
+        block_domain(domain)
 
     def _http(self, proxy: str) -> httpx.AsyncClient:
         client = self._clients.get(proxy)
@@ -220,38 +280,49 @@ class TempMailClient:
         return ""
 
     async def _create_guerrilla(self, exclude: set) -> str:
-        try:
-            r = await self._request("GET", f"{GUERRILLA}?f=get_email_address&lang=en")
-        except MailError as e:
-            log.info(f"guerrilla start: {e}")
-            _down("guerrilla")
-            return ""
-        if r.status_code != 200:
-            _down("guerrilla")
-            return ""
-        data = r.json() or {}
-        sid = str(data.get("sid_token") or "")
-        address = str(data.get("email_addr") or "")
-        if not sid:
-            _down("guerrilla")
-            return ""
-        name = self._rand("tg", 10)
-        try:
-            r2 = await self._request(
-                "GET", f"{GUERRILLA}?f=set_email_user&email_user={name}"
-                       f"&sid_token={sid}&lang=en")
-            if r2.status_code == 200:
-                got = str((r2.json() or {}).get("email_addr") or "")
-                if "@" in got:
-                    address = got
-        except MailError:
-            pass
-        if "@" not in address:
-            _down("guerrilla")
-            return ""
-        self._token, self._sid, self._provider = sid, sid, "guerrilla"
-        self._remember(address, "", "guerrilla")
-        return address
+        skip = {d.lower() for d in exclude} | self._blocked
+        order = [d for d in GUERRILLA_DOMAINS if d not in skip]
+        order += [d for d in GUERRILLA_DOMAINS if d in skip]
+
+        for domain in order:
+            try:
+                r = await self._request(
+                    "GET", f"{GUERRILLA}?f=get_email_address&lang=en&domain={domain}")
+            except MailError as e:
+                log.info(f"guerrilla start {domain}: {e}")
+                _down("guerrilla")
+                return ""
+            if r.status_code != 200:
+                _down("guerrilla")
+                return ""
+            data = r.json() or {}
+            sid = str(data.get("sid_token") or "")
+            address = str(data.get("email_addr") or "")
+            if not sid or "@" not in address:
+                _down("guerrilla")
+                return ""
+            got = _norm_domain(address)
+            if got in self._blocked:
+                log.info(f"guerrilla gave blocked domain {got}, next")
+                continue
+            name = self._rand("tg", 10)
+            try:
+                r2 = await self._request(
+                    "GET", f"{GUERRILLA}?f=set_email_user&email_user={name}"
+                           f"&sid_token={sid}&lang=en&domain={got}")
+                if r2.status_code == 200:
+                    fresh = str((r2.json() or {}).get("email_addr") or "")
+                    if "@" in fresh:
+                        address = fresh
+            except MailError:
+                pass
+            if "@" not in address:
+                _down("guerrilla")
+                return ""
+            self._token, self._sid, self._provider = sid, sid, "guerrilla"
+            self._remember(address, "", "guerrilla")
+            return address
+        return ""
 
     async def _create_dropmail(self, exclude: set) -> str:
         url_token = "accstore-" + self._rand("", 12)
@@ -272,6 +343,9 @@ class TempMailClient:
         if not (sid and address):
             _down("dropmail")
             return ""
+        if _norm_domain(address) in self._blocked:
+            log.info(f"dropmail gave blocked domain {address}, next")
+            return ""
         self._token, self._sid = sid, sid
         self._url_token = url_token
         self._provider = "dropmail"
@@ -280,6 +354,7 @@ class TempMailClient:
 
     async def create_temp_email(self, exclude_domains: list = None) -> str:
         exclude = {d.lower().strip() for d in (exclude_domains or []) if d}
+        exclude |= blocked_domains()
         order = [p for p in PROVIDERS if not _is_down(p)] or list(PROVIDERS)
 
         self._seen.clear()
@@ -485,6 +560,10 @@ class IMAPMailClient:
         if not self.host:
             raise ValueError(f"no IMAP host known for {addr}")
 
+    @property
+    def current_email(self) -> str:
+        return self.addr
+
     def _blocking(self, timeout: int, expected_length=None):
         m = imaplib.IMAP4_SSL(self.host, self.port)
         try:
@@ -508,7 +587,7 @@ class IMAPMailClient:
                                 body += payload.decode("utf-8", "replace")
                     else:
                         body = (msg.get_payload(decode=True) or b"").decode("utf-8", "replace")
-                    code = extract_telegram_code(f"{subj} {body}", expected_length or 6)
+                    code = extract_telegram_code(f"{subj} {body}", expected_length or CODE_LEN)
                     if code:
                         return code
                 time.sleep(3)
