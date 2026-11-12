@@ -22,10 +22,26 @@ VAULT = os.path.join(DATA_DIR, "temp_mail_vault.json")
 CODE_LEN = 5
 VAULT_MAX = 400
 MAILTM = "https://api.mail.tm"
+MAILGW = "https://api.mail.gw"
 PLUS = "https://tempmail.plus/api"
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 PLUS_DOMAINS = ["fexbox.org", "fexpost.com", "mailbox.in.ua", "chitthi.in",
                 "rover.info", "mailto.plus", "fextemp.com", "anyalias.com"]
+
+RETRY_STATUS = {402, 403, 408, 425, 429, 500, 502, 503, 504}
+RETRY_TRIES = 6
+DOWN_COOLDOWN = 300.0
+PROVIDERS = (("mailtm", MAILTM), ("mailgw", MAILGW))
+
+_DOWN: dict[str, float] = {}
+
+
+def _down(name: str):
+    _DOWN[name] = time.time() + DOWN_COOLDOWN
+
+
+def _is_down(name: str) -> bool:
+    return _DOWN.get(name, 0.0) > time.time()
 
 
 class MailError(Exception):
@@ -87,6 +103,7 @@ class TempMailClient:
     def __init__(self):
         self._email = ""
         self._token = ""
+        self._base = ""
         self._provider = ""
         self._index = random.randrange(max(1, len(proxies.POOL) or 1))
         self._cooldown: dict[str, float] = {}
@@ -117,23 +134,23 @@ class TempMailClient:
             proxy, self._index = proxies.rotate(self._index)
             if self._cooldown.get(proxy, 0.0) <= now:
                 return proxy
-        return proxies.get(self._index)
+        return ""
 
     async def _request(self, method: str, url: str, **kw) -> httpx.Response:
         last: Exception | None = None
-        for _ in range(4):
+        for _ in range(RETRY_TRIES):
             proxy = self._pick()
             try:
                 r = await self._http(proxy).request(method, url, **kw)
             except httpx.HTTPError as e:
                 last = e
                 self._cooldown[proxy] = time.time() + 2.0
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.3)
                 continue
-            if r.status_code == 429:
-                last = MailError("429")
+            if r.status_code in RETRY_STATUS:
+                last = MailError(f"{r.status_code} {url}")
                 self._cooldown[proxy] = time.time() + MAIL_PROXY_RETRY
-                await asyncio.sleep(0.6)
+                await asyncio.sleep(0.5)
                 continue
             return r
         raise MailError(f"request failed: {last}")
@@ -148,60 +165,74 @@ class TempMailClient:
                          "created_at": int(time.time())}
         _vault_write(data)
 
-    async def _domains(self) -> list[str]:
+    async def _domains(self, base: str, name: str) -> list[str]:
         try:
-            r = await self._request("GET", f"{MAILTM}/domains")
+            r = await self._request("GET", f"{base}/domains")
         except MailError as e:
-            log.info(f"domains: {e}")
+            log.info(f"domains {name}: {e}")
+            _down(name)
             return []
         if r.status_code != 200:
+            _down(name)
             return []
         rows = (r.json() or {}).get("hydra:member", [])
-        return [str(d.get("domain")) for d in rows
-                if d.get("isActive") and d.get("domain")]
+        doms = [str(d.get("domain")) for d in rows if d.get("isActive") and d.get("domain")]
+        if not doms:
+            _down(name)
+        return doms
 
-    async def _token_for(self, address: str, password: str) -> str:
-        t = await self._request("POST", f"{MAILTM}/token",
-                                json={"address": address, "password": password})
+    async def _token_for(self, base: str, address: str, password: str) -> str:
+        try:
+            t = await self._request("POST", f"{base}/token",
+                                    json={"address": address, "password": password})
+        except MailError as e:
+            log.info(f"token {address}: {e}")
+            return ""
         if t.status_code != 200:
             return ""
         return (t.json() or {}).get("token") or ""
 
-    async def claim(self, address: str, password: str = "") -> bool:
+    async def claim(self, address: str, password: str = "", base: str = MAILTM,
+                    name: str = "mailtm") -> bool:
         pwd = password or self._rand("AccStore_", 16)
         body = {"address": address, "password": pwd}
-        r = await self._request("POST", f"{MAILTM}/accounts", json=body)
-        if r.status_code not in (200, 201, 422):
+        try:
+            r = await self._request("POST", f"{base}/accounts", json=body)
+        except MailError as e:
+            log.info(f"claim {address}: {e}")
+            _down(name)
             return False
-        token = await self._token_for(address, pwd)
-        if not token and r.status_code == 422:
-            token = await self._token_for(address, pwd)
+        if r.status_code not in (200, 201, 422):
+            _down(name)
+            return False
+        token = await self._token_for(base, address, pwd)
         if not token:
             return False
-        self._email, self._token, self._provider = address, token, "mailtm"
-        self._remember(address, pwd, "mailtm")
+        self._email, self._token, self._base, self._provider = address, token, base, name
+        self._remember(address, pwd, name)
         return True
 
     async def create_temp_email(self, exclude_domains: list = None) -> str:
         exclude = {d.lower().strip() for d in (exclude_domains or []) if d}
-        doms = [d for d in await self._domains() if d.lower() not in exclude]
-        doms.sort(key=lambda d: 0 if d.lower() == MAIL_PREFER_DOMAIN else 1)
+        order = [p for p in PROVIDERS if not _is_down(p[0])] or list(PROVIDERS)
 
-        for domain in doms[:5]:
-            for _ in range(2):
-                address = self._rand("tg_", 12) + "@" + domain
-                if await self.claim(address):
-                    return address
+        for name, base in order:
+            doms = [d for d in await self._domains(base, name) if d.lower() not in exclude]
+            doms.sort(key=lambda d: 0 if d.lower() == MAIL_PREFER_DOMAIN else 1)
+            for domain in doms[:4]:
+                for _ in range(2):
+                    address = self._rand("tg_", 12) + "@" + domain
+                    if await self.claim(address, base=base, name=name):
+                        return address
 
+        if _is_down("plus"):
+            _DOWN.pop("plus", None)
         pool = [d for d in PLUS_DOMAINS if d.lower() not in exclude] or PLUS_DOMAINS
         random.shuffle(pool)
-        for domain in pool:
-            address = self._rand("tg_", 12) + "@" + domain
-            self._email, self._token, self._provider = address, "", "plus"
-            self._remember(address, "", "plus")
-            return address
-
-        raise MailError("no temp mail domain available")
+        address = self._rand("tg_", 12) + "@" + pool[0]
+        self._email, self._token, self._base, self._provider = address, "", "", "plus"
+        self._remember(address, "", "plus")
+        return address
 
     async def fetch_verification_code(self, target_email: str = None,
                                       timeout: int = MAIL_TIMEOUT,
@@ -222,25 +253,40 @@ class TempMailClient:
         raise TimeoutError(f"no code in {timeout}s for {target}")
 
     async def _check_inbox(self, target: str, expected_length=None):
-        if self._token:
-            code = await self._check_mailtm(expected_length)
+        if self._token and self._base and not _is_down(self._provider):
+            code = await self._check_api(self._base, self._provider, expected_length)
             if code:
                 return code
-        return await self._check_plus(target, expected_length)
+        if not _is_down("plus"):
+            code = await self._check_plus(target, expected_length)
+            if code:
+                return code
+        if self._token and self._base:
+            return await self._check_api(self._base, self._provider, expected_length)
+        return None
 
-    async def _check_mailtm(self, expected_length=None):
+    async def _check_api(self, base: str, name: str, expected_length=None):
         headers = {"Authorization": f"Bearer {self._token}"}
-        r = await self._request("GET", f"{MAILTM}/messages", headers=headers)
+        try:
+            r = await self._request("GET", f"{base}/messages", headers=headers)
+        except MailError as e:
+            log.info(f"messages {name}: {e}")
+            _down(name)
+            return None
         if r.status_code == 401:
-            self._token = ""
+            self._token = await self._token_for(base, self._email, "")
             return None
         if r.status_code != 200:
+            _down(name)
             return None
         for m in (r.json() or {}).get("hydra:member", []):
             mid = m.get("id")
             if not mid:
                 continue
-            full = await self._request("GET", f"{MAILTM}/messages/{mid}", headers=headers)
+            try:
+                full = await self._request("GET", f"{base}/messages/{mid}", headers=headers)
+            except MailError:
+                continue
             if full.status_code != 200:
                 continue
             data = full.json() or {}
@@ -251,14 +297,23 @@ class TempMailClient:
         return None
 
     async def _check_plus(self, target: str, expected_length=None):
-        r = await self._request("GET", f"{PLUS}/mails?email={target}&epin=&limit=15")
+        try:
+            r = await self._request("GET", f"{PLUS}/mails?email={target}&epin=&limit=15")
+        except MailError as e:
+            log.info(f"plus list: {e}")
+            _down("plus")
+            return None
         if r.status_code != 200:
+            _down("plus")
             return None
         for m in (r.json() or {}).get("mail_list", []) or []:
             mid = m.get("id")
             if mid is None:
                 continue
-            full = await self._request("GET", f"{PLUS}/mails/{mid}?email={target}&epin=")
+            try:
+                full = await self._request("GET", f"{PLUS}/mails/{mid}?email={target}&epin=")
+            except MailError:
+                continue
             if full.status_code != 200:
                 continue
             data = full.json() or {}
@@ -272,8 +327,15 @@ class TempMailClient:
 
 HOSTS = {"gmail.com": "imap.gmail.com", "googlemail.com": "imap.gmail.com",
          "outlook.com": "outlook.office365.com", "hotmail.com": "outlook.office365.com",
-         "live.com": "outlook.office365.com", "yandex.com": "imap.yandex.com",
-         "yandex.ru": "imap.yandex.com", "mail.ru": "imap.mail.ru"}
+         "live.com": "outlook.office365.com", "msn.com": "outlook.office365.com",
+         "yahoo.com": "imap.mail.yahoo.com", "ymail.com": "imap.mail.yahoo.com",
+         "aol.com": "imap.aol.com", "gmx.com": "imap.gmx.com", "gmx.net": "imap.gmx.net",
+         "web.de": "imap.web.de", "zoho.com": "imap.zoho.com", "icloud.com": "imap.mail.me.com",
+         "me.com": "imap.mail.me.com", "yandex.com": "imap.yandex.com",
+         "yandex.ru": "imap.yandex.com", "ya.ru": "imap.yandex.com",
+         "mail.ru": "imap.mail.ru", "bk.ru": "imap.mail.ru", "inbox.ru": "imap.mail.ru",
+         "list.ru": "imap.mail.ru", "internet.ru": "imap.mail.ru",
+         "rambler.ru": "imap.rambler.ru", "ukr.net": "imap.ukr.net"}
 
 
 class IMAPMailClient:
@@ -323,8 +385,18 @@ class IMAPMailClient:
                                       timeout: int = MAIL_TIMEOUT,
                                       poll_interval: float = MAIL_POLL,
                                       expected_length=None) -> str:
-        code = await asyncio.get_running_loop().run_in_executor(
-            None, self._blocking, timeout, expected_length)
-        if not code:
-            raise TimeoutError(f"no IMAP code in {timeout}s")
-        return code
+        loop = asyncio.get_running_loop()
+        last: Exception | None = None
+        for _ in range(2):
+            try:
+                code = await loop.run_in_executor(None, self._blocking, timeout,
+                                                  expected_length)
+                if code:
+                    return code
+            except Exception as e:
+                last = e
+                log.info(f"imap {self.addr}: {e}")
+                await asyncio.sleep(2.0)
+        if last:
+            raise last
+        raise TimeoutError(f"no IMAP code in {timeout}s")
