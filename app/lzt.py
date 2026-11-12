@@ -1,4 +1,6 @@
 import asyncio
+import base64
+import json
 import logging
 import time
 
@@ -12,9 +14,10 @@ from app.utils.money import parse_balances, parse_user, same_currency
 log = logging.getLogger("lzt")
 
 PAYMENT_PATHS = ("/user/payments", "/payments", "/balance/payments")
-AUTH_KEY_FIELDS = ("telegram_auth_key", "auth_key", "authKey", "telegram_session",
-                   "session")
-DC_KEYS = ("telegram_dc_id", "dc_id", "dcId")
+AUTH_KEY_NAMES = {"telegram_auth_key", "auth_key", "authkey", "auth_key_base64",
+                  "telegram_auth_key_base64", "session", "session_string",
+                  "telegram_session", "string_session", "auth"}
+DC_NAMES = {"telegram_dc_id", "dc_id", "dcid", "dc"}
 
 RESET_PATH = "/{}/telegram-reset-authorizations"
 QR_PATH = "/{}/qr-login"
@@ -23,6 +26,7 @@ BUY_PATH = "/{}/fast-buy"
 
 RETRY_ATTEMPTS = 40
 RETRY_DELAY = 0.4
+MAX_DEPTH = 5
 
 
 class LztError(Exception):
@@ -74,21 +78,49 @@ def _message(payload) -> str:
     return dig(payload)[:300]
 
 
-def _long(value) -> str:
-    if isinstance(value, str) and len(value.strip()) > 100:
-        return value.strip()
-    return ""
+def _looks_like_key(text: str) -> bool:
+    if len(text) == 512 and all(c in "0123456789abcdefABCDEF" for c in text):
+        return True
+    try:
+        raw = base64.b64decode(text + "=" * (-len(text) % 4))
+    except Exception:
+        return False
+    return len(raw) == 256
 
 
-def _deep_long(item: dict, keys: tuple[str, ...]) -> str:
-    for key in keys:
-        found = _long(item.get(key))
-        if found:
-            return found
-    data = item.get("loginData")
-    if isinstance(data, dict):
-        for key in keys:
-            found = _long(data.get(key))
+def _candidate(value) -> str:
+    if isinstance(value, dict):
+        if value.get("auth_key") or value.get("authKey") or value.get("key"):
+            try:
+                return json.dumps(value)
+            except Exception:
+                return ""
+        return ""
+    if not isinstance(value, str):
+        return ""
+    text = value.strip().strip('"').strip("'")
+    return text if len(text) >= 100 else ""
+
+
+def _walk_keys(node, depth: int = 0, named_only: bool = False) -> str:
+    if depth > MAX_DEPTH:
+        return ""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            cand = _candidate(value)
+            if not cand:
+                continue
+            if str(key).lower() in AUTH_KEY_NAMES:
+                return cand
+            if not named_only and _looks_like_key(cand):
+                return cand
+        for value in node.values():
+            found = _walk_keys(value, depth + 1, named_only)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _walk_keys(value, depth + 1, named_only)
             if found:
                 return found
     return ""
@@ -97,25 +129,35 @@ def _deep_long(item: dict, keys: tuple[str, ...]) -> str:
 def extract_auth_key(item) -> str:
     if not isinstance(item, dict):
         return ""
-    return _deep_long(item, AUTH_KEY_FIELDS)
+    return _walk_keys(item, 0, True) or _walk_keys(item, 0, False)
+
+
+def _walk_dc(node, depth: int = 0) -> int:
+    if depth > MAX_DEPTH:
+        return 0
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if str(key).lower() in DC_NAMES:
+                try:
+                    number = int(value)
+                except (TypeError, ValueError):
+                    number = 0
+                if 1 <= number <= 5:
+                    return number
+        for value in node.values():
+            found = _walk_dc(value, depth + 1)
+            if found:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _walk_dc(value, depth + 1)
+            if found:
+                return found
+    return 0
 
 
 def extract_dc_id(item) -> int:
-    if not isinstance(item, dict):
-        return 0
-    sources = [item]
-    data = item.get("loginData")
-    if isinstance(data, dict):
-        sources.append(data)
-    for src in sources:
-        for key in DC_KEYS:
-            try:
-                value = int(src.get(key) or 0)
-            except (TypeError, ValueError):
-                value = 0
-            if value:
-                return value
-    return 0
+    return _walk_dc(item) if isinstance(item, dict) else 0
 
 
 class LztClient:
@@ -127,7 +169,7 @@ class LztClient:
             timeout=HTTP_TIMEOUT,
             headers={"Authorization": f"Bearer {token}",
                      "Accept": "application/json",
-                     "User-Agent": "AccStore/3.1"},
+                     "User-Agent": "AccStore/3.2"},
         )
 
     async def close(self):
