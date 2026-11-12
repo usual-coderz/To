@@ -2,14 +2,30 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from app import db, keyboards as kb
+from app import db, keyboards as kb, seller
 from app.handlers.menu import show
 from app.session_manager import check_session
 from app.utils import tg
-from app.utils.texts import session_detail, session_file
+from app.utils.texts import (session_detail, session_file, session_stats_text,
+                             sessions_txt)
 from app.utils.timeutil import fmt_dt, now
 
 router = Router()
+
+PAGES = {"list": "queue", "over": "24h+", "ready": "ready"}
+
+
+async def _rows(tg_id: int, page: str) -> list[dict]:
+    if page == "over":
+        rows = await db.over_age(tg_id)
+    elif page == "ready":
+        rows = await db.ready_purchases(tg_id)
+    else:
+        rows = await db.queue_purchases(tg_id)
+    stamp = now()
+    for p in rows:
+        p["_age"] = db.current_age(p, stamp)
+    return rows
 
 
 @router.message(Command("session"))
@@ -20,17 +36,56 @@ async def cmd_session(m: Message):
         if not p:
             return await m.answer("not found")
         return await tg.send(m.bot, m.chat.id, session_detail(p), kb.session_detail(p))
-    rows = await db.active_purchases(m.from_user.id)
-    text = f"<b>Sessions</b> · {len(rows)}" if rows else "no sessions queued"
-    await tg.send(m.bot, m.chat.id, text, kb.sessions(rows) if rows else kb.back())
+    await _menu(m.bot, m.chat.id, m.from_user.id)
+
+
+async def _menu(bot, chat_id: int, tg_id: int):
+    stats = await db.session_stats(tg_id)
+    text = (f"<b>Sessions</b>\nqueue {stats['queue']} · 24h+ {stats['over']}"
+            f" · ready {stats['ready']}")
+    await tg.send(bot, chat_id, text, kb.sessions(stats))
 
 
 @router.callback_query(F.data == "m:sessions")
 async def cb_sessions(cq: CallbackQuery):
-    rows = await db.active_purchases(cq.from_user.id)
-    text = f"<b>Sessions</b> · {len(rows)}" if rows else "no sessions queued"
-    await show(cq, text, kb.sessions(rows) if rows else kb.back())
+    stats = await db.session_stats(cq.from_user.id)
+    text = (f"<b>Sessions</b>\nqueue {stats['queue']} · 24h+ {stats['over']}"
+            f" · ready {stats['ready']}")
+    await show(cq, text, kb.sessions(stats))
     await cq.answer()
+
+
+@router.callback_query(F.data.startswith("q:"))
+async def cb_page(cq: CallbackQuery):
+    page = cq.data.split(":", 1)[1]
+    if page == "stats":
+        st = await db.session_stats(cq.from_user.id)
+        sold = await db.sale_stats(cq.from_user.id)
+        await show(cq, session_stats_text(st, sold), kb.back("m:sessions"))
+        return await cq.answer()
+    rows = await _rows(cq.from_user.id, page)
+    if not rows:
+        await show(cq, f"<b>{PAGES.get(page, page)}</b>\nempty",
+                   kb.back("m:sessions"))
+        return await cq.answer()
+    head = f"<b>{PAGES.get(page, page)}</b> · {len(rows)}"
+    await show(cq, head, kb.session_list(rows[:20], page))
+    await cq.answer()
+
+
+@router.callback_query(F.data.startswith("t:"))
+async def cb_txt(cq: CallbackQuery):
+    page = cq.data.split(":", 1)[1]
+    rows = await _rows(cq.from_user.id, page)
+    if not rows:
+        return await cq.answer("empty", show_alert=True)
+    stats = await db.session_stats(cq.from_user.id)
+    title = (f"{PAGES.get(page, page)} | queue {stats['queue']}"
+             f" | over24 {stats['over']} | ready {stats['ready']}")
+    name = f"{page}_{now()}.txt"
+    await tg.send_document(cq.bot, cq.from_user.id,
+                           sessions_txt(rows, title).encode(), name)
+    await cq.answer(f"{len(rows)} sessions")
 
 
 @router.callback_query(F.data.startswith("v:"))
@@ -72,3 +127,20 @@ async def cb_file(cq: CallbackQuery):
     name = (p.get("phone") or str(p["item_id"])).lstrip("+") or "session"
     await tg.send_document(cq.bot, cq.from_user.id, session_file(p).encode(), f"{name}.py")
     await cq.answer("sent")
+
+
+@router.callback_query(F.data.startswith("sell:"))
+async def cb_sell(cq: CallbackQuery):
+    from app.deps import lzt
+    p = await db.get_purchase(cq.data.split(":", 1)[1])
+    if not p or p["tg_id"] != cq.from_user.id:
+        return await cq.answer("gone", show_alert=True)
+    if p.get("status") != "ready":
+        return await cq.answer(f"status {p.get('status')}", show_alert=True)
+    await cq.answer("selling…")
+    ok, note = await seller.manual(cq.bot, lzt, p)
+    if not ok:
+        await tg.send(cq.bot, cq.from_user.id, f"⚠️ sell failed: {tg.esc(note)}")
+    p = await db.get_purchase(p["_id"])
+    if p:
+        await show(cq, session_detail(p, f"💱 {note}"), kb.session_detail(p))
