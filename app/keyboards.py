@@ -122,18 +122,21 @@ def receivers(rows: list[dict]) -> InlineKeyboardMarkup:
         mark = "🟢" if r.get("enabled") else "⚪"
         cap = r.get("cap")
         cap_text = "?" if cap is None or cap < 0 else str(cap)
-        out.append([(f"{mark} @{r['username']} · cap {cap_text}",
-                     f"rv:{r['_id']}")])
+        out.append([(f"{mark} @{r['username']} · cap {cap_text}", f"rv:{r['_id']}")])
     out.append([("Add receiver", "r:add"), ("Refresh", "r:sync")])
-    out.append([("Back", BACK_MAIN)])
+    out.append([("Warm all", "r:warm"), ("Back", BACK_MAIN)])
     return kb(out)
 
 
 def receiver_detail(r: dict) -> InlineKeyboardMarkup:
     rid = r["_id"]
+    lion = (r.get("kind") == "lion")
+    probe = [("Prices via link", f"rp:{rid}")] if lion else [
+        ("Cap via /cap", f"rc:{rid}"), ("Prices", f"rp:{rid}")]
     return kb([
-        [("Check capacity", f"rc:{rid}"), ("Prices", f"rp:{rid}")],
+        probe,
         [("Confirm " + str(r.get("confirm_seconds") or "auto"), f"rs:{rid}")],
+        [("Warm /start", f"rw:{rid}")],
         [("🟢 On" if r.get("enabled") else "⚪ Off", f"rt:{rid}"),
          ("Delete", f"rd:{rid}")],
         [("Back", BACK_RECEIVERS)],
