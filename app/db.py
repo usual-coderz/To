@@ -6,8 +6,8 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from pymongo import ASCENDING, DESCENDING, AsyncMongoClient
 
-from app.config import (MONGO_DB, MONGO_URI, QUEUE_TARGET_HOURS, REPORT_KEEP_HOURS,
-                        SETTLE_SECONDS, STALE_CLEAN_SECONDS, TWOFA_PASSWORD)
+from app.config import (MONGO_DB, MONGO_URI, REPORT_KEEP_HOURS, STALE_CLEAN_SECONDS,
+                        TARGET_HOURS, TWOFA_PASSWORD)
 from app.utils.money import _num
 
 log = logging.getLogger("db")
@@ -16,12 +16,10 @@ DEFAULT_2FA = "AccStore2fa"
 
 DEFAULTS = {
     "price_min": "0.05", "price_max": "1.00",
-    "spam_mode": "no", "mail_mode": "yes", "mail_type": "any", "password_mode": "no",
+    "spam_mode": "no", "mail_mode": "yes", "password_mode": "no",
     "session_min_hours": "0", "session_max_hours": "0",
-    "queue_target_hours": str(int(QUEUE_TARGET_HOURS) or 24),
     "countries": "", "deny_countries": "IR,RU",
-    "nsb_only": "1", "max_buy_per_cycle": "2", "daily_spend_cap": "15",
-    "poll_interval": "25", "auto_buy": "1",
+    "nsb_only": "1", "daily_spend_cap": "15", "auto_buy": "1",
     "terminate_on_expire": "1", "change_mail_on_expire": "1",
     "verify_spam": "1", "currency": "usd", "proxy": "", "mail_provider": "auto",
     "twofa_password": (TWOFA_PASSWORD or DEFAULT_2FA),
@@ -125,17 +123,13 @@ NORMALIZERS = {
     "price_max": _f(DEFAULTS["price_max"], 0.0),
     "spam_mode": _enum(("yes", "no", "any"), "no"),
     "mail_mode": _enum(("yes", "no", "any"), "yes"),
-    "mail_type": _enum(("any", "native", "temp"), "any"),
     "password_mode": _enum(("yes", "no", "any"), "no"),
     "session_min_hours": _f("0", 0.0, 87_600.0),
     "session_max_hours": _f("0", 0.0, 87_600.0),
-    "queue_target_hours": _f("24", 1.0, 87_600.0),
     "countries": _codes,
     "deny_countries": _codes,
     "nsb_only": _flag("1"),
-    "max_buy_per_cycle": _i("2", 1, 100),
     "daily_spend_cap": _f("15", 0.0),
-    "poll_interval": _i("25", 5, 3_600),
     "auto_buy": _flag("1"),
     "terminate_on_expire": _flag("1"),
     "change_mail_on_expire": _flag("1"),
@@ -289,24 +283,36 @@ async def spent_today(tg_id: int) -> float:
     return total
 
 
-def due_from(age_hours: float, target_hours: float) -> int:
-    now = _now()
-    target = max(1.0, float(target_hours)) * 3600
-    left = max(0.0, target - max(0.0, float(age_hours)) * 3600)
-    return int(now + max(SETTLE_SECONDS, left))
+def due_from(age_hours: float) -> int:
+    left = TARGET_HOURS - max(0.0, float(age_hours))
+    if left <= 0:
+        return _now()
+    return _now() + int(left * 3600)
+
+
+def current_age(p: dict, at: int | None = None) -> float:
+    now = at or _now()
+    created = int(p.get("account_created_ts") or 0)
+    if created:
+        return max(0.0, (now - created) / 3600.0)
+    base = float(p.get("age_at_buy_hours") or 0.0)
+    started = int(p.get("started_at") or 0)
+    if started:
+        base += max(0.0, (now - started) / 3600.0)
+    return base
 
 
 async def add_purchase(tg_id, item_id, phone, country, price, password="", mail="",
                        mail_password="", session_string="", expires_at=0,
-                       target_age_hours=24.0, age_at_buy_hours=0.0, account_created_ts=0,
-                       spam_flag=False, status="queued", note="") -> str:
+                       age_at_buy_hours=0.0, account_created_ts=0,
+                       spam_flag=False, status="login", note="") -> str:
     now = _now()
     pid = (await _db.purchases.insert_one({
         "tg_id": tg_id, "item_id": item_id, "phone": phone or "", "country": country or "",
         "price": float(price), "password": password or "", "mail": mail or "",
         "mail_password": mail_password or "", "session_string": session_string,
         "status": status, "started_at": now, "expires_at": int(expires_at),
-        "target_age_hours": float(target_age_hours),
+        "target_age_hours": TARGET_HOURS,
         "age_at_buy_hours": float(age_at_buy_hours),
         "account_created_ts": int(account_created_ts or 0),
         "spam_flag": bool(spam_flag),
@@ -325,7 +331,7 @@ async def due_purchases(limit: int = 200) -> list[dict]:
     now = _now()
     return await _db.purchases.find({
         "$or": [
-            {"status": "queued", "expires_at": {"$gt": 0, "$lte": now}},
+            {"status": "queued", "expires_at": {"$lte": now}},
             {"status": "cleaning", "checked_at": {"$lt": now - STALE_CLEAN_SECONDS}},
         ]
     }).sort("expires_at", ASCENDING).limit(limit).to_list(None)
@@ -344,6 +350,14 @@ async def claim_purchase(pid) -> bool:
     return bool(doc)
 
 
+async def queue_purchase(pid, expires_at: int):
+    oid = _oid(pid)
+    if oid:
+        await _db.purchases.update_one(
+            {"_id": oid},
+            {"$set": {"status": "queued", "expires_at": int(expires_at), "checked_at": 0}})
+
+
 async def release_purchase(pid, seconds: int, inc_tries: bool = False):
     oid = _oid(pid)
     if not oid:
@@ -357,12 +371,13 @@ async def release_purchase(pid, seconds: int, inc_tries: bool = False):
 
 async def active_purchases(tg_id: int, limit: int = 30) -> list[dict]:
     return await _db.purchases.find(
-        {"tg_id": tg_id, "status": {"$in": ["queued", "cleaning", "ready"]}}
+        {"tg_id": tg_id, "status": {"$in": ["login", "queued", "cleaning", "ready"]}}
     ).sort("started_at", DESCENDING).limit(limit).to_list(None)
 
 
 async def queue_count(tg_id: int) -> int:
-    return await _db.purchases.count_documents({"tg_id": tg_id, "status": "queued"})
+    return await _db.purchases.count_documents(
+        {"tg_id": tg_id, "status": {"$in": ["login", "queued"]}})
 
 
 async def get_purchase(pid) -> dict | None:
@@ -399,16 +414,14 @@ async def bump_expiry(pid, seconds: int, inc_tries: bool = False):
     await _db.purchases.update_one({"_id": oid}, {"$inc": inc})
 
 
-async def reschedule(tg_id: int, target_hours: float):
+async def reschedule(tg_id: int):
     now = _now()
-    target = float(max(1.0, target_hours))
     cursor = _db.purchases.find({"tg_id": tg_id, "status": "queued"})
     async for p in cursor:
-        due = due_from(float(p.get("age_at_buy_hours") or 0.0), target)
         await _db.purchases.update_one(
             {"_id": p["_id"]},
-            {"$set": {"expires_at": max(now + SETTLE_SECONDS, due),
-                      "target_age_hours": target}})
+            {"$set": {"expires_at": max(now, due_from(current_age(p, now))),
+                      "target_age_hours": TARGET_HOURS}})
 
 
 async def close_purchase(pid, status: str, note: str = "", new_mail: str = ""):
