@@ -50,6 +50,8 @@ except Exception as e:
 
 _TRANSPORTS = (ConnectionTcpFull, ConnectionTcpIntermediate, ConnectionTcpAbridged)
 
+MAILBOX_TRIES = 4
+
 
 class DeadKey(RuntimeError):
     pass
@@ -307,8 +309,7 @@ async def check_session(session_string: str, proxy_cfg: str = ""):
 # --- email change -----------------------------------------------------------
 # Telethon >=1.36: VerifyEmailRequest(purpose, verification=EmailVerificationCode(code))
 # Telethon <1.36:  VerifyEmailRequest(purpose, code)
-# Signature is introspected once per call instead of guessed at runtime, so the
-# request is always built against the installed version.
+# The request is built from the installed signature, never guessed at runtime.
 
 def _send_verify_request(purpose, email):
     params = inspect.signature(
@@ -329,43 +330,101 @@ def _verify_email_request(purpose, code):
     return functions.account.VerifyEmailRequest(purpose=purpose, code=code)
 
 
-async def change_email(c: TelegramClient, new_email: str, mail_client,
-                       code_timeout: int = CODE_TIMEOUT) -> str:
-    purpose = EmailVerifyPurposeLoginChange()
+def _not_allowed(e: Exception) -> bool:
+    return "EMAIL_NOT_ALLOWED" in str(e)
 
+
+async def _send_code(c: TelegramClient, purpose, address: str) -> None:
     last: Exception | None = None
     for _ in range(3):
         try:
-            await c(_send_verify_request(purpose, new_email))
-            last = None
-            break
+            await c(_send_verify_request(purpose, address))
+            return
         except FloodWaitError as e:
             last = e
             await asyncio.sleep(min(int(e.seconds) + 2, 60))
         except Exception as e:
             last = e
-            log.info(f"send verify code {new_email}: {e}")
+            if _not_allowed(e):
+                raise
+            log.info(f"send verify code {address}: {e}")
             await asyncio.sleep(2.0)
-    if last is not None:
-        raise last
+    raise last or RuntimeError("send verify code failed")
 
-    code = await mail_client.fetch_verification_code(
-        new_email, timeout=code_timeout, expected_length=6)
-    log.info(f"verify code for {new_email}: {code}")
 
-    last = None
+async def _submit_code(c: TelegramClient, purpose, address: str, code: str) -> None:
+    last: Exception | None = None
     for _ in range(3):
         try:
             await c(_verify_email_request(purpose, code))
-            return code
+            return
         except FloodWaitError as e:
             last = e
             await asyncio.sleep(min(int(e.seconds) + 2, 60))
         except Exception as e:
             last = e
-            log.info(f"verify email code {new_email}: {e}")
+            if _not_allowed(e):
+                raise
+            log.info(f"verify email code {address}: {e}")
             await asyncio.sleep(2.0)
     raise last or RuntimeError("verify email failed")
+
+
+async def change_email(c: TelegramClient, new_email: str, mail_client,
+                       code_timeout: int = CODE_TIMEOUT, remail=None) -> str:
+    purpose = EmailVerifyPurposeLoginChange()
+    address = new_email
+    rejected: list[str] = []
+    last: Exception | None = None
+
+    for attempt in range(MAILBOX_TRIES):
+        if attempt:
+            if remail is None:
+                raise last or RuntimeError("no mailbox factory for retry")
+            try:
+                address = await remail()
+            except Exception as e:
+                raise last or e
+            if not address:
+                raise last or RuntimeError("mailbox rotation failed")
+
+        try:
+            await _send_code(c, purpose, address)
+        except Exception as e:
+            if _not_allowed(e) and attempt + 1 < MAILBOX_TRIES:
+                rejected.append(address)
+                mail_client.block_domain(address)
+                log.info(f"domain rejected at send: {address}")
+                last = e
+                continue
+            raise
+
+        try:
+            code = await mail_client.fetch_verification_code(
+                address, timeout=code_timeout, expected_length=6)
+        except Exception as e:
+            last = e
+            if attempt + 1 < MAILBOX_TRIES:
+                continue
+            raise
+
+        log.info(f"verify code for {address}: {code}")
+
+        try:
+            await _submit_code(c, purpose, address, code)
+            if rejected:
+                log.info(f"email accepted after {len(rejected)} rejected: {address}")
+            return code
+        except Exception as e:
+            if _not_allowed(e) and attempt + 1 < MAILBOX_TRIES:
+                rejected.append(address)
+                mail_client.block_domain(address)
+                log.info(f"domain rejected at verify: {address}")
+                last = e
+                continue
+            raise
+
+    raise last or RuntimeError("email change failed")
 
 
 async def reset_others(c: TelegramClient) -> int:
