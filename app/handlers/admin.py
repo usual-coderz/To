@@ -5,7 +5,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from app import db, engine
+from app import db, engine, receiver_hub, receivers, seller
 from app.config import OWNER_IDS, TARGET_HOURS
 from app.deps import lzt
 from app.lzt import extract_auth_key, extract_dc_id
@@ -26,6 +26,37 @@ def _owner(m: Message) -> bool:
 def _dc_hint(dc: int) -> str:
     hit = dc_addr(dc) if dc else None
     return f"{hit[0]}:{hit[1]}" if hit else "unknown, will sweep"
+
+
+@router.message(Command("hub"))
+async def cmd_hub(m: Message):
+    if not _owner(m):
+        return
+    if not receiver_hub.running():
+        await receiver_hub.start()
+    online = receiver_hub.running()
+    me = "?"
+    if online:
+        try:
+            entity = await receiver_hub._client.get_me()
+            me = f"@{entity.username or entity.id}"
+        except Exception:
+            pass
+    rows = await db.list_receivers(m.from_user.id)
+    lines = [f"userbot {'🟢 ' + tg.esc(me) if online else '🔴 offline'}",
+             f"receivers {len(rows)}"]
+    for r in rows:
+        ok = await receiver_hub._resolve(r["username"]) if online else None
+        lines.append(f"{'✅' if ok else '❌'} @{r['username']} [{r.get('kind')}]")
+    await m.answer("<code>" + tg.esc("\n".join(lines)) + "</code>")
+
+
+@router.message(Command("warm"))
+async def cmd_warm(m: Message):
+    if not _owner(m):
+        return
+    done = await receivers.warm(m.from_user.id)
+    await m.answer(f"✅ /start sent to {done} receiver(s)")
 
 
 @router.message(Command("addowner"))
@@ -53,6 +84,24 @@ async def cmd_sold(m: Message):
     if not await db.mark_sold(parts[1], price, m.from_user.id):
         return await m.answer("❌ purchase not found")
     await m.answer(f"✅ Marked sold for ${price:g}")
+
+
+@router.message(Command("selltest"))
+async def cmd_selltest(m: Message):
+    if not _owner(m):
+        return
+    parts = (m.text or "").split()
+    if len(parts) < 2:
+        return await m.answer("Usage: /selltest <purchase_id>")
+    p = await db.get_purchase(parts[1])
+    if not p or p["tg_id"] != m.from_user.id:
+        return await m.answer("❌ purchase not found")
+    if p.get("status") != "ready":
+        return await m.answer(f"❌ status is {p.get('status')}")
+    await m.answer("💱 selling…")
+    ok, note = await seller.manual(m.bot, lzt, p)
+    if not ok:
+        await m.answer(f"❌ {tg.esc(note)}")
 
 
 @router.message(Command("reset"))
@@ -175,12 +224,14 @@ async def cmd_diag(m: Message):
     kinds = ", ".join(f"{b['kind']}:{b['amount']:g}" for b in snap["entries"]) or "none"
     await m.answer(
         "<b>diag</b>\n"
-        f"auto_buy {s['auto_buy']} · cap ${s['daily_spend_cap']} · spent {spent:.2f}\n"
+        f"auto_buy {s['auto_buy']} · auto_sell {s['auto_sell']} · cap ${s['daily_spend_cap']}"
+        f" · spent {spent:.2f}\n"
         f"price {s['price_min']}–{s['price_max']} · currency {s['currency']}\n"
         f"target {TARGET_HOURS:g}h · min age {s['session_min_hours']}h"
         f" · max age {s['session_max_hours'] or 'off'} · queued {queued}\n"
         f"2fa <code>{tg.esc(s['twofa_password'])}</code>"
         f" · mail src {s['mail_provider']}\n"
+        f"hub {'🟢 online' if receiver_hub.running() else '🔴 offline'}\n"
         f"total {fmt_money(snap['total'], s['currency'])}"
         f" · spendable {fmt_money(snap['spendable'], s['currency'])}\n"
         f"entries {tg.esc(kinds)}\n"
