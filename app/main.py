@@ -8,12 +8,13 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import CallbackQuery, ErrorEvent, Message
 
-from app import db
+from app import db, receiver_hub, seller
 from app.config import BOT_TOKEN, MONGO_DB, MONGO_URI, OWNER_IDS, PURCHASE_KEEP_DAYS
 from app.deps import lzt
-from app.engine import buy_loop, cleaner_loop, drain_bg
+from app.engine import buy_loop, cleaner_loop, drain_bg, price_loop
 from app.handlers import ROUTERS
 from app.handlers.menu import allowed
+from app.scheduler import loop as chart_loop
 
 logging.basicConfig(level=logging.INFO,
                     format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -41,10 +42,10 @@ async def access_mw(handler, event, data):
     return await handler(event, data)
 
 
-async def _supervise(name: str, factory, bot, *args):
+async def _supervise(name: str, factory, *args):
     while True:
         try:
-            await factory(bot, *args)
+            await factory(*args)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -62,6 +63,7 @@ async def main():
     await db.init_db()
     for oid in OWNER_IDS:
         await db.ensure_user(oid)
+    await receiver_hub.start()
 
     bot = Bot(BOT_TOKEN, default=DefaultBotProperties(parse_mode="HTML"))
     dp = Dispatcher()
@@ -76,8 +78,12 @@ async def main():
     for r in ROUTERS:
         dp.include_router(r)
 
-    tasks = [asyncio.create_task(_supervise("buy_loop", buy_loop, bot, lzt)),
-             asyncio.create_task(_supervise("cleaner_loop", cleaner_loop, bot, lzt))]
+    tasks = [
+        asyncio.create_task(_supervise("buy_loop", buy_loop, bot, lzt)),
+        asyncio.create_task(_supervise("cleaner_loop", cleaner_loop, bot, lzt)),
+        asyncio.create_task(_supervise("price_loop", price_loop)),
+        asyncio.create_task(_supervise("chart_loop", chart_loop, bot)),
+    ]
 
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()
@@ -101,11 +107,13 @@ async def main():
         for t in tasks:
             t.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+        await seller.drain()
         await drain_bg()
         try:
             await db.prune_purchases(PURCHASE_KEEP_DAYS)
         except Exception as e:
             log.warning(f"prune: {e}")
+        await receiver_hub.stop()
         await lzt.close()
         await db.close_db()
         await bot.session.close()
