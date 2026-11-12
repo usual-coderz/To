@@ -5,7 +5,7 @@ import time
 
 from app import db, pricing, receiver_hub
 from app.config import (SELL_CONFIRM_DEFAULT, SELL_CONFIRM_MAX, SELL_CONFIRM_MIN,
-                        SELL_CONCURRENCY, SELL_OTP_TIMEOUT, SELL_REPLY_TIMEOUT, TARGET_HOURS)
+                        SELL_CONCURRENCY, SELL_OTP_TIMEOUT, SELL_REPLY_TIMEOUT)
 from app.session_manager import check_session, clean_client, device_list, reset_others, set_2fa
 from app.utils import countries, tg
 from app.utils.texts import sell_fail_line, trade_text
@@ -48,21 +48,13 @@ def _digits(text: str) -> str:
     return m.group(1) if m else ""
 
 
-def _masked(phone: str) -> str:
-    raw = (phone or "").lstrip("+")
-    if len(raw) < 7:
-        return raw or "—"
-    return f"{raw[:4]}{'*' * max(0, len(raw) - 7)}{raw[-3:]}"
-
-
 async def _single_session(session_string: str, proxy: str) -> tuple[bool, int]:
     conn = clean_client(session_string, proxy)
     try:
         await conn.connect()
         if not await conn.is_user_authorized():
             return False, 0
-        devices = await device_list(conn)
-        return True, len(devices)
+        return True, len(await device_list(conn))
     except Exception as e:
         log.info(f"precheck: {e}")
         return False, 0
@@ -95,6 +87,19 @@ async def _wait_otp(conn, timeout: int) -> str:
                 return code
         await asyncio.sleep(3.0)
     return ""
+
+
+async def _notify(bot, tg_id, text):
+    await tg.send(bot, tg_id, text)
+
+
+async def _dm(receiver: str, phone: str) -> bool:
+    await receiver_hub.drain(receiver)
+    if await receiver_hub.send(receiver, phone):
+        return True
+    await receiver_hub.start_bot(receiver)
+    await asyncio.sleep(2.5)
+    return await receiver_hub.send(receiver, phone)
 
 
 async def sell(bot, lzt, purchase: dict, offer: dict, settings: dict) -> bool:
@@ -130,19 +135,6 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
         await _notify(bot, tg_id, sell_fail_line(country, "session dead"))
         return False
 
-    if devices > 1:
-        conn = clean_client(p["session_string"], proxy)
-        try:
-            await conn.connect()
-            await reset_others(conn)
-        except Exception as e:
-            log.info(f"reset before sell {phone}: {e}")
-        finally:
-            try:
-                await conn.disconnect()
-            except Exception:
-                pass
-
     password = s.get("twofa_password") or db.DEFAULT_2FA
     conn = clean_client(p["session_string"], proxy)
     try:
@@ -165,8 +157,7 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
         sid = await db.add_sale(tg_id, pid, country, offer.get("receiver_id"),
                                 receiver, buy_price, sell_price, confirm)
 
-        await receiver_hub.drain(receiver)
-        if not await receiver_hub.send(receiver, phone):
+        if not await _dm(receiver, phone):
             await db.close_sale(sid, "failed", "dm failed")
             await db.set_purchase(pid, sell_state="")
             await _notify(bot, tg_id, sell_fail_line(country, "receiver dm failed"))
@@ -225,10 +216,6 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
             pass
 
 
-async def _notify(bot, tg_id, text):
-    await tg.send(bot, tg_id, text)
-
-
 async def auto_sell(bot, lzt, purchase: dict) -> bool:
     s = await db.get_settings(purchase["tg_id"])
     if s.get("auto_sell") != "1":
@@ -236,8 +223,7 @@ async def auto_sell(bot, lzt, purchase: dict) -> bool:
     country = (purchase.get("country") or "").upper()
     if not country:
         return False
-    floor = db.num(s.get("sell_min_price"))
-    offer = await pricing.best_offer(purchase["tg_id"], country, floor)
+    offer = await pricing.best_offer(purchase["tg_id"], country, db.num(s.get("sell_min_price")))
     if offer is None:
         await db.set_purchase(purchase["_id"], sell_state="no_offer")
         return False
