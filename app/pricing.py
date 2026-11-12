@@ -3,13 +3,13 @@ import logging
 import re
 
 from app import db, receiver_hub
-from app.config import (CAP_COMMANDS, CAP_REFRESH, LION_BOT, LION_START, PRICE_REFRESH,
-                        PRICE_TTL)
+from app.config import CAP_COMMAND, LION_START, PRICE_TTL, PROBE_TIMEOUT
 from app.utils import countries
 
 log = logging.getLogger("pricing")
 
 TIE_RANK = {"tgget": 0, "lion": 1, "cm": 2}
+LION = "lion"
 
 _FLAG = "[\U0001F1E6-\U0001F1FF]{2}"
 _LINE = re.compile(
@@ -19,7 +19,6 @@ _PLAIN = re.compile(r"(?<![\w$])([A-Z]{2})\s+\$\s*(\d{1,4}(?:[.,]\d{1,2})?)")
 _CAP = re.compile(
     r"(?:cap(?:acity)?|available|free|slots?|stock|limit|qty)\D{0,12}(\d{1,6})", re.I)
 _CONFIRM = re.compile(r"(\d{3,5})\s*(?:s\b|sec|second)", re.I)
-_STOP = {"OK", "TG", "ID", "PR", "US", "NO"}
 
 
 def _price(raw: str) -> float:
@@ -33,7 +32,9 @@ def parse_prices(text: str) -> dict:
     out: dict = {}
     for line in (text or "").splitlines():
         clean = line.strip()
-        if not clean or "$" not in clean and "→" not in clean and "->" not in clean:
+        if not clean:
+            continue
+        if "$" not in clean and "→" not in clean and "->" not in clean:
             continue
         for m in _LINE.finditer(clean):
             cc = m.group(1).upper()
@@ -43,12 +44,13 @@ def parse_prices(text: str) -> dict:
             if cc in out and out[cc] >= value:
                 continue
             out[cc] = value
-    if not out:
-        for m in _PLAIN.finditer(text or ""):
-            cc = m.group(1).upper()
-            value = _price(m.group(2))
-            if value and countries.name_of(cc):
-                out.setdefault(cc, value)
+    if out:
+        return out
+    for m in _PLAIN.finditer(text or ""):
+        cc = m.group(1).upper()
+        value = _price(m.group(2))
+        if value and countries.name_of(cc):
+            out.setdefault(cc, value)
     return out
 
 
@@ -68,46 +70,51 @@ def parse_confirm(text: str) -> int:
 def kind_of(username: str) -> str:
     key = str(username or "").lower()
     if "lion" in key:
-        return "lion"
+        return LION
     if "get" in key:
         return "tgget"
     return "cm"
 
 
-async def refresh_receiver(receiver: dict) -> int:
+def _blank() -> dict:
+    return {"cap": -1, "confirm": 0, "prices": {}, "replies": 0}
+
+
+def _absorb(out: dict, reply: str):
+    if not reply:
+        return
+    out["replies"] += 1
+    for cc, value in parse_prices(reply).items():
+        out["prices"][cc] = value
+    cap = parse_cap(reply)
+    if cap >= 0 and out["cap"] < 0:
+        out["cap"] = cap
+    confirm = parse_confirm(reply)
+    if confirm:
+        out["confirm"] = confirm
+
+
+async def probe(receiver: dict) -> dict:
     username = receiver.get("username") or ""
     kind = receiver.get("kind") or kind_of(username)
-    cap = -1
-    if kind == "lion":
-        await receiver_hub.start_bot(username, LION_START)
-        reply = await receiver_hub.wait_reply(username, 25.0)
-        prices = parse_prices(reply)
-        if prices:
-            await db.save_prices(receiver["tg_id"], receiver["_id"], prices)
-            await db.set_receiver(receiver["_id"], price_at=db._now())
-        cap = parse_cap(reply)
-    else:
-        for cmd in CAP_COMMANDS:
-            reply = await receiver_hub.command(username, cmd)
-            if not reply:
-                continue
-            prices = parse_prices(reply)
-            if prices:
-                await db.save_prices(receiver["tg_id"], receiver["_id"], prices)
-                await db.set_receiver(receiver["_id"], price_at=db._now())
-            cap = parse_cap(reply)
-            confirm = parse_confirm(reply)
-            if cap >= 0 or confirm:
-                await db.bump_receiver(receiver["_id"], cap if cap >= 0 else None, confirm)
-                return cap
-        if cap < 0:
-            await db.fail_receiver(receiver["_id"])
-        return cap
+    out = _blank()
+    if kind == LION:
+        _absorb(out, await receiver_hub.start_and_read(username, LION_START, PROBE_TIMEOUT))
+        return out
+    _absorb(out, await receiver_hub.command(username, CAP_COMMAND, PROBE_TIMEOUT))
+    return out
 
-    if cap < 0:
+
+async def refresh_receiver(receiver: dict) -> int:
+    out = await probe(receiver)
+    if out["prices"]:
+        await db.save_prices(receiver["tg_id"], receiver["_id"], out["prices"])
+        await db.set_receiver(receiver["_id"], price_at=db._now())
+    if out["cap"] < 0:
         await db.fail_receiver(receiver["_id"])
-    await db.bump_receiver(receiver["_id"], cap if cap >= 0 else None)
-    return cap
+    else:
+        await db.bump_receiver(receiver["_id"], out["cap"], out["confirm"] or None)
+    return out["cap"]
 
 
 async def refresh_all(tg_id: int) -> dict:
@@ -129,8 +136,7 @@ async def refresh_all(tg_id: int) -> dict:
                 out["caps"] += 1
 
     await asyncio.gather(*[one(r) for r in rows], return_exceptions=True)
-    offers = await offers_map(tg_id, PRICE_TTL)
-    out["prices"] = sum(len(v) for v in offers.values())
+    out["prices"] = sum(len(v) for v in (await offers_map(tg_id, PRICE_TTL)).values())
     return out
 
 
@@ -180,9 +186,19 @@ async def best_table(tg_id: int, max_age: float = PRICE_TTL) -> list[dict]:
     rows = []
     for cc, offers in data.items():
         ranked = sorted(offers, key=rank)
-        if not ranked:
-            continue
-        rows.append({"country": cc, "offers": ranked})
+        if ranked:
+            rows.append({"country": cc, "offers": ranked})
+    rows.sort(key=lambda r: -r["offers"][0]["price"])
+    return rows
+
+
+async def receiver_table(tg_id: int, rid: str, max_age: float = PRICE_TTL) -> list[dict]:
+    data = await offers_map(tg_id, max_age)
+    rows = []
+    for cc, offers in data.items():
+        mine = [o for o in offers if o["receiver_id"] == rid]
+        if mine:
+            rows.append({"country": cc, "offers": sorted(mine, key=rank)})
     rows.sort(key=lambda r: -r["offers"][0]["price"])
     return rows
 
