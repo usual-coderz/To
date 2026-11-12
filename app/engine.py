@@ -1,379 +1,537 @@
 import asyncio
-import base64
-import json
 import logging
 import time
+from collections import Counter
 
-import httpx
+from app import db
+from app.config import (CYCLE_INTERVAL, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
+                        LOGIN_CONCURRENCY, MAX_SCAN, SESSION_RETRY, TARGET_HOURS, TICK)
+from app.lzt import LztError, classify, extract_auth_key, extract_dc_id
+from app.mail_engine import IMAPMailClient, TempMailClient
+from app.session_manager import (change_email, check_session, client, device_list,
+                                 login_with_auth_key, normalize_phone, owned_counts,
+                                 reset_others, set_2fa, spambot_status)
+from app.utils import tg
+from app.utils import wallet as wallet_view
+from app.utils.filters import (account_created_ts, age_for_queue, country_of, passes,
+                               phone_of, spam_state)
+from app.utils.money import fmt_money, pick_for_buy
+from app.utils.texts import audit_text, bought_line, failed_line, session_file
 
-from app.config import (CACHE_TTL, HTTP_BACKOFF, HTTP_RETRIES, HTTP_TIMEOUT, LZT_BASE,
-                        LZT_TOKEN)
-from app.utils.filters import search_query
-from app.utils.money import parse_balances, parse_user, same_currency
+log = logging.getLogger("engine")
 
-log = logging.getLogger("lzt")
+_BAL_WARNED: dict[int, float] = {}
+WARN_COOLDOWN = 900.0
 
-PAYMENT_PATHS = ("/user/payments", "/payments", "/balance/payments")
-AUTH_KEY_NAMES = {"telegram_auth_key", "auth_key", "authkey", "auth_key_base64",
-                  "telegram_auth_key_base64", "session", "session_string",
-                  "telegram_session", "string_session", "auth"}
-DC_NAMES = {"telegram_dc_id", "dc_id", "dcid", "dc"}
+_BG: set[asyncio.Task] = set()
+_NEXT_RUN: dict[int, float] = {}
+_SEM: asyncio.Semaphore | None = None
 
-RESET_PATH = "/{}/telegram-reset-authorizations"
-QR_PATH = "/{}/qr-login"
-CHECK_PATH = "/{}/check-account"
-BUY_PATH = "/{}/fast-buy"
+PHONE_KEYS = ("login", "telegram_login", "phone", "telegram_phone")
 
-RETRY_ATTEMPTS = 40
-RETRY_DELAY = 0.4
-MAX_DEPTH = 5
+LOGIN_TRIES = 2
 
-
-class LztError(Exception):
-    def __init__(self, message: str, status: int = 0):
-        super().__init__(message)
-        self.status = status
-
-
-def classify(e: LztError) -> str:
-    text = str(e).lower()
-    if "daily limit" in text or "limit of checks" in text:
-        return "check_limit"
-    if "is sold" in text or "sold." in text:
-        return "sold"
-    if "removed" in text or "deleted" in text:
-        return "deleted"
-    if "blacklist" in text:
-        return "blacklist"
-    if "enough money" in text or "enough balance" in text:
-        return "no_balance"
-    if "session is invalid" in text or "logged out" in text or "blocked" in text:
-        return "dead"
-    return "check_failed"
+CHECK_SOFT = ("check_failed",)
 
 
-def _message(payload) -> str:
-    def dig(node, depth: int = 0) -> str:
-        if depth > 4:
-            return ""
-        if isinstance(node, str):
-            return node.strip()
-        if isinstance(node, dict):
-            for key in ("message", "error", "errors", "detail", "title", "text"):
-                if key in node:
-                    found = dig(node[key], depth + 1)
-                    if found:
-                        return found
-            for value in node.values():
-                found = dig(value, depth + 1)
-                if found:
-                    return found
-        elif isinstance(node, list):
-            for value in node:
-                found = dig(value, depth + 1)
-                if found:
-                    return found
-        return ""
-
-    return dig(payload)[:300]
+class SessionDead(RuntimeError):
+    pass
 
 
-def _looks_like_key(text: str) -> bool:
-    if len(text) == 512 and all(c in "0123456789abcdefABCDEF" for c in text):
-        return True
+def _sem() -> asyncio.Semaphore:
+    global _SEM
+    if _SEM is None:
+        _SEM = asyncio.Semaphore(LOGIN_CONCURRENCY)
+    return _SEM
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _BG.add(task)
+    task.add_done_callback(_BG.discard)
+    return task
+
+
+async def drain_bg(timeout: float = 8.0):
+    if not _BG:
+        return
     try:
-        raw = base64.b64decode(text + "=" * (-len(text) % 4))
-    except Exception:
-        return False
-    return len(raw) == 256
+        await asyncio.wait_for(asyncio.gather(*list(_BG), return_exceptions=True), timeout)
+    except asyncio.TimeoutError:
+        log.info(f"shutdown: {len(_BG)} login task(s) still running")
 
 
-def _candidate(value) -> str:
-    if isinstance(value, dict):
-        if value.get("auth_key") or value.get("authKey") or value.get("key"):
-            try:
-                return json.dumps(value)
-            except Exception:
-                return ""
-        return ""
-    if not isinstance(value, str):
-        return ""
-    text = value.strip().strip('"').strip("'")
-    return text if len(text) >= 100 else ""
+async def _notify(bot, tg_id, text):
+    await tg.send(bot, tg_id, text)
 
 
-def _walk_keys(node, depth: int = 0, named_only: bool = False) -> str:
-    if depth > MAX_DEPTH:
-        return ""
-    if isinstance(node, dict):
-        for key, value in node.items():
-            cand = _candidate(value)
-            if not cand:
-                continue
-            if str(key).lower() in AUTH_KEY_NAMES:
-                return cand
-            if not named_only and _looks_like_key(cand):
-                return cand
-        for value in node.values():
-            found = _walk_keys(value, depth + 1, named_only)
-            if found:
-                return found
-    elif isinstance(node, list):
-        for value in node:
-            found = _walk_keys(value, depth + 1, named_only)
-            if found:
-                return found
+async def _balance_warn(bot, tg_id, text):
+    if time.time() - _BAL_WARNED.get(tg_id, 0.0) < WARN_COOLDOWN:
+        return
+    _BAL_WARNED[tg_id] = time.time()
+    await _notify(bot, tg_id, text)
+
+
+def phone_of_item(item: dict) -> str:
+    for key in PHONE_KEYS:
+        norm = normalize_phone(item.get(key) or "")
+        if norm:
+            return norm
+    data = item.get("loginData")
+    if isinstance(data, dict):
+        norm = normalize_phone(data.get("login") or "")
+        if norm:
+            return norm
+    return normalize_phone(phone_of(item))
+
+
+def password_of_item(item: dict) -> str:
+    data = item.get("loginData")
+    if isinstance(data, dict) and data.get("password"):
+        return str(data["password"])
+    for key in ("telegram_password", "password"):
+        if item.get(key):
+            return str(item[key])
     return ""
 
 
-def extract_auth_key(item) -> str:
-    if not isinstance(item, dict):
-        return ""
-    return _walk_keys(item, 0, True) or _walk_keys(item, 0, False)
+def _merge(base: dict, extra) -> dict:
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            if value not in (None, ""):
+                base[key] = value
+    return base
 
 
-def _walk_dc(node, depth: int = 0) -> int:
-    if depth > MAX_DEPTH:
-        return 0
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if str(key).lower() in DC_NAMES:
-                try:
-                    number = int(value)
-                except (TypeError, ValueError):
-                    number = 0
-                if 1 <= number <= 5:
-                    return number
-        for value in node.values():
-            found = _walk_dc(value, depth + 1)
-            if found:
-                return found
-    elif isinstance(node, list):
-        for value in node:
-            found = _walk_dc(value, depth + 1)
-            if found:
-                return found
-    return 0
+async def _resolve_login(lzt, item_id: int, fresh: dict, res: dict):
+    bought = res.get("item") or {}
+    merged = _merge(dict(fresh), bought)
 
+    phone = phone_of_item(bought) or phone_of_item(fresh)
+    password = password_of_item(bought) or password_of_item(fresh)
 
-def extract_dc_id(item) -> int:
-    return _walk_dc(item) if isinstance(item, dict) else 0
-
-
-class LztClient:
-    def __init__(self, token: str = LZT_TOKEN):
-        self._token = token
-        self._cache: dict[str, tuple[float, object]] = {}
-        self._http = httpx.AsyncClient(
-            base_url=LZT_BASE,
-            timeout=HTTP_TIMEOUT,
-            headers={"Authorization": f"Bearer {token}",
-                     "Accept": "application/json",
-                     "User-Agent": "AccStore/3.2"},
-        )
-
-    async def close(self):
+    if not (phone and password):
         try:
-            await self._http.aclose()
+            full = await lzt.item(item_id)
+        except LztError as e:
+            log.info(f"item {item_id}: {e}")
+            full = {}
+        merged = _merge(merged, full)
+        phone = phone or phone_of_item(full)
+        password = password or password_of_item(full)
+
+    return phone, password, merged
+
+
+async def _fast_buy(lzt, item_id: int, price: float, balance_id: int):
+    if balance_id:
+        try:
+            return await lzt.fast_buy(item_id, price, balance_id=balance_id)
+        except LztError as e:
+            if "balance_id" not in str(e).lower() and "balance id" not in str(e).lower():
+                raise
+            log.info(f"buy {item_id}: balance id rejected ({e}), retrying default")
+    return await lzt.fast_buy(item_id, price)
+
+
+async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tuple[bool, str]:
+    item_id = item["item_id"]
+    search_price = db.num(item.get("price"))
+    currency = s["currency"]
+    floor_age = db.num(s.get("session_min_hours"))
+
+    checked = {}
+    try:
+        checked = await lzt.check_account(item_id)
+    except LztError as e:
+        why = classify(e)
+        log.info(f"check {item_id}: {why}: {e}")
+        if why == "no_balance":
+            return False, "no_balance"
+        if why not in CHECK_SOFT:
+            return False, why
+
+    fresh = _merge(dict(item), checked.get("item") or {})
+    price = db.num(fresh.get("price"), search_price)
+
+    ok, why = passes(fresh, s, authoritative=True)
+    if not ok:
+        log.info(f"skip {item_id}: {why}")
+        return False, why
+
+    soft = ""
+    if s.get("spam_mode") == "no" and s.get("verify_spam", "1") == "1":
+        if spam_state(fresh) is True:
+            soft = "spam_flag"
+            log.info(f"note {item_id}: spam flag set but server filter says clean")
+    if why == "ok_unknown":
+        log.info(f"note {item_id}: fields unknown, relying on server filters")
+
+    wallet = pick_for_buy(snap["entries"], currency, price)
+    if wallet is None:
+        snap.update(await wallet_view.snapshot(lzt, currency))
+        wallet = pick_for_buy(snap["entries"], currency, price)
+    if wallet is None:
+        await _balance_warn(bot, tg_id,
+                            f"💳 low balance {fmt_money(snap['total'], currency)}")
+        return False, "no_balance"
+
+    try:
+        res = await _fast_buy(lzt, item_id, price, int(wallet.get("balance_id") or 0))
+    except LztError as e:
+        why = classify(e)
+        log.info(f"buy {item_id}: {why}: {e}")
+        return False, why
+
+    try:
+        snap.update(await wallet_view.snapshot(lzt, currency))
+    except Exception:
+        pass
+
+    phone, password, merged = await _resolve_login(lzt, item_id, fresh, res)
+    auth_key = extract_auth_key(merged)
+    auth_dc = extract_dc_id(merged)
+    country = country_of(fresh)
+    age = age_for_queue(fresh, floor_age)
+    created = account_created_ts(fresh) or 0
+    due = db.due_from(age)
+
+    if not auth_key:
+        log.info(f"buy {item_id}: no auth key in payload, keys="
+                 f"{','.join(sorted(str(k) for k in merged)[:40])}")
+
+    pid = await db.add_purchase(
+        tg_id, item_id, phone, country, price, password=password,
+        expires_at=due, age_at_buy_hours=age, account_created_ts=created,
+        auth_key=auth_key, auth_dc=auth_dc, spam_flag=(soft == "spam_flag"),
+        note="bought")
+
+    await _notify(bot, tg_id, bought_line(country))
+
+    if not phone:
+        log.info(f"buy {item_id}: no phone on item")
+        await db.close_purchase(pid, "login_failed", "no phone number on item")
+        await _notify(bot, tg_id, failed_line(country, "no phone on item"))
+        return True, "no_phone"
+
+    log.info(f"bought {item_id} pid={pid} age={age:.2f}h key={'yes' if auth_key else 'no'}"
+             f" mature={age >= TARGET_HOURS}")
+    _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s,
+                       merged, auth_key, auth_dc))
+    return True, (soft or "bought")
+
+
+async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s, hint,
+                      auth_key="", auth_dc=0):
+    async with _sem():
+        await db.set_purchase(pid, password=password)
+        last: Exception | None = None
+        conn = None
+        session_str = ""
+
+        for attempt in range(LOGIN_TRIES):
+            try:
+                conn, session_str, _uid = await login_with_auth_key(
+                    phone, password, item_id, lzt, s.get("proxy", ""), hint,
+                    auth_key, auth_dc)
+                if not session_str:
+                    raise RuntimeError("empty session string")
+                break
+            except Exception as e:
+                last = e
+                log.info(f"login {item_id} attempt {attempt + 1}/{LOGIN_TRIES}: {e}")
+                if attempt + 1 < LOGIN_TRIES:
+                    await asyncio.sleep(10)
+        else:
+            await db.close_purchase(pid, "login_failed", str(last)[:200])
+            await _notify(bot, tg_id, failed_line(country, str(last)))
+            return
+
+        await db.set_session(pid, session_str)
+        try:
+            if conn is not None:
+                await conn.disconnect()
         except Exception:
             pass
 
-    def invalidate(self):
-        self._cache.clear()
+        p = await db.get_purchase(pid)
+        if not p:
+            return
 
-    def _cached(self, key: str):
-        hit = self._cache.get(key)
-        if not hit:
-            return None
-        stamp, value = hit
-        if time.monotonic() - stamp > CACHE_TTL:
-            self._cache.pop(key, None)
-            return None
-        return value
+        age = db.current_age(p)
+        if age >= TARGET_HOURS:
+            await db.queue_purchase(pid, db._now())
+            fresh = await db.get_purchase(pid)
+            if fresh:
+                await clean_purchase(bot, lzt, fresh)
+        else:
+            await db.queue_purchase(pid, db.due_from(age))
+            log.info(f"queued {item_id} for {db.due_from(age) - db._now()}s")
 
-    def _store(self, key: str, value):
-        self._cache[key] = (time.monotonic(), value)
-        return value
 
-    async def _request(self, method: str, path: str, **kwargs) -> dict:
-        delay = HTTP_BACKOFF
-        last: LztError | None = None
+async def _mail_client_for(p: dict, s: dict):
+    current = (p.get("mail") or "").split("@")[-1].lower()
+    provider = s.get("mail_provider", "auto")
+    if provider in ("auto", "native") and p.get("mail") and p.get("mail_password"):
+        try:
+            return IMAPMailClient(p["mail"], p["mail_password"]), p["mail"]
+        except Exception as e:
+            log.info(f"imap unavailable: {e}")
+    if provider == "native":
+        return None, ""
+    mc = TempMailClient()
+    try:
+        addr = await mc.create_temp_email(exclude_domains=[current] if current else None)
+    except Exception as e:
+        log.info(f"temp mail: {e}")
+        await mc.close()
+        return None, ""
+    return mc, addr
 
-        for attempt in range(HTTP_RETRIES):
-            try:
-                r = await self._http.request(method, path, **kwargs)
-            except httpx.HTTPError as e:
-                last = LztError(f"network: {e}")
-                if attempt + 1 < HTTP_RETRIES:
-                    await asyncio.sleep(delay)
-                    delay *= 2
-                    continue
-                raise last
 
-            try:
-                payload = r.json() if r.content else {}
-            except ValueError:
-                payload = {}
+async def _send_audit(bot, tg_id, p, data):
+    sup = await db.get_username(tg_id)
+    await tg.send(bot, tg_id, audit_text(p, data, sup))
+    name = (p.get("phone") or str(p["item_id"])).lstrip("+") or "session"
+    await tg.send_document(bot, tg_id, session_file(p).encode(), f"{name}.py")
 
-            retryable = r.status_code == 429 or r.status_code >= 500
-            if retryable and attempt + 1 < HTTP_RETRIES:
-                wait = delay
+
+async def _fail(bot, p, note: list[str]):
+    await db.close_purchase(p["_id"], "failed", "; ".join(note)[:300])
+    await _notify(bot, p["tg_id"],
+                  failed_line(p.get("country"), "; ".join(note)[:200]))
+
+
+async def clean_purchase(bot, lzt, p: dict):
+    pid = p["_id"]
+    if not await db.claim_purchase(pid):
+        return
+
+    s = await db.get_settings(p["tg_id"])
+    tries = int(p.get("expiry_tries") or 0)
+
+    if not p.get("session_string"):
+        if tries < EXPIRY_RETRY:
+            await db.release_purchase(pid, EXPIRY_RETRY_DELAY, inc_tries=True)
+            return
+        await db.close_purchase(pid, "failed", "no session")
+        await _notify(bot, p["tg_id"], failed_line(p.get("country"), "no session"))
+        return
+
+    data: dict = {"mail_ok": False, "twofa_ok": False}
+    note: list[str] = []
+    conn = client(p["session_string"], s.get("proxy", ""))
+    try:
+        await conn.connect()
+        if not await conn.is_user_authorized():
+            raise SessionDead("session dead")
+
+        mc, addr = await _mail_client_for(p, s)
+        try:
+            if addr and s.get("change_mail_on_expire") == "1":
                 try:
-                    wait = max(wait, float(r.headers.get("Retry-After") or 0))
-                except (TypeError, ValueError):
-                    pass
-                log.info(f"{path}: HTTP {r.status_code}, retry in {wait:.1f}s")
-                await asyncio.sleep(min(wait, 20.0))
-                delay *= 2
-                continue
+                    await change_email(conn, addr, mc)
+                    data["mail_ok"] = True
+                    data["mail"] = addr
+                    note.append("mail changed")
+                except Exception as e:
+                    note.append(f"mail fail: {e}")
+        finally:
+            if mc is not None and hasattr(mc, "close"):
+                await mc.close()
 
-            if r.status_code >= 400:
-                raise LztError(_message(payload) or f"HTTP {r.status_code}", r.status_code)
-
-            if isinstance(payload, dict) and payload.get("errors"):
-                raise LztError(
-                    _message(payload) or f"errors: {payload.get('errors')!r}"[:300],
-                    r.status_code)
-
-            return payload if isinstance(payload, dict) else {}
-
-        raise last or LztError("request failed")
-
-    async def _get(self, path: str, params: dict | None = None) -> dict:
-        return await self._request("GET", path, params=params or {})
-
-    async def _post(self, path: str, params: dict | None = None,
-                    json: dict | None = None) -> dict:
-        return await self._request("POST", path, params=params or {}, json=json)
-
-    async def _buy_call(self, path: str, payload: dict | None) -> dict:
-        last: LztError | None = None
-        for attempt in range(RETRY_ATTEMPTS):
-            try:
-                return await self._request("POST", path, json=payload)
-            except LztError as e:
-                last = e
-                if e.status == 403 and "retry_request" in str(e).lower():
-                    await asyncio.sleep(min(RETRY_DELAY + attempt * 0.1, 3.0))
-                    continue
-                raise
-        raise last or LztError("retry_request exhausted", 403)
-
-    async def profile(self, use_cache: bool = True) -> dict:
-        if use_cache:
-            hit = self._cached("me")
-            if hit is not None:
-                return dict(hit)
-        data = parse_user(await self._get("/me"))
-        return dict(self._store("me", data))
-
-    async def balances(self, use_cache: bool = True) -> list[dict]:
-        if use_cache:
-            hit = self._cached("balances")
-            if hit is not None:
-                return [dict(b) for b in hit]
-        data = parse_balances(await self._get("/balance/exchange"))
-        return [dict(b) for b in self._store("balances", data)]
-
-    async def balance_total(self, currency: str = "usd") -> float:
-        user = await self.profile()
-        if not same_currency(user["currency"], currency):
-            return 0.0
-        return max(0.0, user["balance"] - user["hold"])
-
-    async def payments(self, page: int = 1) -> list[dict]:
-        params = {"page": int(page), "limit": 20}
-        for path in PAYMENT_PATHS:
-            try:
-                data = await self._get(path, params)
-            except LztError as e:
-                log.info(f"payments {path}: {e}")
-                continue
-            rows = data.get("payments") or data.get("items") or data.get("operations")
-            if isinstance(rows, list):
-                return [r for r in rows if isinstance(r, dict)]
-        return []
-
-    async def exchange(self, from_id: int, to_id: int, amount: float) -> dict:
-        data = await self._post("/balance/exchange", {
-            "balance_id_from": int(from_id),
-            "balance_id_to": int(to_id),
-            "amount": float(amount),
-        })
-        self.invalidate()
-        return data
-
-    @staticmethod
-    def _enum(value: str) -> str:
-        return "nomatter" if value == "any" else value
-
-    def _search_params(self, s: dict) -> dict:
-        params: dict = {
-            "pmin": s.get("price_min"),
-            "pmax": s.get("price_max"),
-            "currency": s.get("currency", "usd"),
-            "order_by": "price_to_up",
-            "spam": self._enum(s.get("spam_mode", "no")),
-            "email": self._enum(s.get("mail_mode", "any")),
-            "password": self._enum(s.get("password_mode", "any")),
-        }
-        if s.get("nsb_only") == "1":
-            params["nsb"] = "true"
-
-        allow = [c for c in (s.get("countries") or "").split(",") if c]
-        deny = [c for c in (s.get("deny_countries") or "").split(",") if c]
-        if allow:
-            params["country[]"] = allow
-        if deny:
-            params["not_country[]"] = deny
-
-        params.update(search_query(s))
-        return {k: v for k, v in params.items() if v not in (None, "", [])}
-
-    async def search(self, s: dict) -> list[dict]:
-        data = await self._get("/telegram", self._search_params(s))
-        return data.get("items") or []
-
-    async def item(self, item_id: int) -> dict:
-        data = await self._get(f"/{int(item_id)}")
-        return data.get("item") or data
-
-    async def check_account(self, item_id: int) -> dict:
-        return await self._buy_call(CHECK_PATH.format(int(item_id)), None)
-
-    async def fast_buy(self, item_id: int, price: float,
-                       balance_id: int | None = None) -> dict:
-        payload: dict = {"price": float(price)}
-        if balance_id:
-            payload["balance_id"] = int(balance_id)
-        data = await self._buy_call(BUY_PATH.format(int(item_id)), payload)
-        self.invalidate()
-        return data
-
-    async def reset_authorizations(self, item_id: int) -> dict:
-        return await self._post(RESET_PATH.format(int(item_id)))
-
-    async def qr_login(self, item_id: int, challenge: str) -> dict:
-        return await self._post(QR_PATH.format(int(item_id)),
-                                json={"challenge": challenge})
-
-    async def auth_key(self, item_id: int, hint: dict | None = None) -> str:
-        found = extract_auth_key(hint)
-        if found:
-            return found
+        password = s.get("twofa_password") or db.DEFAULT_2FA
         try:
-            full = await self.item(item_id)
+            await set_2fa(conn, password, p.get("password") or "")
+            data["twofa_ok"] = True
+            data["password"] = password
+            note.append("2fa set")
+        except Exception as e:
+            note.append(f"2fa fail: {e}")
+
+        if s.get("terminate_on_expire") == "1":
+            killed = await reset_others(conn)
+            note.append(f"devices reset {killed}")
+
+        data["spam"] = await spambot_status(conn)
+        data["devices"] = await device_list(conn)
+        data["owned"] = await owned_counts(conn)
+    except SessionDead as e:
+        note.append(str(e))
+        if tries < EXPIRY_RETRY:
+            await db.release_purchase(pid, EXPIRY_RETRY_DELAY, inc_tries=True)
+            return
+        await _fail(bot, p, note)
+        return
+    except Exception as e:
+        note.append(f"clean err: {e}")
+        if tries < SESSION_RETRY:
+            await db.release_purchase(pid, EXPIRY_RETRY_DELAY, inc_tries=True)
+            return
+        await _fail(bot, p, note)
+        return
+    finally:
+        try:
+            await conn.disconnect()
+        except Exception:
+            pass
+
+    session_str = p["session_string"]
+    if s.get("terminate_on_expire") == "1":
+        try:
+            await lzt.reset_authorizations(p["item_id"])
+            note.append("all sessions reset")
         except LztError as e:
-            log.info(f"auth key item {item_id}: {e}")
-            return ""
-        return extract_auth_key(full)
+            note.append(f"reset: {e}")
 
-    async def dc_id(self, item_id: int, hint: dict | None = None) -> int:
-        found = extract_dc_id(hint)
-        if found:
-            return found
+        alive, _me = await check_session(session_str, s.get("proxy", ""))
+        if not alive:
+            try:
+                _c, session_str, _uid = await login_with_auth_key(
+                    p.get("phone"), p.get("password") or "", p["item_id"], lzt,
+                    s.get("proxy", ""), p, p.get("auth_key") or "",
+                    int(p.get("auth_dc") or 0))
+                await db.set_session(pid, session_str)
+                try:
+                    await _c.disconnect()
+                except Exception:
+                    pass
+                note.append("session reissued")
+            except Exception as e:
+                note.append(f"reissue fail: {e}")
+
+    if not note:
+        note.append("cleaned")
+    new_mail = data.get("mail", "") if data.get("mail_ok") else ""
+    await db.close_purchase(pid, "ready", "; ".join(note)[:300], new_mail=new_mail)
+    fresh = await db.get_purchase(pid)
+    if fresh:
+        fresh["password"] = (data.get("password") if data.get("twofa_ok")
+                             else (p.get("password") or ""))
+        await _send_audit(bot, p["tg_id"], fresh, data)
+
+
+async def _cycle(bot, lzt, tg_id: int, s: dict):
+    if s.get("auto_buy") != "1":
+        await db.save_report(tg_id, note="auto-buy off")
+        return
+
+    cap = db.num(s.get("daily_spend_cap"))
+    if cap > 0:
+        spent = await db.spent_today(tg_id)
+        if spent >= cap:
+            await db.save_report(tg_id, note=f"daily cap hit {spent:.2f}/{cap:.2f}")
+            return
+
+    currency = s["currency"]
+    floor_price = db.num(s.get("price_min"))
+
+    snap = await wallet_view.snapshot(lzt, currency)
+    if snap["spendable"] < floor_price:
+        await _balance_warn(bot, tg_id,
+                            f"💳 low balance {fmt_money(snap['total'], currency)}")
+        note = f"low spendable {snap['spendable']:.2f}/{floor_price:.2f}"
+        if snap["error"]:
+            note += f" · {snap['error'][:80]}"
+        await db.save_report(tg_id, note=note)
+        return
+
+    try:
+        items = await lzt.search(s)
+    except LztError as e:
+        await db.save_report(tg_id, error=f"search: {e}")
+        return
+    if not items:
+        await db.save_report(tg_id, note="search returned nothing")
+        return
+
+    reasons: Counter = Counter()
+    bought = 0
+    seen: set[int] = set()
+    stopped = False
+
+    for it in items[:MAX_SCAN]:
         try:
-            full = await self.item(item_id)
-        except LztError:
-            return 0
-        return extract_dc_id(full)
+            live = await db.get_settings(tg_id)
+        except Exception:
+            live = s
+        s = live
+        if s.get("auto_buy") != "1":
+            reasons["stopped"] += 1
+            stopped = True
+            break
+
+        item_id = it.get("item_id")
+        if item_id in seen:
+            continue
+        seen.add(item_id)
+        ok, why = passes(it, s)
+        if not ok:
+            reasons[why] += 1
+            continue
+        try:
+            done, why = await buy_one(bot, lzt, tg_id, it, s, snap)
+        except Exception as e:
+            log.exception(f"buy_one {item_id}: {e}")
+            reasons["error"] += 1
+            continue
+        reasons[why] += 1
+        if done:
+            bought += 1
+        if why == "no_balance":
+            break
+        if why == "check_limit":
+            break
+        if cap > 0 and await db.spent_today(tg_id) >= cap:
+            reasons["cap_hit"] += 1
+            break
+
+    log.info(f"[{tg_id}] scanned={len(items)} bought={bought} stopped={stopped} "
+             f"rejects={dict(reasons.most_common(5))}")
+    await db.save_report(tg_id, scanned=len(items), bought=bought, reasons=dict(reasons))
+
+
+async def buy_loop(bot, lzt):
+    while True:
+        try:
+            now = time.time()
+            owners = await db.all_owners()
+            live_ids = {u["_id"] for u in owners}
+            for stale in [k for k in _NEXT_RUN if k not in live_ids]:
+                _NEXT_RUN.pop(stale, None)
+            for stale in [k for k in _BAL_WARNED if k not in live_ids]:
+                _BAL_WARNED.pop(stale, None)
+            for tg_id in live_ids:
+                if _NEXT_RUN.get(tg_id, 0.0) > now:
+                    continue
+                try:
+                    s = await db.get_settings(tg_id)
+                except Exception as e:
+                    log.warning(f"settings {tg_id}: {e}")
+                    _NEXT_RUN[tg_id] = now + TICK
+                    continue
+                if s["auto_buy"] != "1":
+                    _NEXT_RUN[tg_id] = now + TICK
+                    continue
+                _NEXT_RUN[tg_id] = now + CYCLE_INTERVAL
+                try:
+                    await _cycle(bot, lzt, tg_id, s)
+                except Exception as e:
+                    log.exception(f"cycle {tg_id}: {e}")
+                    await db.save_report(tg_id, error=f"cycle: {e}")
+        except Exception as e:
+            log.exception(f"buy_loop: {e}")
+        await asyncio.sleep(TICK)
+
+
+async def cleaner_loop(bot, lzt):
+    while True:
+        try:
+            for p in await db.due_purchases():
+                try:
+                    await clean_purchase(bot, lzt, p)
+                except Exception as e:
+                    log.exception(f"clean {p.get('_id')}: {e}")
+        except Exception as e:
+            log.exception(f"cleaner_loop: {e}")
+        await asyncio.sleep(15)
