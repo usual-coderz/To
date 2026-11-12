@@ -6,14 +6,14 @@ from aiogram.filters import Command
 from aiogram.types import Message
 
 from app import db, engine
-from app.config import OWNER_IDS
+from app.config import OWNER_IDS, TARGET_HOURS
 from app.deps import lzt
-from app.session_manager import login_with_lzt
+from app.session_manager import login_with_auth_key
 from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import mail_state, pass_state, spam_state
 from app.utils.money import fmt_money
-from app.utils.timeutil import fmt_age, fmt_left
+from app.utils.timeutil import fmt_left
 
 router = Router()
 
@@ -78,7 +78,7 @@ async def cmd_relogin(m: Message):
     s = await db.get_settings(p["tg_id"])
     await m.answer("🔑 logging in…")
     try:
-        c, session_str, _uid = await login_with_lzt(
+        c, session_str, _uid = await login_with_auth_key(
             p["phone"], p.get("password") or "", p["item_id"], lzt, s.get("proxy", ""))
     except Exception as e:
         return await m.answer(f"❌ {html.escape(str(e)[:200])}")
@@ -132,8 +132,9 @@ async def cmd_queue(m: Message):
     for p in rows:
         state = p.get("status") or "?"
         left = fmt_left(p.get("expires_at")) if state in ("queued", "cleaning") else "cleaned"
+        age = db.current_age(p)
         lines.append(f"<code>{tg.esc(p['_id'])}</code> · {tg.esc(p.get('phone') or '—')}"
-                     f" · {state} · {left}")
+                     f" · {state} · age {age:.1f}h · {left}")
     await tg.send(m.bot, m.chat.id, "\n".join(lines))
 
 
@@ -147,9 +148,12 @@ async def cmd_clean(m: Message):
     p = await db.get_purchase(parts[1])
     if not p:
         return await m.answer("❌ purchase not found")
-    if p.get("status") not in ("queued", "cleaning"):
+    if p.get("status") not in ("login", "queued", "cleaning"):
         return await m.answer(f"❌ status is {p.get('status')}")
     await m.answer("🧼 cleaning…")
+    if p.get("status") == "login":
+        await db.queue_purchase(p["_id"], db._now())
+        p = await db.get_purchase(p["_id"])
     await engine.clean_purchase(m.bot, lzt, p)
 
 
@@ -166,7 +170,8 @@ async def cmd_diag(m: Message):
         "<b>diag</b>\n"
         f"auto_buy {s['auto_buy']} · cap ${s['daily_spend_cap']} · spent {spent:.2f}\n"
         f"price {s['price_min']}–{s['price_max']} · currency {s['currency']}\n"
-        f"target age {s['queue_target_hours']}h · queued {queued}\n"
+        f"target {TARGET_HOURS:g}h · min age {s['session_min_hours']}h"
+        f" · max age {s['session_max_hours'] or 'off'} · queued {queued}\n"
         f"2fa <code>{tg.esc(s['twofa_password'])}</code>"
         f" · mail src {s['mail_provider']}\n"
         f"total {fmt_money(snap['total'], s['currency'])}"
@@ -192,7 +197,7 @@ async def cmd_peek(m: Message):
     keep = ("price", "telegram_spam_block", "spam_block", "telegram_email", "email_type",
             "telegram_password", "country", "created_at", "registration_date",
             "telegram_session_age", "session_age", "session_age_period", "nsb",
-            "telegram_auth_key")
+            "telegram_auth_key", "telegram_dc_id")
     lines = [f"{k} = {item.get(k)!r}" for k in keep if k in item]
     lines.append("—")
     lines.append(f"spam_state = {spam_state(item)!r}")
