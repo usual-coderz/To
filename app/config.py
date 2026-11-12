@@ -30,6 +30,9 @@ OWNER_IDS: list[int] = [int(x) for x in os.getenv("OWNER_IDS", "").replace(" ", 
 API_ID: int = _int(os.getenv("API_ID"), 2040)
 API_HASH: str = os.getenv("API_HASH", "b18441a1ff607e10a989891a5462e627")
 
+USERBOT_SESSION: str = os.getenv("USERBOT_SESSION", "").strip()
+USERBOT_PROXY: str = os.getenv("USERBOT_PROXY", "").strip()
+
 MONGO_URI: str = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB: str = os.getenv("MONGO_DB", "accstore")
 
@@ -72,3 +75,28 @@ MAIL_PROVIDERS: str = os.getenv(
     "MAIL_PROVIDERS", "guerrilla,dropmail,mailtm,mailgw,plus").strip().lower()
 
 TWOFA_PASSWORD: str = (os.getenv("TWOFA_PASSWORD", "AccStore2fa").strip() or "AccStore2fa")
+
+SELL_CONCURRENCY: int = _int(os.getenv("SELL_CONCURRENCY"), 2)
+SELL_OTP_TIMEOUT: int = _int(os.getenv("SELL_OTP_TIMEOUT"), 180)
+SELL_REPLY_TIMEOUT: int = _int(os.getenv("SELL_REPLY_TIMEOUT"), 240)
+SELL_CONFIRM_DEFAULT: int = _int(os.getenv("SELL_CONFIRM_DEFAULT"), 600)
+SELL_CONFIRM_MIN: int = 300
+SELL_CONFIRM_MAX: int = 7200
+SELL_MIN_PROFIT: float = _float(os.getenv("SELL_MIN_PROFIT"), 0.0)
+
+PRICE_TTL: float = _float(os.getenv("PRICE_TTL"), 900.0)
+PRICE_REFRESH: float = _float(os.getenv("PRICE_REFRESH"), 240.0)
+CAP_REFRESH: float = _float(os.getenv("CAP_REFRESH"), 120.0)
+
+SCHEDULE_TZ: str = os.getenv("SCHEDULE_TZ", "Asia/Kolkata").strip()
+SCHEDULE_HOURS: tuple[int, ...] = tuple(
+    sorted({_int(x, 0) for x in os.getenv("SCHEDULE_HOURS", "0,12,16").split(",")
+            if x.strip().isdigit() and 0 <= _int(x, 0) <= 23}))
+INR_RATE: float = _float(os.getenv("INR_RATE"), 83.0)
+
+LION_BOT: str = os.getenv("LION_BOT", "TGLionAPI_bot").strip().lstrip("@")
+LION_START: str = os.getenv("LION_START", "Prices").strip()
+TGGET_BOT: str = os.getenv("TGGET_BOT", "tg_get2_bot").strip().lstrip("@")
+CM_BOT: str = os.getenv("CM_BOT", "CM_Receiver6_Bot").strip().lstrip("@")
+
+CAP_COMMANDS: tuple[str, ...] = ("/cap", "/capacity")
