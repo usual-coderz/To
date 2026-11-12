@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, Message
 from app import db, keyboards as kb
 from app.handlers.menu import show
 from app.utils import tg
-from app.utils.texts import filters_text, limits_text
+from app.utils.texts import filters_text
 
 router = Router()
 
@@ -19,11 +19,8 @@ NUMERIC = {
     "price_min": ("Min price", "cheapest allowed account price", 0.01, 10_000.0, 2),
     "price_max": ("Max price", "most expensive allowed account price", 0.01, 10_000.0, 2),
     "session_min_hours": ("Min account age", "0 = any · hours", 0.0, 87_600.0, 1),
-    "queue_target_hours": ("Target age", "hours an account must reach before cleaning",
-                           1.0, 87_600.0, 1),
+    "session_max_hours": ("Max account age", "0 = no cap · hours", 0.0, 87_600.0, 1),
     "daily_spend_cap": ("Daily spend cap", "0 = unlimited", 0.0, 100_000.0, 2),
-    "max_buy_per_cycle": ("Buys per cycle", "1-100", 1.0, 100.0, 0),
-    "poll_interval": ("Poll interval", "seconds, 5-3600", 5.0, 3_600.0, 0),
 }
 
 TEXT_KEYS = {"twofa_password": "8-64 characters, used as the new cloud password"}
@@ -33,29 +30,21 @@ COUNTRY_KEYS = {
     "deny_countries": "these countries are skipped",
 }
 
-LIMIT_KEYS = {
-    "daily_spend_cap", "max_buy_per_cycle", "poll_interval", "queue_target_hours",
-    "terminate_on_expire", "change_mail_on_expire", "mail_provider", "twofa_password",
-}
+AGE_KEYS = {"session_min_hours", "session_max_hours"}
 
 _SPLIT_RE = re.compile(r"[,\s;|]+")
 
 
 def screen_for(key: str) -> str:
-    if key == "auto_buy":
-        return "main"
-    return "limits" if key in LIMIT_KEYS else "filters"
+    return "main" if key == "auto_buy" else "filters"
 
 
 async def render_screen(cq: CallbackQuery, key: str):
-    screen = screen_for(key)
-    if screen == "main":
+    if screen_for(key) == "main":
         from app.handlers.menu import render_menu
         text, markup = await render_menu(cq.from_user.id)
         return await show(cq, text, markup)
     s = await db.get_settings(cq.from_user.id)
-    if screen == "limits":
-        return await show(cq, limits_text(s), kb.limits(s))
     return await show(cq, filters_text(s), kb.filters(s))
 
 
@@ -100,13 +89,6 @@ async def cb_filters(cq: CallbackQuery):
     await cq.answer()
 
 
-@router.callback_query(F.data == "m:limits")
-async def cb_limits(cq: CallbackQuery):
-    s = await db.get_settings(cq.from_user.id)
-    await show(cq, limits_text(s), kb.limits(s))
-    await cq.answer()
-
-
 @router.callback_query(F.data == "m:price")
 async def cb_price(cq: CallbackQuery):
     await show(cq, "<b>Price</b>\nmax picks top, min picks bottom", kb.price())
@@ -138,7 +120,7 @@ async def cb_pass(cq: CallbackQuery):
 @router.callback_query(F.data == "m:mailprov")
 async def cb_mailprov(cq: CallbackQuery):
     await show(cq, "<b>Mail source on clean</b>",
-               kb.pick("s:mail_provider", ["auto", "temp", "native"], "m:limits"))
+               kb.pick("s:mail_provider", ["auto", "temp", "native"]))
     await cq.answer()
 
 
@@ -151,8 +133,6 @@ async def cb_set(cq: CallbackQuery):
     stored = await db.set_setting(cq.from_user.id, key, value)
     if stored is None:
         return await cq.answer("unknown setting", show_alert=True)
-    if key == "queue_target_hours":
-        await db.reschedule(cq.from_user.id, db.num(stored, 24.0))
     await render_screen(cq, key)
     await cq.answer("saved")
 
@@ -246,8 +226,8 @@ async def on_text(m: Message):
     if stored is None:
         return await m.answer("unknown setting")
 
-    if key == "queue_target_hours":
-        await db.reschedule(m.from_user.id, db.num(stored, 24.0))
+    if key in AGE_KEYS:
+        await db.reschedule(m.from_user.id)
 
     note = ""
     if key == "session_min_hours" and 0 < db.num(stored) < 24:
@@ -255,8 +235,6 @@ async def on_text(m: Message):
                 "checked locally after check-account")
 
     s = await db.get_settings(m.from_user.id)
-    screen = screen_for(key)
-    text = limits_text(s) if screen == "limits" else filters_text(s)
-    markup = kb.limits(s) if screen == "limits" else kb.filters(s)
     await _replace(m.bot, hit["chat_id"], hit["message_id"],
-                   f"✅ saved <code>{tg.esc(stored or '-')}</code>{note}\n\n{text}", markup)
+                   f"✅ saved <code>{tg.esc(stored or '-')}</code>{note}\n\n{filters_text(s)}",
+                   kb.filters(s))
