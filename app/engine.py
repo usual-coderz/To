@@ -6,7 +6,7 @@ from collections import Counter
 from app import db
 from app.config import (EXPIRY_RETRY, EXPIRY_RETRY_DELAY, LOGIN_CONCURRENCY, MAX_SCAN,
                         QUEUE_TARGET_HOURS, SESSION_RETRY, TICK)
-from app.lzt import LztError
+from app.lzt import LztError, classify
 from app.mail_engine import IMAPMailClient, TempMailClient
 from app.session_manager import (change_email, check_session, client, device_list,
                                  login_with_lzt, normalize_phone, owned_counts,
@@ -72,9 +72,8 @@ async def _balance_warn(bot, tg_id, text):
 
 def phone_of_item(item: dict) -> str:
     for key in PHONE_KEYS:
-        raw = str(item.get(key) or "").strip()
-        norm = normalize_phone(raw)
-        if norm and 8 <= len(norm) <= 17:
+        norm = normalize_phone(item.get(key) or "")
+        if norm:
             return norm
     data = item.get("loginData")
     if isinstance(data, dict):
@@ -112,10 +111,8 @@ async def _fast_buy(lzt, item_id: int, price: float, balance_id: int):
     if balance_id:
         try:
             return await lzt.fast_buy(item_id, price, balance_id=balance_id)
-        except TypeError:
-            pass
         except LztError as e:
-            if "balance" not in str(e).lower():
+            if "balance_id" not in str(e).lower() and "balance id" not in str(e).lower():
                 raise
             log.info(f"buy {item_id}: balance id rejected ({e}), retrying default")
     return await lzt.fast_buy(item_id, price)
@@ -129,8 +126,9 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
     try:
         chk = await lzt.check_account(item_id)
     except LztError as e:
-        log.info(f"check {item_id}: {e}")
-        return False, "check_failed"
+        why = classify(e)
+        log.info(f"check {item_id}: {why}: {e}")
+        return False, why
 
     fresh = dict(item)
     fresh.update({k: v for k, v in (chk.get("item") or {}).items() if v not in (None, "")})
@@ -161,8 +159,9 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
     try:
         res = await _fast_buy(lzt, item_id, price, int(wallet.get("balance_id") or 0))
     except LztError as e:
-        log.info(f"buy {item_id}: {e}")
-        return False, "buy_failed"
+        why = classify(e)
+        log.info(f"buy {item_id}: {why}: {e}")
+        return False, why
 
     try:
         snap.update(await wallet_view.snapshot(lzt, currency))
@@ -190,11 +189,11 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         return True, "no_phone"
 
     log.info(f"bought {item_id} pid={pid} age={age:.2f}h due_in={due - time.time():.0f}s")
-    _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s))
+    _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s, fresh))
     return True, (soft or "bought")
 
 
-async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s):
+async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s, hint):
     async with _sem():
         await db.set_purchase(pid, password=password)
         last: Exception | None = None
@@ -204,7 +203,7 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s
         for attempt in range(LOGIN_TRIES):
             try:
                 conn, session_str, _uid = await login_with_lzt(
-                    phone, password, item_id, lzt, s.get("proxy", ""))
+                    phone, password, item_id, lzt, s.get("proxy", ""), hint)
                 if not session_str:
                     raise RuntimeError("empty session string")
                 break
@@ -433,6 +432,8 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
         if done:
             bought += 1
         if bought >= max_buys:
+            break
+        if why == "check_limit":
             break
         if cap > 0 and await db.spent_today(tg_id) >= cap:
             reasons["cap_hit"] += 1
