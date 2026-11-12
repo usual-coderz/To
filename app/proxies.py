@@ -1,4 +1,5 @@
 import os
+import time
 import urllib.parse
 
 from app.config import DATA_DIR
@@ -67,33 +68,96 @@ _RAW = """
 216.74.80.63:6635:versenautobot:sliamhxywwwsf
 """
 
+SCHEMES = ("socks5h", "socks5", "socks4", "http", "https")
+DEFAULT_SCHEME = "http"
+
+_COOLDOWN: dict[str, float] = {}
+POOL: list[str] = []
+
 
 def _lines(raw: str) -> list[str]:
-    return [x.strip().strip('"').strip("'") for x in raw.replace(",", "\n").splitlines() if x.strip()]
+    cleaned = raw.replace(",", "\n").replace(";", "\n")
+    return [x.strip().strip('"').strip("'") for x in cleaned.splitlines() if x.strip()]
 
 
-def format_proxy(raw: str) -> str:
-    parts = raw.split(":")
-    if len(parts) == 4:
-        host, port, user, pwd = parts
-        return (f"http://{urllib.parse.quote(user, safe='')}:"
-                f"{urllib.parse.quote(pwd, safe='')}@{host}:{port}")
-    if len(parts) == 2:
-        return f"http://{parts[0]}:{parts[1]}"
-    return raw
+def _split_scheme(raw: str) -> tuple[str, str]:
+    low = raw.lower()
+    for scheme in SCHEMES:
+        prefix = scheme + "://"
+        if low.startswith(prefix):
+            return scheme, raw[len(prefix):]
+    return "", raw
 
 
-def _load() -> list[str]:
+def normalize(raw: str) -> str:
+    text = raw.strip().strip('"').strip("'")
+    if not text:
+        return ""
+
+    scheme, text = _split_scheme(text)
+    scheme = DEFAULT_SCHEME if not scheme else scheme
+    if scheme == "socks5h":
+        scheme = "socks5"
+
+    user = ""
+    pwd = ""
+    if "@" in text:
+        creds, _, text = text.rpartition("@")
+        user, _, pwd = creds.partition(":")
+    else:
+        parts = text.split(":")
+        if len(parts) == 4:
+            text, user, pwd = f"{parts[0]}:{parts[1]}", parts[2], parts[3]
+        elif len(parts) == 3:
+            text, user = f"{parts[0]}:{parts[1]}", parts[2]
+
+    host, _, port = text.rpartition(":")
+    if not host:
+        host, port = text, "80"
+    host = host.strip().strip("[]")
+    if not host:
+        return ""
+    try:
+        number = int(port)
+    except ValueError:
+        return ""
+    if not 1 <= number <= 65535:
+        return ""
+
+    if user:
+        cred = urllib.parse.quote(user, safe="")
+        if pwd:
+            cred += ":" + urllib.parse.quote(pwd, safe="")
+        return f"{scheme}://{cred}@{host}:{number}"
+    return f"{scheme}://{host}:{number}"
+
+
+def _dedupe(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item and item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def _source() -> str:
     path = os.path.join(DATA_DIR, "proxies.txt")
     if os.path.exists(path):
-        with open(path, encoding="utf-8") as f:
-            raw = f.read()
-    else:
-        raw = os.getenv("PROXIES") or _RAW
-    return [format_proxy(x) for x in _lines(raw)]
+        try:
+            with open(path, encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            pass
+    return os.getenv("PROXIES") or _RAW
 
 
-POOL: list[str] = _load()
+def reload() -> list[str]:
+    global POOL
+    POOL = _dedupe([normalize(x) for x in _lines(_source())])
+    _COOLDOWN.clear()
+    return POOL
 
 
 def get(index: int) -> str:
@@ -107,3 +171,27 @@ def rotate(index: int) -> tuple[str, int]:
         return "", index
     i = index % len(POOL)
     return POOL[i], i + 1
+
+
+def mark(proxy: str, seconds: float):
+    if proxy:
+        _COOLDOWN[proxy] = time.time() + max(0.0, float(seconds))
+
+
+def pick(index: int) -> tuple[str, int]:
+    if not POOL:
+        return "", index
+    now = time.time()
+    for _ in range(len(POOL)):
+        proxy, index = rotate(index)
+        if _COOLDOWN.get(proxy, 0.0) <= now:
+            return proxy, index
+    return "", index
+
+
+def healthy() -> list[str]:
+    now = time.time()
+    return [p for p in POOL if _COOLDOWN.get(p, 0.0) <= now]
+
+
+reload()
