@@ -3,7 +3,7 @@ import logging
 import time
 from collections import Counter
 
-from app import db
+from app import db, seller
 from app.config import (CYCLE_INTERVAL, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
                         LOGIN_CONCURRENCY, LOGIN_RETRY_DELAY, LOGIN_TRIES, MAX_SCAN,
                         SESSION_RETRY, TARGET_HOURS, TICK)
@@ -266,8 +266,6 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s
 
 
 async def _mail_client_for(p: dict, s: dict):
-    """Returns (client, address). A temp client exposes create_temp_email, so it
-    can rotate; IMAP cannot and yields remail=None downstream."""
     current = (p.get("mail") or "").split("@")[-1].lower()
     provider = s.get("mail_provider", "auto")
     if provider in ("auto", "native") and p.get("mail") and p.get("mail_password"):
@@ -290,7 +288,6 @@ async def _mail_client_for(p: dict, s: dict):
 
 
 async def _change_mail(conn, mc, addr: str, phone: str) -> tuple[bool, str]:
-    """Single owner of the log/rotate contract. Returns (ok, final_address)."""
     remail = getattr(mc, "create_temp_email", None)
     try:
         await change_email(conn, addr, mc, remail=remail)
@@ -424,10 +421,13 @@ async def clean_purchase(bot, lzt, p: dict):
     new_mail = data.get("mail", "") if data.get("mail_ok") else ""
     await db.close_purchase(pid, "ready", "; ".join(note)[:300], new_mail=new_mail)
     fresh = await db.get_purchase(pid)
-    if fresh:
-        fresh["password"] = (data.get("password") if data.get("twofa_ok")
-                             else (p.get("password") or ""))
-        await _send_audit(bot, p["tg_id"], fresh, data)
+    if not fresh:
+        return
+    fresh["password"] = (data.get("password") if data.get("twofa_ok")
+                         else (p.get("password") or ""))
+    await _send_audit(bot, p["tg_id"], fresh, data)
+    if s.get("auto_sell") == "1":
+        seller.schedule(bot, lzt, fresh)
 
 
 async def _cycle(bot, lzt, tg_id: int, s: dict):
@@ -554,3 +554,17 @@ async def cleaner_loop(bot, lzt):
         except Exception as e:
             log.exception(f"cleaner_loop: {e}")
         await asyncio.sleep(15)
+
+
+async def price_loop():
+    while True:
+        try:
+            for owner in await db.all_owners():
+                s = await db.get_settings(owner["_id"])
+                if s.get("auto_sell") != "1" and not await db.list_receivers(owner["_id"]):
+                    continue
+                from app import pricing
+                await pricing.refresh_all(owner["_id"])
+        except Exception as e:
+            log.exception(f"price_loop: {e}")
+        await asyncio.sleep(120)
