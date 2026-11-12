@@ -12,3 +12,4 @@ cp .env.example .env          # BOT_TOKEN, LZT_TOKEN, OWNER_IDS, MONGO_URI
 pip install -r requirements.txt
 python -m scripts.seed_owner 123456789
 python -m app.main
+python -m scripts.make_session
