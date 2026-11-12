@@ -21,6 +21,8 @@ NUMERIC = {
     "session_min_hours": ("Min account age", "0 = any · hours", 0.0, 87_600.0, 1),
     "session_max_hours": ("Max account age", "0 = no cap · hours", 0.0, 87_600.0, 1),
     "daily_spend_cap": ("Daily spend cap", "0 = unlimited", 0.0, 100_000.0, 2),
+    "sell_confirm_seconds": ("Confirm window", "300-7200 seconds", 300.0, 7200.0, 0),
+    "sell_min_price": ("Min sell price", "0 = sell anything", 0.0, 10_000.0, 2),
 }
 
 TEXT_KEYS = {"twofa_password": "8-64 characters, used as the new cloud password"}
@@ -32,11 +34,13 @@ COUNTRY_KEYS = {
 
 AGE_KEYS = {"session_min_hours", "session_max_hours"}
 
+MAIN_KEYS = {"auto_buy", "auto_sell"}
+
 _SPLIT_RE = re.compile(r"[,\s;|]+")
 
 
 def screen_for(key: str) -> str:
-    return "main" if key == "auto_buy" else "filters"
+    return "main" if key in MAIN_KEYS else "filters"
 
 
 async def render_screen(cq: CallbackQuery, key: str):
@@ -68,7 +72,10 @@ def _pop_pending(uid: int) -> dict | None:
 
 
 def _fmt(key: str, value: float) -> str:
-    return f"{value:.{NUMERIC[key][4]}f}".rstrip("0").rstrip(".") or "0"
+    places = NUMERIC[key][4]
+    if places == 0:
+        return str(int(value))
+    return f"{value:.{places}f}".rstrip("0").rstrip(".") or "0"
 
 
 async def _replace(bot, chat_id: int, message_id: int, text: str, markup):
@@ -164,7 +171,9 @@ async def cb_input(cq: CallbackQuery):
 async def cb_cancel(cq: CallbackQuery):
     PENDING.pop(cq.from_user.id, None)
     from app.handlers.wallet import EXCH
+    from app.handlers.receivers import PENDING as RPENDING
     EXCH.pop(cq.from_user.id, None)
+    RPENDING.pop(cq.from_user.id, None)
     s = await db.get_settings(cq.from_user.id)
     await show(cq, filters_text(s), kb.filters(s))
     await cq.answer("cancelled")
@@ -174,7 +183,9 @@ async def cb_cancel(cq: CallbackQuery):
 async def cmd_cancel(m: Message):
     PENDING.pop(m.from_user.id, None)
     from app.handlers.wallet import EXCH
+    from app.handlers.receivers import PENDING as RPENDING
     EXCH.pop(m.from_user.id, None)
+    RPENDING.pop(m.from_user.id, None)
     s = await db.get_settings(m.from_user.id)
     await m.answer("cancelled", reply_markup=kb.filters(s))
 
