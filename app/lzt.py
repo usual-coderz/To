@@ -12,12 +12,11 @@ from app.utils.money import parse_balances, parse_user, same_currency
 log = logging.getLogger("lzt")
 
 PAYMENT_PATHS = ("/user/payments", "/payments", "/balance/payments")
-AUTH_KEY_FIELDS = ("auth_key", "telegram_auth_key", "telegram_session", "session",
-                   "authKey")
-LOGIN_DATA_KEY_FIELDS = ("auth_key", "telegram_auth_key", "authKey")
+AUTH_KEY_FIELDS = ("telegram_auth_key", "auth_key", "authKey", "telegram_session",
+                   "session")
+DC_KEYS = ("telegram_dc_id", "dc_id", "dcId")
 
 RESET_PATH = "/{}/telegram-reset-authorizations"
-CODE_PATH = "/{}/telegram-login-code"
 QR_PATH = "/{}/qr-login"
 CHECK_PATH = "/{}/check-account"
 BUY_PATH = "/{}/fast-buy"
@@ -81,6 +80,20 @@ def _long(value) -> str:
     return ""
 
 
+def _deep_long(item: dict, keys: tuple[str, ...]) -> str:
+    for key in keys:
+        found = _long(item.get(key))
+        if found:
+            return found
+    data = item.get("loginData")
+    if isinstance(data, dict):
+        for key in keys:
+            found = _long(data.get(key))
+            if found:
+                return found
+    return ""
+
+
 class LztClient:
     def __init__(self, token: str = LZT_TOKEN):
         self._token = token
@@ -90,7 +103,7 @@ class LztClient:
             timeout=HTTP_TIMEOUT,
             headers={"Authorization": f"Bearer {token}",
                      "Accept": "application/json",
-                     "User-Agent": "AccStore/2.3"},
+                     "User-Agent": "AccStore/3.0"},
         )
 
     async def close(self):
@@ -278,44 +291,45 @@ class LztClient:
         return await self._post(QR_PATH.format(int(item_id)),
                                 json={"challenge": challenge})
 
-    async def telegram_login_code(self, item_id: int) -> tuple[str, int]:
-        try:
-            data = await self._get(CODE_PATH.format(int(item_id)))
-        except LztError as e:
-            if e.status == 404:
-                return "", 0
-            raise
-        codes = data.get("codes")
-        if not isinstance(codes, dict):
-            return "", 0
-        code = str(codes.get("code") or "").strip()
-        try:
-            date = int(codes.get("date") or 0)
-        except (TypeError, ValueError):
-            date = 0
-        if not code:
-            return "", 0
-        return code, date
-
     async def auth_key(self, item_id: int, hint: dict | None = None) -> str:
         item = hint if isinstance(hint, dict) and hint else None
-        if item is None:
-            try:
-                item = await self.item(item_id)
-            except LztError as e:
-                log.info(f"auth key item {item_id}: {e}")
-                return ""
-
-        for key in AUTH_KEY_FIELDS:
-            found = _long(item.get(key))
+        if item is not None:
+            found = _deep_long(item, AUTH_KEY_FIELDS)
             if found:
                 return found
+        try:
+            full = await self.item(item_id)
+        except LztError as e:
+            log.info(f"auth key item {item_id}: {e}")
+            return ""
+        return _deep_long(full, AUTH_KEY_FIELDS)
 
-        data = item.get("loginData")
-        if isinstance(data, dict):
-            for key in LOGIN_DATA_KEY_FIELDS:
-                found = _long(data.get(key))
-                if found:
-                    return found
-
-        return _long(item.get("login"))
+    async def dc_id(self, item_id: int, hint: dict | None = None) -> int:
+        sources = []
+        if isinstance(hint, dict):
+            sources.append(hint)
+            if isinstance(hint.get("loginData"), dict):
+                sources.append(hint["loginData"])
+        for src in sources:
+            for key in DC_KEYS:
+                try:
+                    value = int(src.get(key) or 0)
+                except (TypeError, ValueError):
+                    value = 0
+                if value:
+                    return value
+        try:
+            full = await self.item(item_id)
+        except LztError:
+            return 0
+        for src in (full, full.get("loginData") or {}):
+            if not isinstance(src, dict):
+                continue
+            for key in DC_KEYS:
+                try:
+                    value = int(src.get(key) or 0)
+                except (TypeError, ValueError):
+                    value = 0
+                if value:
+                    return value
+        return 0
