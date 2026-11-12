@@ -112,6 +112,7 @@ class TempMailClient:
         self._url_token = ""
         self._base = ""
         self._provider = ""
+        self._seen: set[str] = set()
         self._index = random.randrange(max(1, len(proxies.POOL) or 1))
         self._clients: dict[str, httpx.AsyncClient] = {}
 
@@ -281,6 +282,8 @@ class TempMailClient:
         exclude = {d.lower().strip() for d in (exclude_domains or []) if d}
         order = [p for p in PROVIDERS if not _is_down(p)] or list(PROVIDERS)
 
+        self._seen.clear()
+
         for name in order:
             address = ""
             try:
@@ -315,6 +318,9 @@ class TempMailClient:
         target = target_email or self._email
         if not target:
             raise MailError("no active mailbox")
+        if target != self._email:
+            self._email = target
+            self._seen.clear()
         end = time.time() + timeout
         while time.time() < end:
             try:
@@ -327,21 +333,17 @@ class TempMailClient:
         raise TimeoutError(f"no code in {timeout}s for {target}")
 
     async def _check_inbox(self, target: str, expected_length=None):
+        # exactly one provider is queried per poll; no cross-provider fallthrough,
+        # so a guerrilla mailbox never gets looked up on tempmail.plus.
         want = expected_length or CODE_LEN
         if self._provider == "guerrilla" and self._sid:
-            code = await self._check_guerrilla(want)
-            if code:
-                return code
+            return await self._check_guerrilla(want)
         if self._provider == "dropmail" and self._sid:
-            code = await self._check_dropmail(want)
-            if code:
-                return code
-        if self._token and self._base and not _is_down(self._provider):
-            code = await self._check_api(self._base, self._provider, want)
-            if code:
-                return code
-        if not _is_down("plus"):
+            return await self._check_dropmail(want)
+        if self._provider == "plus":
             return await self._check_plus(target, want)
+        if self._token and self._base and not _is_down(self._provider):
+            return await self._check_api(self._base, self._provider, want)
         return None
 
     async def _check_guerrilla(self, expected_length=None):
@@ -357,20 +359,22 @@ class TempMailClient:
             return None
         for m in (r.json() or {}).get("list", []) or []:
             mid = m.get("mail_id")
-            if not mid:
+            if not mid or mid in self._seen:
                 continue
+            self._seen.add(mid)
             try:
                 full = await self._request(
                     "GET", f"{GUERRILLA}?f=fetch_email&email_id={mid}"
                            f"&sid_token={self._sid}")
-            except MailError:
+            except MailError as e:
+                log.info(f"guerrilla fetch {mid}: {e}")
                 continue
             if full.status_code != 200:
                 continue
             data = full.json() or {}
-            code = extract_telegram_code(
-                f"{data.get('mail_subject', '')} {data.get('mail_body', '')}",
-                expected_length)
+            text = f"{data.get('mail_subject', '')} {data.get('mail_body', '')}"
+            log.info(f"mail {mid} via guerrilla: {text[:160]!r}")
+            code = extract_telegram_code(text, expected_length)
             if code:
                 return code
         return None
@@ -389,8 +393,12 @@ class TempMailClient:
             return None
         session = ((r.json() or {}).get("data") or {}).get("session") or {}
         for m in session.get("mails") or []:
-            code = extract_telegram_code(
-                f"{m.get('headerSubject', '')} {m.get('text', '')}", expected_length)
+            text = f"{m.get('headerSubject', '')} {m.get('text', '')}"
+            key = f"{m.get('fromAddr', '')}|{text[:80]}"
+            if key in self._seen:
+                continue
+            self._seen.add(key)
+            code = extract_telegram_code(text, expected_length)
             if code:
                 return code
         return None
@@ -411,8 +419,9 @@ class TempMailClient:
             return None
         for m in (r.json() or {}).get("hydra:member", []):
             mid = m.get("id")
-            if not mid:
+            if not mid or mid in self._seen:
                 continue
+            self._seen.add(mid)
             try:
                 full = await self._request("GET", f"{base}/messages/{mid}", headers=headers)
             except MailError:
@@ -438,8 +447,9 @@ class TempMailClient:
             return None
         for m in (r.json() or {}).get("mail_list", []) or []:
             mid = m.get("id")
-            if mid is None:
+            if mid is None or str(mid) in self._seen:
                 continue
+            self._seen.add(str(mid))
             try:
                 full = await self._request("GET", f"{PLUS}/mails/{mid}?email={target}&epin=")
             except MailError:
