@@ -266,6 +266,8 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s
 
 
 async def _mail_client_for(p: dict, s: dict):
+    """Returns (client, address). A temp client exposes create_temp_email, so it
+    can rotate; IMAP cannot and yields remail=None downstream."""
     current = (p.get("mail") or "").split("@")[-1].lower()
     provider = s.get("mail_provider", "auto")
     if provider in ("auto", "native") and p.get("mail") and p.get("mail_password"):
@@ -280,9 +282,24 @@ async def _mail_client_for(p: dict, s: dict):
         addr = await mc.create_temp_email(exclude_domains=[current] if current else None)
     except Exception as e:
         log.info(f"temp mail: {e}")
+        addr = ""
+    if not addr:
         await mc.close()
         return None, ""
     return mc, addr
+
+
+async def _change_mail(conn, mc, addr: str, phone: str) -> tuple[bool, str]:
+    """Single owner of the log/rotate contract. Returns (ok, final_address)."""
+    remail = getattr(mc, "create_temp_email", None)
+    try:
+        await change_email(conn, addr, mc, remail=remail)
+    except Exception as e:
+        log.info(f"mail change {phone}: {e}")
+        return False, ""
+    final = getattr(mc, "current_email", "") or addr
+    log.info(f"mail changed {phone} -> {final}")
+    return True, final
 
 
 async def _send_audit(bot, tg_id, p, data):
@@ -322,19 +339,23 @@ async def clean_purchase(bot, lzt, p: dict):
         if not await conn.is_user_authorized():
             raise SessionDead("session dead")
 
-        mc, addr = await _mail_client_for(p, s)
-        try:
-            if addr and s.get("change_mail_on_expire") == "1":
-                try:
-                    await change_email(conn, addr, mc)
-                    data["mail_ok"] = True
-                    data["mail"] = addr
-                    note.append("mail changed")
-                except Exception as e:
-                    note.append(f"mail fail: {e}")
-        finally:
-            if mc is not None and hasattr(mc, "close"):
-                await mc.close()
+        if s.get("change_mail_on_expire") == "1":
+            mc, addr = await _mail_client_for(p, s)
+            try:
+                if addr:
+                    ok, final = await _change_mail(conn, mc, addr, p.get("phone") or "")
+                    if ok:
+                        data["mail_ok"] = True
+                        data["mail"] = final
+                        note.append("mail changed")
+                    else:
+                        note.append("mail fail")
+                else:
+                    note.append("mail fail: no mailbox")
+                    log.info(f"mail change {p.get('phone')}: no mailbox")
+            finally:
+                if mc is not None and hasattr(mc, "close"):
+                    await mc.close()
 
         password = s.get("twofa_password") or db.DEFAULT_2FA
         try:
@@ -344,6 +365,7 @@ async def clean_purchase(bot, lzt, p: dict):
             note.append("2fa set")
         except Exception as e:
             note.append(f"2fa fail: {e}")
+            log.info(f"2fa {p.get('phone')}: {e}")
 
         if s.get("terminate_on_expire") == "1":
             killed = await reset_others(conn)
@@ -395,6 +417,7 @@ async def clean_purchase(bot, lzt, p: dict):
                 note.append("session reissued")
             except Exception as e:
                 note.append(f"reissue fail: {e}")
+                log.info(f"reissue {p.get('phone')}: {e}")
 
     if not note:
         note.append("cleaned")
