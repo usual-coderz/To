@@ -6,7 +6,7 @@ from collections import Counter
 from app import db
 from app.config import (CYCLE_INTERVAL, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
                         LOGIN_CONCURRENCY, MAX_SCAN, SESSION_RETRY, TARGET_HOURS, TICK)
-from app.lzt import LztError, classify
+from app.lzt import LztError, classify, extract_auth_key, extract_dc_id
 from app.mail_engine import IMAPMailClient, TempMailClient
 from app.session_manager import (change_email, check_session, client, device_list,
                                  login_with_auth_key, normalize_phone, owned_counts,
@@ -29,9 +29,9 @@ _SEM: asyncio.Semaphore | None = None
 
 PHONE_KEYS = ("login", "telegram_login", "phone", "telegram_phone")
 
-LOGIN_TRIES = 3
+LOGIN_TRIES = 2
 
-CHECK_SOFT = ("no_balance",)
+CHECK_SOFT = ("check_failed",)
 
 
 class SessionDead(RuntimeError):
@@ -95,18 +95,32 @@ def password_of_item(item: dict) -> str:
     return ""
 
 
-async def _resolve_login(lzt, item_id: int, fresh: dict, res: dict) -> tuple[str, str]:
+def _merge(base: dict, extra) -> dict:
+    if isinstance(extra, dict):
+        for key, value in extra.items():
+            if value not in (None, ""):
+                base[key] = value
+    return base
+
+
+async def _resolve_login(lzt, item_id: int, fresh: dict, res: dict):
     bought = res.get("item") or {}
+    merged = _merge(dict(fresh), bought)
+
     phone = phone_of_item(bought) or phone_of_item(fresh)
     password = password_of_item(bought) or password_of_item(fresh)
-    if phone and password:
-        return phone, password
-    try:
-        full = await lzt.item(item_id)
-    except LztError as e:
-        log.info(f"item {item_id}: {e}")
-        return phone, password
-    return phone or phone_of_item(full), password or password_of_item(full)
+
+    if not (phone and password):
+        try:
+            full = await lzt.item(item_id)
+        except LztError as e:
+            log.info(f"item {item_id}: {e}")
+            full = {}
+        merged = _merge(merged, full)
+        phone = phone or phone_of_item(full)
+        password = password or password_of_item(full)
+
+    return phone, password, merged
 
 
 async def _fast_buy(lzt, item_id: int, price: float, balance_id: int):
@@ -131,13 +145,14 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
     except LztError as e:
         why = classify(e)
         log.info(f"check {item_id}: {why}: {e}")
+        if why == "no_balance":
+            return False, "no_balance"
         if why not in CHECK_SOFT:
             return False, why
 
-    fresh = dict(item)
-    fresh.update({k: v for k, v in (checked.get("item") or {}).items() if v not in (None, "")})
-
+    fresh = _merge(dict(item), checked.get("item") or {})
     price = db.num(fresh.get("price"), search_price)
+
     ok, why = passes(fresh, s, authoritative=True)
     if not ok:
         log.info(f"skip {item_id}: {why}")
@@ -172,7 +187,9 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
     except Exception:
         pass
 
-    phone, password = await _resolve_login(lzt, item_id, fresh, res)
+    phone, password, merged = await _resolve_login(lzt, item_id, fresh, res)
+    auth_key = extract_auth_key(merged)
+    auth_dc = extract_dc_id(merged)
     country = country_of(fresh)
     age = age_for_queue(fresh)
     created = account_created_ts(fresh) or 0
@@ -180,8 +197,9 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
 
     pid = await db.add_purchase(
         tg_id, item_id, phone, country, price, password=password,
-        expires_at=due, age_at_buy_hours=age,
-        account_created_ts=created, spam_flag=(soft == "spam_flag"), note="bought")
+        expires_at=due, age_at_buy_hours=age, account_created_ts=created,
+        auth_key=auth_key, auth_dc=auth_dc, spam_flag=(soft == "spam_flag"),
+        note="bought")
 
     await _notify(bot, tg_id, bought_line(country))
 
@@ -191,12 +209,15 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         await _notify(bot, tg_id, failed_line(country, "no phone on item"))
         return True, "no_phone"
 
-    log.info(f"bought {item_id} pid={pid} age={age:.2f}h mature={age >= TARGET_HOURS}")
-    _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s, fresh))
+    log.info(f"bought {item_id} pid={pid} age={age:.2f}h key={'yes' if auth_key else 'no'}"
+             f" mature={age >= TARGET_HOURS}")
+    _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s,
+                       merged, auth_key, auth_dc))
     return True, (soft or "bought")
 
 
-async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s, hint):
+async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s, hint,
+                      auth_key="", auth_dc=0):
     async with _sem():
         await db.set_purchase(pid, password=password)
         last: Exception | None = None
@@ -206,7 +227,8 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s
         for attempt in range(LOGIN_TRIES):
             try:
                 conn, session_str, _uid = await login_with_auth_key(
-                    phone, password, item_id, lzt, s.get("proxy", ""), hint)
+                    phone, password, item_id, lzt, s.get("proxy", ""), hint,
+                    auth_key, auth_dc)
                 if not session_str:
                     raise RuntimeError("empty session string")
                 break
@@ -214,7 +236,7 @@ async def _login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s
                 last = e
                 log.info(f"login {item_id} attempt {attempt + 1}/{LOGIN_TRIES}: {e}")
                 if attempt + 1 < LOGIN_TRIES:
-                    await asyncio.sleep(15 + attempt * 15)
+                    await asyncio.sleep(10)
         else:
             await db.close_purchase(pid, "login_failed", str(last)[:200])
             await _notify(bot, tg_id, failed_line(country, str(last)))
@@ -362,7 +384,8 @@ async def clean_purchase(bot, lzt, p: dict):
             try:
                 _c, session_str, _uid = await login_with_auth_key(
                     p.get("phone"), p.get("password") or "", p["item_id"], lzt,
-                    s.get("proxy", ""))
+                    s.get("proxy", ""), p, p.get("auth_key") or "",
+                    int(p.get("auth_dc") or 0))
                 await db.set_session(pid, session_str)
                 try:
                     await _c.disconnect()
@@ -439,6 +462,8 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
         reasons[why] += 1
         if done:
             bought += 1
+        if why == "no_balance":
+            break
         if why == "check_limit":
             break
         if cap > 0 and await db.spent_today(tg_id) >= cap:
