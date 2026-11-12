@@ -41,6 +41,8 @@ def classify(e: LztError) -> str:
         return "check_limit"
     if "is sold" in text or "sold." in text:
         return "sold"
+    if "permission to view" in text or "not available" in text:
+        return "sold"
     if "removed" in text or "deleted" in text:
         return "deleted"
     if "blacklist" in text:
