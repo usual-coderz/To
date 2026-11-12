@@ -1,0 +1,197 @@
+import asyncio
+import logging
+import time
+
+from telethon import functions
+from telethon.sessions import StringSession
+
+from app.config import API_HASH, API_ID, USERBOT_PROXY, USERBOT_SESSION
+from app.session_manager import _proxy
+
+log = logging.getLogger("hub")
+
+_client = None
+_lock = asyncio.Lock()
+_LAST: dict[str, int] = {}
+
+
+def running() -> bool:
+    return _client is not None
+
+
+async def start():
+    global _client
+    if not USERBOT_SESSION:
+        log.warning("USERBOT_SESSION missing, receiver hub disabled")
+        return None
+    async with _lock:
+        if _client is not None:
+            return _client
+        from telethon import TelegramClient
+        client = TelegramClient(
+            StringSession(USERBOT_SESSION), API_ID, API_HASH,
+            proxy=_proxy(USERBOT_PROXY), connection_retries=3, retry_delay=2,
+            request_retries=3, timeout=30, flood_sleep_threshold=90,
+            device_model="AccStore", system_version="2.1", app_version="2.1")
+        await client.connect()
+        if not await client.is_user_authorized():
+            log.error("userbot session not authorized")
+            await client.disconnect()
+            return None
+        _client = client
+        log.info("receiver hub online")
+        return client
+
+
+async def stop():
+    global _client
+    async with _lock:
+        if _client is None:
+            return
+        try:
+            await _client.disconnect()
+        except Exception:
+            pass
+        _client = None
+
+
+def _stamp(key: str) -> int:
+    return _LAST.get(key, 0)
+
+
+def _mark(key: str):
+    _LAST[key] = int(time.time() * 1000)
+
+
+async def _resolve(username: str):
+    client = _client
+    if client is None:
+        return None
+    try:
+        return await client.get_entity("@" + str(username).lstrip("@"))
+    except Exception as e:
+        log.info(f"resolve {username}: {e}")
+        return None
+
+
+async def send(username: str, text: str) -> bool:
+    client = _client
+    if client is None:
+        return False
+    entity = await _resolve(username)
+    if entity is None:
+        return False
+    try:
+        await client.send_message(entity, text)
+        return True
+    except Exception as e:
+        log.info(f"send {username}: {e}")
+        return False
+
+
+async def drain(username: str) -> None:
+    client = _client
+    if client is None:
+        return
+    entity = await _resolve(username)
+    if entity is None:
+        return
+    try:
+        msgs = await client.get_messages(entity, limit=1)
+        if msgs:
+            _mark(username)
+    except Exception:
+        pass
+
+
+async def wait_reply(username: str, timeout: float, since: int | None = None) -> str:
+    client = _client
+    if client is None:
+        return ""
+    entity = await _resolve(username)
+    if entity is None:
+        return ""
+    floor = _stamp(username) if since is None else since
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            msgs = await client.get_messages(entity, limit=10)
+        except Exception as e:
+            log.info(f"poll {username}: {e}")
+            await asyncio.sleep(2.0)
+            continue
+        for m in reversed(msgs or []):
+            if int(m.id or 0) <= floor:
+                continue
+            text = (m.raw_text or "").strip()
+            if not text:
+                continue
+            _mark(username)
+            return text
+        await asyncio.sleep(1.5)
+    return ""
+
+
+async def start_bot(username: str, param: str = "") -> bool:
+    client = _client
+    if client is None:
+        return False
+    entity = await _resolve(username)
+    if entity is None:
+        return False
+    try:
+        if param:
+            await client(functions.messages.StartBotRequest(
+                bot=entity, peer=entity, start_param=param))
+        else:
+            await client(functions.messages.StartBotRequest(bot=entity, peer=entity))
+        return True
+    except Exception as e:
+        log.info(f"start_bot {username}: {e}")
+        return False
+
+
+async def command(username: str, cmd: str, timeout: float = 40.0) -> str:
+    if _client is None:
+        return ""
+    await drain(username)
+    since = _stamp(username)
+    if not await send(username, cmd):
+        return ""
+    return await wait_reply(username, timeout, since)
+
+
+async def send_and_wait(username: str, text: str, timeout: float) -> str:
+    if _client is None:
+        return ""
+    await drain(username)
+    since = _stamp(username)
+    if not await send(username, text):
+        return ""
+    return await wait_reply(username, timeout, since)
+
+
+async def read_last(username: str) -> str:
+    client = _client
+    if client is None:
+        return ""
+    entity = await _resolve(username)
+    if entity is None:
+        return ""
+    try:
+        msgs = await client.get_messages(entity, limit=3)
+    except Exception:
+        return ""
+    parts = [(m.raw_text or "").strip() for m in reversed(msgs or []) if m.raw_text]
+    return "\n".join(parts)
+
+
+async def wait_code(username: str, timeout: float) -> str:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        text = await read_last(username)
+        digits = "".join(ch for ch in text if ch.isdigit())
+        if 4 <= len(digits) <= 8:
+            return digits[:6]
+        await asyncio.sleep(2.0)
+    return ""
