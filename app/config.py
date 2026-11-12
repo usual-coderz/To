@@ -87,6 +87,9 @@ SELL_MIN_PROFIT: float = _float(os.getenv("SELL_MIN_PROFIT"), 0.0)
 PRICE_TTL: float = _float(os.getenv("PRICE_TTL"), 900.0)
 PRICE_REFRESH: float = _float(os.getenv("PRICE_REFRESH"), 240.0)
 CAP_REFRESH: float = _float(os.getenv("CAP_REFRESH"), 120.0)
+PROBE_TIMEOUT: float = _float(os.getenv("PROBE_TIMEOUT"), 25.0)
+
+CAP_COMMAND: str = "/cap"
 
 SCHEDULE_TZ: str = os.getenv("SCHEDULE_TZ", "Asia/Kolkata").strip()
 SCHEDULE_HOURS: tuple[int, ...] = tuple(
@@ -98,5 +101,3 @@ LION_BOT: str = os.getenv("LION_BOT", "TGLionAPI_bot").strip().lstrip("@")
 LION_START: str = os.getenv("LION_START", "Prices").strip()
 TGGET_BOT: str = os.getenv("TGGET_BOT", "tg_get2_bot").strip().lstrip("@")
 CM_BOT: str = os.getenv("CM_BOT", "CM_Receiver6_Bot").strip().lstrip("@")
-
-CAP_COMMANDS: tuple[str, ...] = ("/cap", "/capacity")
