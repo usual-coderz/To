@@ -31,6 +31,8 @@ PHONE_KEYS = ("login", "telegram_login", "phone", "telegram_phone")
 
 LOGIN_TRIES = 3
 
+CHECK_SOFT = ("no_balance",)
+
 
 class SessionDead(RuntimeError):
     pass
@@ -123,15 +125,17 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
     search_price = db.num(item.get("price"))
     currency = s["currency"]
 
+    checked = {}
     try:
-        chk = await lzt.check_account(item_id)
+        checked = await lzt.check_account(item_id)
     except LztError as e:
         why = classify(e)
         log.info(f"check {item_id}: {why}: {e}")
-        return False, why
+        if why not in CHECK_SOFT:
+            return False, why
 
     fresh = dict(item)
-    fresh.update({k: v for k, v in (chk.get("item") or {}).items() if v not in (None, "")})
+    fresh.update({k: v for k, v in (checked.get("item") or {}).items() if v not in (None, "")})
 
     price = db.num(fresh.get("price"), search_price)
     ok, why = passes(fresh, s, authoritative=True)
