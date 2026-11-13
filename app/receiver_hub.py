@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import random
 import time
 
 from telethon import functions
@@ -176,14 +177,17 @@ async def start_bot(username: str, param: str = "") -> bool:
     if entity is None:
         return False
     try:
-        if param:
-            await client(functions.messages.StartBotRequest(
-                bot=entity, peer=entity, start_param=param))
-        else:
-            await client(functions.messages.StartBotRequest(bot=entity, peer=entity))
+        await client(functions.messages.StartBotRequest(
+            bot=entity, peer=entity, random_id=random.getrandbits(63),
+            start_param=param or ""))
         return True
     except Exception as e:
         log.info(f"start_bot {username}: {e}")
+    try:
+        await client.send_message(entity, "/start" + (f" {param}" if param else ""))
+        return True
+    except Exception as e:
+        log.info(f"start_fallback {username}: {e}")
         return False
 
 
