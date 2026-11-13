@@ -71,6 +71,28 @@ async def capacity_all(tg_id: int) -> dict:
     return out
 
 
+async def capacity_sweep(tg_id: int) -> dict:
+    rows = await db.list_receivers(tg_id, enabled_only=True)
+    if not receiver_hub.running():
+        await receiver_hub.start()
+    out = {"total": len(rows), "ok": 0, "missing": 0, "empty": []}
+    for receiver in rows:
+        try:
+            cap = await pricing.record_capacity(receiver)
+        except Exception as e:
+            log.info(f"cap sweep {receiver.get('username')}: {e}")
+            out["missing"] += 1
+            out["empty"].append(f"@{receiver.get('username')} error {e}"[:90])
+            continue
+        if cap >= 0:
+            out["ok"] += 1
+        else:
+            out["missing"] += 1
+            out["empty"].append(f"@{receiver.get('username')} no cap answer")
+        await asyncio.sleep(2.0)
+    return out
+
+
 async def sync(tg_id: int) -> dict:
     return await pricing.refresh_all(tg_id)
 
