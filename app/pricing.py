@@ -12,46 +12,54 @@ TIE_RANK = {"tgget": 0, "lion": 1, "cm": 2}
 LION = "lion"
 
 _FLAG = "[\U0001F1E6-\U0001F1FF]{2}"
-_LINE = re.compile(
-    rf"(?:{_FLAG}\s*)?\b([A-Z]{{2}})\b\s*(?:\+\d{{1,4}})?\s*(?:→|->|=>|:|=|—|–|\|)?\s*"
-    r"\$?\s*(\d{1,4}(?:[.,]\d{1,2})?)")
-_PLAIN = re.compile(r"(?<![\w$])([A-Z]{2})\s+\$\s*(\d{1,4}(?:[.,]\d{1,2})?)")
+_OFFER = re.compile(
+    rf"(?P<flag>{_FLAG})?\s*\b(?P<cc>[A-Z]{{2}})\b\s*\+?(?P<dial>\d{{1,4}})?"
+    r"\s*(?:→|->|=>|:|=|—|–|\|)?\s*\$\s*(?P<price>\d{1,4}(?:[.,]\d{1,2})?)")
+_LOOSE = re.compile(
+    rf"(?P<flag>{_FLAG})?\s*\b(?P<cc>[A-Z]{{2}})\b\s*\+?(?P<dial>\d{{1,4}})?"
+    r"[^\n\d$]{0,8}(?P<price>\d{1,4}(?:[.,]\d{1,2})?)")
 _CAP = re.compile(
     r"(?:cap(?:acity)?|available|free|slots?|stock|limit|qty)\D{0,12}(\d{1,6})", re.I)
 _CONFIRM = re.compile(r"(\d{3,5})\s*(?:s\b|sec|second)", re.I)
 
 
-def _price(raw: str) -> float:
+def _num(raw: str) -> float:
     try:
-        return float(raw.replace(",", "."))
+        return float(str(raw).replace(",", "."))
     except ValueError:
         return 0.0
 
 
+def _dial(raw) -> str:
+    text = "".join(ch for ch in str(raw or "") if ch.isdigit())
+    return text[:4]
+
+
+def parse_offers(text: str) -> list[dict]:
+    found: dict[str, dict] = {}
+    source = text or ""
+    for rx in (_OFFER, _LOOSE):
+        for line in source.splitlines():
+            clean = line.strip()
+            if not clean or "$" not in clean and "→" not in clean:
+                continue
+            for m in rx.finditer(clean):
+                cc = m.group("cc").upper()
+                price = _num(m.group("price"))
+                if not price or not countries.name_of(cc):
+                    continue
+                if cc in found and found[cc]["price"] >= price:
+                    continue
+                flag = m.group("flag") or countries.flag_of(cc)
+                found[cc] = {"country": cc, "flag": flag,
+                             "dial": _dial(m.group("dial")), "price": price}
+        if found:
+            break
+    return sorted(found.values(), key=lambda o: -o["price"])
+
+
 def parse_prices(text: str) -> dict:
-    out: dict = {}
-    for line in (text or "").splitlines():
-        clean = line.strip()
-        if not clean:
-            continue
-        if "$" not in clean and "→" not in clean and "->" not in clean:
-            continue
-        for m in _LINE.finditer(clean):
-            cc = m.group(1).upper()
-            value = _price(m.group(2))
-            if not value or not countries.name_of(cc):
-                continue
-            if cc in out and out[cc] >= value:
-                continue
-            out[cc] = value
-    if out:
-        return out
-    for m in _PLAIN.finditer(text or ""):
-        cc = m.group(1).upper()
-        value = _price(m.group(2))
-        if value and countries.name_of(cc):
-            out.setdefault(cc, value)
-    return out
+    return {o["country"]: o["price"] for o in parse_offers(text)}
 
 
 def parse_cap(text: str) -> int:
@@ -77,15 +85,20 @@ def kind_of(username: str) -> str:
 
 
 def _blank() -> dict:
-    return {"cap": -1, "confirm": 0, "prices": {}, "replies": 0}
+    return {"cap": -1, "confirm": 0, "offers": [], "replies": 0, "raw": ""}
 
 
 def _absorb(out: dict, reply: str):
     if not reply:
         return
     out["replies"] += 1
-    for cc, value in parse_prices(reply).items():
-        out["prices"][cc] = value
+    out["raw"] = (out["raw"] + "\n" + reply)[-4000:]
+    known = {o["country"]: o["price"] for o in out["offers"]}
+    for offer in parse_offers(reply):
+        if offer["country"] in known and known[offer["country"]] >= offer["price"]:
+            continue
+        out["offers"] = [o for o in out["offers"] if o["country"] != offer["country"]]
+        out["offers"].append(offer)
     cap = parse_cap(reply)
     if cap >= 0 and out["cap"] < 0:
         out["cap"] = cap
@@ -105,38 +118,41 @@ async def probe(receiver: dict) -> dict:
     return out
 
 
-async def refresh_receiver(receiver: dict) -> int:
+async def refresh_receiver(receiver: dict) -> dict:
     out = await probe(receiver)
-    if out["prices"]:
-        await db.save_prices(receiver["tg_id"], receiver["_id"], out["prices"])
+    if out["offers"]:
+        await db.save_prices(receiver["tg_id"], receiver["_id"], out["offers"])
         await db.set_receiver(receiver["_id"], price_at=db._now())
     if out["cap"] < 0:
         await db.fail_receiver(receiver["_id"])
     else:
         await db.bump_receiver(receiver["_id"], out["cap"], out["confirm"] or None)
-    return out["cap"]
+    return out
 
 
 async def refresh_all(tg_id: int) -> dict:
     if not receiver_hub.running():
         await receiver_hub.start()
     rows = await db.list_receivers(tg_id, enabled_only=True)
-    out = {"receivers": len(rows), "caps": 0, "prices": 0, "errors": 0}
+    out = {"receivers": len(rows), "caps": 0, "prices": 0, "errors": 0, "empty": []}
     sem = asyncio.Semaphore(3)
 
     async def one(receiver):
         async with sem:
             try:
-                cap = await refresh_receiver(receiver)
+                result = await refresh_receiver(receiver)
             except Exception as e:
                 log.info(f"refresh {receiver.get('username')}: {e}")
                 out["errors"] += 1
+                out["empty"].append(f"@{receiver.get('username')} error")
                 return
-            if cap > 0:
+            if result["cap"] > 0:
                 out["caps"] += 1
+            out["prices"] += len(result["offers"])
+            if not result["offers"]:
+                out["empty"].append(f"@{receiver.get('username')} no offers")
 
     await asyncio.gather(*[one(r) for r in rows], return_exceptions=True)
-    out["prices"] = sum(len(v) for v in (await offers_map(tg_id, PRICE_TTL)).values())
     return out
 
 
@@ -152,6 +168,8 @@ async def offers_map(tg_id: int, max_age: float = PRICE_TTL) -> dict:
         cc = row["_id"]["country"]
         out.setdefault(cc, []).append({
             "price": float(row.get("price") or 0.0), "ts": int(row.get("ts") or 0),
+            "flag": row.get("flag") or countries.flag_of(cc),
+            "dial": row.get("dial") or "",
             "receiver_id": rid, "receiver": receiver.get("username") or "",
             "kind": receiver.get("kind") or "cm", "cap": int(receiver.get("cap") or 0),
             "confirm": int(receiver.get("confirm_seconds") or 0),
@@ -203,20 +221,23 @@ async def receiver_table(tg_id: int, rid: str, max_age: float = PRICE_TTL) -> li
     return rows
 
 
-async def price_matrix(tg_id: int) -> list[dict]:
+async def price_matrix(tg_id: int, max_age: float = PRICE_TTL) -> list[dict]:
     receivers = await db.list_receivers(tg_id, enabled_only=True)
-    prices = await offers_map(tg_id, PRICE_TTL)
+    prices = await offers_map(tg_id, max_age)
     out = []
     for cc, offers in prices.items():
-        line = {"country": cc, "name": countries.name_of(cc),
-                "flag": countries.flag_of(cc), "best": None, "cells": []}
         ranked = sorted(offers, key=rank)
-        line["best"] = ranked[0] if ranked else None
+        if not ranked:
+            continue
+        best = ranked[0]
+        line = {"country": cc, "name": countries.name_of(cc),
+                "flag": best.get("flag") or countries.flag_of(cc),
+                "dial": best.get("dial") or "", "best": best, "cells": []}
         for receiver in receivers:
             hit = next((o for o in offers if o["receiver_id"] == str(receiver["_id"])), None)
             line["cells"].append({"receiver": receiver.get("username"),
                                   "kind": receiver.get("kind"),
                                   "price": hit["price"] if hit else None})
         out.append(line)
-    out.sort(key=lambda r: -(r["best"]["price"] if r["best"] else 0.0))
+    out.sort(key=lambda r: -r["best"]["price"])
     return out
