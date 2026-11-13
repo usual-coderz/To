@@ -41,21 +41,22 @@ async def warm(tg_id: int, rid: str = "") -> int:
     return done
 
 
-async def capacity(tg_id: int, rid: str) -> int:
+async def capacity(tg_id: int, rid: str) -> dict:
+    blank = {"cap": -1, "confirm": 0, "offers": [], "replies": 0, "raw": ""}
     receiver = await db.get_receiver(rid)
     if not receiver or receiver["tg_id"] != tg_id:
-        return -1
+        return blank
     if not receiver_hub.running():
         await receiver_hub.start()
     out = await pricing.probe(receiver)
-    if out["prices"]:
-        await db.save_prices(tg_id, rid, out["prices"])
+    if out["offers"]:
+        await db.save_prices(tg_id, rid, out["offers"])
         await db.set_receiver(rid, price_at=db._now())
     if out["cap"] < 0:
         await db.fail_receiver(rid)
-        return -1
-    await db.bump_receiver(rid, out["cap"], out["confirm"] or None)
-    return out["cap"]
+    else:
+        await db.bump_receiver(rid, out["cap"], out["confirm"] or None)
+    return out
 
 
 async def capacity_all(tg_id: int) -> dict:
@@ -64,7 +65,7 @@ async def capacity_all(tg_id: int) -> dict:
         await receiver_hub.start()
     out = {}
     for receiver in rows:
-        out[receiver["username"]] = await capacity(tg_id, str(receiver["_id"]))
+        out[receiver["username"]] = (await capacity(tg_id, str(receiver["_id"])))["cap"]
     return out
 
 
