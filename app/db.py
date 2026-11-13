@@ -171,6 +171,7 @@ _INDEXES = (
     ("receivers", [("tg_id", ASCENDING), ("key", ASCENDING)], {"unique": True}),
     ("receivers", [("tg_id", ASCENDING), ("enabled", ASCENDING)], {}),
     ("prices", [("tg_id", ASCENDING), ("country", ASCENDING), ("ts", DESCENDING)], {}),
+    ("prices", [("tg_id", ASCENDING), ("ts", DESCENDING)], {}),
     ("prices", [("receiver_id", ASCENDING), ("ts", DESCENDING)], {}),
     ("sales", [("tg_id", ASCENDING), ("created_at", DESCENDING)], {}),
     ("sales", [("purchase_id", ASCENDING)], {}),
@@ -573,6 +574,7 @@ async def add_receiver(tg_id: int, username: str, kind: str = "", title: str = "
         await _db.receivers.update_one(
             {"_id": existing["_id"]},
             {"$set": {"title": title or existing.get("title") or key,
+                      "kind": kind or existing.get("kind") or "cm",
                       "enabled": True}})
         return str(existing["_id"])
     rid = (await _db.receivers.insert_one({
@@ -643,7 +645,8 @@ async def save_prices(tg_id: int, receiver_id, offers: list[dict]) -> int:
         if not cc or value <= 0:
             continue
         rows.append({"tg_id": tg_id, "receiver_id": _oid(receiver_id), "country": cc,
-                     "flag": str(offer.get("flag") or ""), "dial": str(offer.get("dial") or ""),
+                     "flag": str(offer.get("flag") or ""),
+                     "dial": str(offer.get("dial") or ""),
                      "price": float(value), "ts": now})
     if not rows:
         return 0
@@ -663,6 +666,11 @@ async def latest_prices(tg_id: int, max_age: float) -> list[dict]:
     ]
     cursor = await _db.prices.aggregate(pipeline)
     return await cursor.to_list(None)
+
+
+async def price_count(tg_id: int, max_age: float) -> int:
+    return await _db.prices.count_documents(
+        {"tg_id": tg_id, "ts": {"$gte": _now() - int(max_age)}})
 
 
 async def add_sale(tg_id: int, purchase_id, country: str, receiver_id, receiver: str,
