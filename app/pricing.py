@@ -3,7 +3,7 @@ import logging
 import re
 
 from app import db, receiver_hub
-from app.config import CAP_COMMAND, LION_START, PRICE_TTL, PROBE_TIMEOUT
+from app.config import CAP_ALT_COMMAND, CAP_COMMAND, LION_START, PRICE_TTL, PROBE_TIMEOUT
 from app.utils import countries
 
 log = logging.getLogger("pricing")
@@ -98,6 +98,14 @@ def kind_of(username: str) -> str:
     return "cm"
 
 
+def profit_mult(settings: dict) -> float:
+    return max(1.0, db.num(settings.get("profit_mult"), 1.0))
+
+
+def max_buy(sell_price: float, settings: dict) -> float:
+    return float(sell_price) / profit_mult(settings)
+
+
 def _blank() -> dict:
     return {"cap": -1, "confirm": 0, "offers": [], "replies": 0, "raw": "", "warm": False}
 
@@ -141,6 +149,44 @@ async def probe(receiver: dict) -> dict:
     await asyncio.sleep(2.5)
     _absorb(out, await receiver_hub.command(username, CAP_COMMAND, PROBE_TIMEOUT))
     return out
+
+
+async def probe_capacity(receiver: dict) -> dict:
+    username = receiver.get("username") or ""
+    kind = receiver.get("kind") or kind_of(username)
+    out = _blank()
+
+    if kind == LION:
+        _absorb(out, await receiver_hub.start_and_read(
+            username, (LION_START or "Prices").strip(), PROBE_TIMEOUT))
+
+    for cmd in (CAP_COMMAND, CAP_ALT_COMMAND):
+        _absorb(out, await receiver_hub.command(username, cmd, PROBE_TIMEOUT))
+        if out["cap"] >= 0:
+            break
+
+    if out["cap"] < 0:
+        out["warm"] = await receiver_hub.start_bot(username)
+        if out["warm"]:
+            await asyncio.sleep(2.5)
+            for cmd in (CAP_COMMAND, CAP_ALT_COMMAND):
+                _absorb(out, await receiver_hub.command(username, cmd, PROBE_TIMEOUT))
+                if out["cap"] >= 0:
+                    break
+    return out
+
+
+async def record_capacity(receiver: dict) -> int:
+    out = await probe_capacity(receiver)
+    if out["cap"] >= 0:
+        await db.bump_receiver(receiver["_id"], out["cap"], out["confirm"] or None)
+        await db.add_cap(receiver["tg_id"], receiver["_id"], receiver["username"], out["cap"])
+    else:
+        await db.fail_receiver(receiver["_id"])
+    if out["offers"]:
+        await db.save_prices(receiver["tg_id"], receiver["_id"], out["offers"])
+        await db.set_receiver(receiver["_id"], price_at=db._now())
+    return out["cap"]
 
 
 async def refresh_receiver(receiver: dict) -> dict:
@@ -236,6 +282,24 @@ async def best_table(tg_id: int, max_age: float = PRICE_TTL) -> list[dict]:
             rows.append({"country": cc, "offers": ranked})
     rows.sort(key=lambda r: -r["offers"][0]["price"])
     return rows
+
+
+async def chart_rows(tg_id: int, settings: dict, max_age: float = PRICE_TTL) -> list[dict]:
+    rows = await best_table(tg_id, max_age)
+    out = []
+    for row in rows:
+        best = row["offers"][0]
+        out.append({
+            "country": row["country"],
+            "name": countries.name_of(row["country"]),
+            "flag": best.get("flag") or countries.flag_of(row["country"]),
+            "dial": best.get("dial") or "",
+            "sell": float(best["price"]),
+            "maxbuy": max_buy(best["price"], settings),
+            "receiver": best.get("receiver") or "",
+            "cap": int(best.get("cap") or 0),
+        })
+    return out
 
 
 async def receiver_table(tg_id: int, rid: str, max_age: float = PRICE_TTL) -> list[dict]:
