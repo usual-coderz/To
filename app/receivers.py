@@ -38,11 +38,12 @@ async def warm(tg_id: int, rid: str = "") -> int:
             continue
         if await receiver_hub.start_bot(receiver["username"]):
             done += 1
+        await asyncio.sleep(1.2)
     return done
 
 
 async def capacity(tg_id: int, rid: str) -> dict:
-    blank = {"cap": -1, "confirm": 0, "offers": [], "replies": 0, "raw": ""}
+    blank = {"cap": -1, "confirm": 0, "offers": [], "replies": 0, "raw": "", "warm": False}
     receiver = await db.get_receiver(rid)
     if not receiver or receiver["tg_id"] != tg_id:
         return blank
