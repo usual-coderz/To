@@ -6,8 +6,9 @@ from bson import ObjectId
 from bson.errors import InvalidId
 from pymongo import ASCENDING, DESCENDING, AsyncMongoClient
 
-from app.config import (MONGO_DB, MONGO_URI, REPORT_KEEP_HOURS, STALE_CLEAN_SECONDS,
-                        TARGET_HOURS, TWOFA_PASSWORD)
+from app.config import (MONGO_DB, MONGO_URI, PROFIT_DEFAULT, PROFIT_MAX, PROFIT_MIN,
+                        REPORT_KEEP_HOURS, STALE_CLEAN_SECONDS, TARGET_HOURS,
+                        TWOFA_PASSWORD)
 from app.utils.money import _num
 
 log = logging.getLogger("db")
@@ -25,9 +26,10 @@ DEFAULTS = {
     "countries": "", "deny_countries": "IR,RU",
     "nsb_only": "1", "daily_spend_cap": "15", "auto_buy": "1",
     "terminate_on_expire": "1", "change_mail_on_expire": "1",
-    "verify_spam": "1", "currency": "usd", "proxy": "", "mail_provider": "auto",
-    "twofa_password": (TWOFA_PASSWORD or DEFAULT_2FA),
+    "verify_spam": "1", "spam_free": "1", "currency": "usd", "proxy": "",
+    "mail_provider": "auto", "twofa_password": (TWOFA_PASSWORD or DEFAULT_2FA),
     "auto_sell": "1", "sell_confirm_seconds": "600", "sell_min_price": "0.00",
+    "profit_mult": f"{PROFIT_DEFAULT:g}",
 }
 
 _TRUE = {"1", "true", "yes", "on", "y"}
@@ -125,6 +127,7 @@ NORMALIZERS = {
     "terminate_on_expire": _flag("1"),
     "change_mail_on_expire": _flag("1"),
     "verify_spam": _flag("1"),
+    "spam_free": _flag("1"),
     "currency": _enum(("usd", "rub", "uah", "eur", "kzt", "byn", "gbp"), "usd"),
     "proxy": lambda v: str(v or "").strip()[:300],
     "mail_provider": _enum(("auto", "native", "temp"), "auto"),
@@ -132,6 +135,7 @@ NORMALIZERS = {
     "auto_sell": _flag("1"),
     "sell_confirm_seconds": _f("600", 60.0),
     "sell_min_price": _f("0.00", 0.0),
+    "profit_mult": _f(f"{PROFIT_DEFAULT:g}", PROFIT_MIN, PROFIT_MAX),
 }
 
 
@@ -179,6 +183,7 @@ _INDEXES = (
     ("sales", [("purchase_id", ASCENDING)], {}),
     ("sales", [("status", ASCENDING), ("created_at", ASCENDING)], {}),
     ("charts", [("tg_id", ASCENDING), ("ts", DESCENDING)], {}),
+    ("caps", [("tg_id", ASCENDING), ("ts", DESCENDING)], {}),
 )
 
 
@@ -451,11 +456,12 @@ async def queue_count(tg_id: int) -> int:
 
 async def session_stats(tg_id: int) -> dict:
     now = _now()
-    out = {"total": 0, "queue": 0, "over": 0, "ready": 0, "sold": 0, "live": 0}
+    out = {"total": 0, "queue": 0, "over": 0, "ready": 0, "sold": 0, "live": 0,
+           "dead": 0, "queued_sell": 0, "sell_failed": 0}
     cursor = _db.purchases.find(
         {"tg_id": tg_id, "status": {"$in": list(ACTIVE) + ["sold"]}},
         {"status": 1, "account_created_ts": 1, "started_at": 1, "age_at_buy_hours": 1,
-         "session_state": 1})
+         "session_state": 1, "sell_state": 1})
     async for p in cursor:
         state = p.get("status")
         if state == "sold":
@@ -468,6 +474,13 @@ async def session_stats(tg_id: int) -> dict:
             out["ready"] += 1
         if p.get("session_state") == "live":
             out["live"] += 1
+        elif p.get("session_state") == "dead":
+            out["dead"] += 1
+        if p.get("sell_state") in ("queued", "selling"):
+            out["queued_sell"] += 1
+        elif p.get("sell_state") in ("failed", "dead", "no_offer", "no_profit",
+                                     "no_country"):
+            out["sell_failed"] += 1
         if current_age(p, now) >= TARGET_HOURS:
             out["over"] += 1
     return out
@@ -649,6 +662,7 @@ async def drop_receiver(rid) -> bool:
         return False
     res = await _db.receivers.delete_one({"_id": oid})
     await _db.prices.delete_many({"receiver_id": oid})
+    await _db.caps.delete_many({"receiver_id": oid})
     return bool(res.deleted_count)
 
 
@@ -702,6 +716,33 @@ async def latest_prices(tg_id: int, max_age: float) -> list[dict]:
     ]
     cursor = await _db.prices.aggregate(pipeline)
     return await cursor.to_list(None)
+
+
+async def add_cap(tg_id: int, receiver_id, username: str, cap: int) -> str:
+    cid = (await _db.caps.insert_one({
+        "tg_id": tg_id, "receiver_id": _oid(receiver_id), "username": receiver_key(username),
+        "cap": int(cap), "ts": _now(),
+    })).inserted_id
+    await _db.caps.delete_many({"tg_id": tg_id, "ts": {"$lt": _now() - 604_800}})
+    return str(cid)
+
+
+async def last_caps(tg_id: int, max_age: float = 172_800) -> list[dict]:
+    cutoff = _now() - int(max_age)
+    pipeline = [
+        {"$match": {"tg_id": tg_id, "ts": {"$gte": cutoff}}},
+        {"$sort": {"ts": DESCENDING}},
+        {"$group": {"_id": "$username", "cap": {"$first": "$cap"}, "ts": {"$first": "$ts"}}},
+        {"$sort": {"ts": DESCENDING}},
+    ]
+    cursor = await _db.caps.aggregate(pipeline)
+    return await cursor.to_list(None)
+
+
+async def cap_history(tg_id: int, username: str, limit: int = 24) -> list[dict]:
+    return await _db.caps.find(
+        {"tg_id": tg_id, "username": receiver_key(username)}
+    ).sort("ts", DESCENDING).limit(limit).to_list(None)
 
 
 async def add_sale(tg_id: int, purchase_id, country: str, receiver_id, receiver: str,
