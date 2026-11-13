@@ -12,6 +12,14 @@ router = Router()
 
 PENDING: dict[int, str] = {}
 
+RAW_LIMIT = 1200
+
+
+def _raw(out: dict) -> str:
+    body = out.get("raw") or "empty"
+    return "<b>Raw</b> · {n} reply\n<code>{t}</code>".format(
+        n=out.get("replies", 0), t=tg.esc(body[:RAW_LIMIT]))
+
 
 async def _render(bot, chat_id: int, tg_id: int, edit=None):
     rows = await db.list_receivers(tg_id)
@@ -89,10 +97,10 @@ async def cb_cap(cq: CallbackQuery):
         return
     head = receiver_detail_text(r, len(out["offers"]))
     note = "no reply" if not out["replies"] else f"cap {out['cap']} · parsed {len(out['offers'])}"
-    body = extracted_text(out["offers"], r["username"])
-    if not out["replies"]:
-        body = "<b>Extracted</b>\nno reply — raw:\n<code>" + \
-               tg.esc((out.get("raw") or "empty")[:600]) + "</code>"
+    if out["offers"]:
+        body = extracted_text(out["offers"], r["username"])
+    else:
+        body = _raw(out)
     await show(cq, f"{head}\n\n🔄 {note}\n\n{body}", kb.receiver_detail(r))
 
 
@@ -114,8 +122,7 @@ async def cb_prices(cq: CallbackQuery):
     elif rows:
         body = prices_text(rows)
     else:
-        body = ("<b>Extracted</b>\nnothing parsed — raw reply:\n<code>"
-                + tg.esc((out.get("raw") or "no reply")[:600]) + "</code>")
+        body = _raw(out)
     await show(cq, f"{head}\n\n{body}", kb.receiver_detail(r))
 
 
