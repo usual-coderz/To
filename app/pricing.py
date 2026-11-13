@@ -12,18 +12,22 @@ TIE_RANK = {"tgget": 0, "lion": 1, "cm": 2}
 LION = "lion"
 
 _FLAG = "[\U0001F1E6-\U0001F1FF]{2}"
-_OFFER = re.compile(
-    rf"(?P<flag>{_FLAG})?\s*\b(?P<cc>[A-Z]{{2}})\b\s*\+?(?P<dial>\d{{1,4}})?"
-    r"\s*(?:→|->|=>|:|=|—|–|\|)\s*\$?\s*(?P<price>\d{1,4}(?:[.,]\d{1,2})?)")
-_DOLLAR = re.compile(
-    rf"(?P<flag>{_FLAG})?\s*\b(?P<cc>[A-Z]{{2}})\b\s*\+?(?P<dial>\d{{1,4}})?"
-    r"\s*\$?\s*(?P<price>\d{1,4}(?:[.,]\d{1,2})?)\s*\$")
-_LOOSE = re.compile(
-    rf"(?P<flag>{_FLAG})?\s*\b(?P<cc>[A-Z]{{2}})\b\s*\+?(?P<dial>\d{{1,4}})?"
-    r"[^\n\d$]{0,8}(?P<price>\d{1,4}(?:[.,]\d{1,2})?)")
+_CC = r"(?<![A-Za-z])(?P<cc>[A-Za-z]{2})(?![A-Za-z])"
+_DIAL = r"(?:\+(?P<dial>\d{1,4}))?"
+_PRICE = r"(?P<price>\d{1,4}(?:[.,]\d{1,2})?)"
+
+_OFFER = re.compile(rf"(?P<flag>{_FLAG})?\s*{_CC}\s*{_DIAL}"
+                    r"\s*(?:→|->|=>|:|=|—|–|\|)\s*\$?\s*" + _PRICE)
+_DOLLAR = re.compile(rf"(?P<flag>{_FLAG})?\s*{_CC}\s*{_DIAL}\s*\$?\s*" + _PRICE + r"\s*\$")
+_LOOSE = re.compile(rf"(?P<flag>{_FLAG})?\s*{_CC}\s*{_DIAL}[^\n\d$]{{0,12}}" + _PRICE)
+
 _CAP = re.compile(
-    r"(?:cap(?:acity)?|available|free|slots?|stock|limit|qty)\D{0,12}(\d{1,6})", re.I)
+    r"(?:cap(?:acity)?|available|free|slots?|stock|limit|qty|left|remaining)"
+    r"\D{0,12}(\d{1,6})", re.I)
+_CAP2 = re.compile(r"(\d{1,6})\s*(?:slots?|left|free|available|remaining)", re.I)
 _CONFIRM = re.compile(r"(\d{3,5})\s*(?:s\b|sec|second)", re.I)
+
+SKIP = {"OK", "TG", "ID", "PR", "NO", "YES", "CAP", "AM", "PM", "UTC", "GMT"}
 
 
 def _num(raw: str) -> float:
@@ -37,6 +41,10 @@ def _dial(raw) -> str:
     return "".join(ch for ch in str(raw or "") if ch.isdigit())[:4]
 
 
+def _valid(cc: str, price: float) -> bool:
+    return bool(price) and 0 < price <= 10_000 and cc not in SKIP and bool(countries.name_of(cc))
+
+
 def parse_offers(text: str) -> list[dict]:
     found: dict[str, dict] = {}
     for line in (text or "").splitlines():
@@ -46,9 +54,9 @@ def parse_offers(text: str) -> list[dict]:
         for rx in (_OFFER, _DOLLAR, _LOOSE):
             hit = False
             for m in rx.finditer(clean):
-                cc = m.group("cc").upper()
+                cc = (m.group("cc") or "").upper()
                 price = _num(m.group("price"))
-                if not price or price > 10_000 or not countries.name_of(cc):
+                if not _valid(cc, price):
                     continue
                 if cc in found and found[cc]["price"] >= price:
                     continue
@@ -66,8 +74,11 @@ def parse_prices(text: str) -> dict:
 
 
 def parse_cap(text: str) -> int:
-    m = _CAP.search(text or "")
-    return int(m.group(1)) if m else -1
+    for rx in (_CAP, _CAP2):
+        m = rx.search(text or "")
+        if m:
+            return int(m.group(1))
+    return -1
 
 
 def parse_confirm(text: str) -> int:
@@ -95,7 +106,7 @@ def _absorb(out: dict, reply: str):
     if not reply:
         return
     out["replies"] += 1
-    out["raw"] = (out["raw"] + "\n" + reply)[-4000:]
+    out["raw"] = (out["raw"] + "\n" + reply)[-6000:]
     known = {o["country"]: o["price"] for o in out["offers"]}
     for offer in parse_offers(reply):
         if offer["country"] in known and known[offer["country"]] >= offer["price"]:
@@ -116,8 +127,8 @@ async def probe(receiver: dict) -> dict:
     out = _blank()
 
     if kind == LION:
-        _absorb(out, await receiver_hub.start_and_read(
-            username, (LION_START or "Prices").strip(), PROBE_TIMEOUT))
+        param = (LION_START or "Prices").strip()
+        _absorb(out, await receiver_hub.start_and_read(username, param, PROBE_TIMEOUT))
         return out
 
     _absorb(out, await receiver_hub.command(username, CAP_COMMAND, PROBE_TIMEOUT))
@@ -164,9 +175,9 @@ async def refresh_all(tg_id: int) -> dict:
                 out["caps"] += 1
             out["prices"] += len(result["offers"])
             if not result["offers"]:
-                reason = "no reply" if not result["replies"] else "no offers parsed"
-                if result.get("warm") and not result["replies"]:
-                    reason = "warm sent, still no reply"
+                reason = "no offers parsed"
+                if not result["replies"]:
+                    reason = "warm sent, still no reply" if result.get("warm") else "no reply"
                 out["empty"].append(f"@{receiver.get('username')} {reason}")
 
     await asyncio.gather(*[one(r) for r in rows], return_exceptions=True)
