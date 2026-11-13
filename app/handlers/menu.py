@@ -28,9 +28,9 @@ async def _last_line(tg_id: int) -> str:
     r = rows[0]
     stamp = fmt_dt(r.get("ts"))
     if r.get("error"):
-        return f"last {stamp}: ⚠️ {r['error'][:70]}"
+        return f"last {stamp}: ⚠️ {r['error'][:60]}"
     if r.get("note"):
-        return f"last {stamp}: {r['note'][:70]}"
+        return f"last {stamp}: {r['note'][:60]}"
     if r.get("scanned"):
         return f"last {stamp}: scan {r['scanned']} · buy {r.get('bought', 0)}"
     return ""
@@ -52,11 +52,13 @@ async def render_menu(tg_id: int) -> tuple[str, object]:
         note = f"{note} · {snap['error'][:60]}" if note else snap["error"][:60]
 
     queued = await db.queue_count(tg_id)
+    ready = await db.ready_count(tg_id)
     last = await _last_line(tg_id)
     if last:
         note = f"{note} · {last}" if note else last
 
-    return menu_text(s, profile, snap["total"], snap["spendable"], queued, note), kb.main(s)
+    return (menu_text(s, profile, snap["total"], snap["spendable"], queued, ready, note),
+            kb.main(s, ready))
 
 
 @router.message(Command("start"))
