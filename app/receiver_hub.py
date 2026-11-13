@@ -14,6 +14,10 @@ _client = None
 _lock = asyncio.Lock()
 _LAST: dict[str, int] = {}
 
+IDLE_GAP = 2.5
+MAX_WAIT = 25.0
+MAX_MSGS = 60
+
 
 def running() -> bool:
     return _client is not None
@@ -105,7 +109,8 @@ async def drain(username: str) -> int:
     return _stamp(username)
 
 
-async def wait_reply(username: str, timeout: float, since: int | None = None) -> str:
+async def collect(username: str, since: int | None = None, idle: float = IDLE_GAP,
+                  max_wait: float = MAX_WAIT, max_msgs: int = MAX_MSGS) -> str:
     client = _client
     if client is None:
         return ""
@@ -113,68 +118,91 @@ async def wait_reply(username: str, timeout: float, since: int | None = None) ->
     if entity is None:
         return ""
     floor = _stamp(username) if since is None else since
-    end = time.monotonic() + timeout
+    parts: list[str] = []
+    seen: set[int] = set()
+
+    try:
+        tail = await client.get_messages(entity, limit=1)
+    except Exception:
+        tail = []
+    if tail:
+        text = (tail[0].raw_text or "").strip()
+        if text:
+            parts.append(text)
+            seen.add(int(tail[0].id or 0))
+
+    end = time.monotonic() + max_wait
+    quiet = time.monotonic() + idle
+
     while time.monotonic() < end:
         try:
-            msgs = await client.get_messages(entity, limit=10)
+            msgs = await client.get_messages(entity, limit=25)
         except Exception as e:
-            log.info(f"poll {username}: {e}")
-            await asyncio.sleep(2.0)
+            log.info(f"collect {username}: {e}")
+            await asyncio.sleep(1.5)
             continue
-        for m in reversed(msgs or []):
-            if int(m.id or 0) <= floor:
+        fresh = False
+        for m in sorted(msgs or [], key=lambda x: int(x.id or 0)):
+            mid = int(m.id or 0)
+            if mid <= floor or mid in seen:
                 continue
             text = (m.raw_text or "").strip()
             if not text:
                 continue
+            seen.add(mid)
+            parts.append(text)
+            fresh = True
+            if len(parts) >= max_msgs:
+                break
+        if fresh:
+            quiet = time.monotonic() + idle
             _mark(username)
-            return text
-        await asyncio.sleep(1.5)
-    return ""
+        elif parts and time.monotonic() >= quiet:
+            break
+        await asyncio.sleep(1.2)
+
+    return "\n".join(parts)
+
+
+async def wait_reply(username: str, timeout: float, since: int | None = None) -> str:
+    return await collect(username, since, IDLE_GAP, timeout)
 
 
 async def start_bot(username: str, param: str = "") -> bool:
     client = _client
     if client is None:
         return False
-
     entity = await _resolve(username)
     if entity is None:
         return False
-
     try:
-        import secrets
-
-        await client(functions.messages.StartBotRequest(
-            bot=entity,
-            peer=entity,
-            random_id=secrets.randbits(63),
-            start_param=param or ""
-        ))
-
+        if param:
+            await client(functions.messages.StartBotRequest(
+                bot=entity, peer=entity, start_param=param))
+        else:
+            await client(functions.messages.StartBotRequest(bot=entity, peer=entity))
         return True
-
     except Exception as e:
         log.info(f"start_bot {username}: {e}")
         return False
 
 
-async def command(username: str, cmd: str, timeout: float = 40.0) -> str:
+async def command(username: str, cmd: str, timeout: float = MAX_WAIT) -> str:
     if _client is None:
         return ""
     since = await drain(username)
     if not await send(username, cmd):
         return ""
-    return await wait_reply(username, timeout, since)
+    return await collect(username, since, IDLE_GAP, timeout)
 
 
-async def start_and_read(username: str, param: str, timeout: float) -> str:
+async def start_and_read(username: str, param: str, timeout: float = MAX_WAIT) -> str:
     if _client is None:
         return ""
     since = await drain(username)
     if not await start_bot(username, param):
         return ""
-    return await wait_reply(username, timeout, since)
+    return await collect(username, since, IDLE_GAP, timeout)
 
 
 async def send_and_wait(username: str, text: str, timeout: float) -> str:
@@ -183,7 +211,7 @@ async def send_and_wait(username: str, text: str, timeout: float) -> str:
     since = await drain(username)
     if not await send(username, text):
         return ""
-    return await wait_reply(username, timeout, since)
+    return await collect(username, since, IDLE_GAP, timeout)
 
 
 async def read_last(username: str) -> str:
