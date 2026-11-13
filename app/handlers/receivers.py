@@ -5,8 +5,9 @@ from aiogram.types import CallbackQuery, Message
 from app import db, keyboards as kb, pricing, receivers
 from app.handlers.menu import show
 from app.utils import tg
-from app.utils.texts import (extracted_text, prices_text, receiver_detail_text,
+from app.utils.texts import (caps_text, extracted_text, prices_text, receiver_detail_text,
                              receivers_text)
+from app.utils.timeutil import fmt_dt
 
 router = Router()
 
@@ -102,6 +103,22 @@ async def cb_cap(cq: CallbackQuery):
     else:
         body = _raw(out)
     await show(cq, f"{head}\n\n🔄 {note}\n\n{body}", kb.receiver_detail(r))
+
+
+@router.callback_query(F.data.startswith("rh:"))
+async def cb_history(cq: CallbackQuery):
+    rid = cq.data.split(":", 1)[1]
+    r = await db.get_receiver(rid)
+    if not r or r["tg_id"] != cq.from_user.id:
+        return await cq.answer("gone", show_alert=True)
+    rows = await db.cap_history(cq.from_user.id, r["username"])
+    if not rows:
+        await show(cq, receiver_detail_text(r) + "\n\nno cap record", kb.receiver_detail(r))
+        return await cq.answer("empty")
+    lines = [f"{fmt_dt(x.get('ts'))} · cap <code>{x.get('cap')}</code>" for x in rows]
+    await show(cq, receiver_detail_text(r) + "\n\n<b>Cap history</b>\n" + "\n".join(lines),
+               kb.receiver_detail(r))
+    await cq.answer()
 
 
 @router.callback_query(F.data.startswith("rp:"))
