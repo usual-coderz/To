@@ -7,8 +7,8 @@ BACK_MAIN = "m:main"
 BACK_FILTERS = "m:filters"
 BACK_WALLET = "m:wallet"
 BACK_SESSIONS = "m:sessions"
+BACK_READY = "m:ready"
 BACK_RECEIVERS = "m:receivers"
-BACK_SELL = "m:sell"
 
 MAX_DATA = 64
 
@@ -29,21 +29,20 @@ def kb(rows: list[list[tuple[str, str]]]) -> InlineKeyboardMarkup:
 
 
 def back(to: str = BACK_MAIN) -> InlineKeyboardMarkup:
-    return kb([[("Back", to)]])
+    return kb([[("‹ Back", to)]])
 
 
-def _onoff(flag: str, on: str, off: str) -> str:
-    return on if flag == "1" else off
+def _onoff(flag: str) -> str:
+    return "🟢 on" if flag == "1" else "🔴 off"
 
 
-def main(s: dict) -> InlineKeyboardMarkup:
+def main(s: dict, ready: int) -> InlineKeyboardMarkup:
     return kb([
-        [("⏸ Stop" if s["auto_buy"] == "1" else "▶️ Start", "t:auto_buy")],
-        [("Auto sell " + _onoff(s["auto_sell"], "on", "off"), "t:auto_sell")],
-        [("Filters", BACK_FILTERS), ("Sessions", BACK_SESSIONS)],
-        [("Receivers", BACK_RECEIVERS), ("Sell", BACK_SELL)],
-        [("Wallet", BACK_WALLET), ("Report", "m:report")],
-        [("Stats", "m:stats")],
+        [("⏸ Stop buying" if s["auto_buy"] == "1" else "▶️ Start buying", "t:auto_buy")],
+        [("Sessions", BACK_SESSIONS), (f"Ready {ready}", BACK_READY)],
+        [("Receivers", BACK_RECEIVERS), ("Wallet", BACK_WALLET)],
+        [("Stats", "m:stats"), ("Report", "m:report")],
+        [("Filters", BACK_FILTERS)],
     ])
 
 
@@ -56,12 +55,10 @@ def filters(s: dict) -> InlineKeyboardMarkup:
          (f"Max age {s['session_max_hours'] or 'off'}", "in:session_max_hours")],
         [("Include", "in:countries"), ("Exclude", "in:deny_countries")],
         [(f"Cap ${s['daily_spend_cap']}", "in:daily_spend_cap")],
-        [(f"Terminate {_onoff(s['terminate_on_expire'], 'on', 'off')}",
-          "t:terminate_on_expire"),
-         (f"Mail chg {_onoff(s['change_mail_on_expire'], 'on', 'off')}",
-          "t:change_mail_on_expire")],
+        [(f"Terminate {s['terminate_on_expire']}", "t:terminate_on_expire"),
+         (f"Mail chg {s['change_mail_on_expire']}", "t:change_mail_on_expire")],
         [(f"Mail src {s['mail_provider']}", "m:mailprov"), ("2FA pwd", "in:twofa_password")],
-        [("Back", BACK_MAIN)],
+        [("‹ Back", BACK_MAIN)],
     ])
 
 
@@ -70,7 +67,7 @@ def price() -> InlineKeyboardMarkup:
         [(f"max {v}", f"s:price_max:{v}") for v in ("0.10", "0.30", "1.00")],
         [(f"min {v}", f"s:price_min:{v}") for v in ("0.05", "0.15", "0.25")],
         [("custom max", "in:price_max"), ("custom min", "in:price_min")],
-        [("Back", BACK_FILTERS)],
+        [("‹ Back", BACK_FILTERS)],
     ])
 
 
@@ -84,7 +81,7 @@ def pick(prefix: str, values: list[str], back_to: str = BACK_FILTERS) -> InlineK
             row = []
     if row:
         rows.append(row)
-    rows.append([("Back", back_to)])
+    rows.append([("‹ Back", back_to)])
     return kb(rows)
 
 
@@ -92,8 +89,8 @@ def sessions(stats: dict) -> InlineKeyboardMarkup:
     return kb([
         [(f"Queue {stats['queue']}", "q:list")],
         [(f"24h+ {stats['over']}", "q:over")],
-        [("Stats", "q:stats"), ("Ready", "q:ready")],
-        [("Back", BACK_MAIN)],
+        [("Stats", "q:stats")],
+        [("‹ Back", BACK_MAIN)],
     ])
 
 
@@ -102,8 +99,8 @@ def session_list(rows: list[dict], page: str) -> InlineKeyboardMarkup:
     for p in rows:
         label = f"{p.get('phone') or p['item_id']} · {p.get('status')}"
         out.append([(label[:38], f"v:{p['_id']}")])
-    out.append([("Download txt", f"t:{page}"), ("Refresh", f"q:{page}")])
-    out.append([("Back", BACK_SESSIONS)])
+    out.append([("TXT", f"t:{page}"), ("↻", f"q:{page}")])
+    out.append([("‹ Back", BACK_SESSIONS)])
     return kb(out)
 
 
@@ -111,9 +108,38 @@ def session_detail(p: dict) -> InlineKeyboardMarkup:
     pid = p["_id"]
     rows = [[("Session file", f"f:{pid}"), ("Check", f"c:{pid}")]]
     if p.get("status") == "ready":
-        rows.append([("Sell now", f"sell:{pid}")])
-    rows.append([("Back", BACK_SESSIONS)])
+        rows.append([("Sell now", f"sl:{pid}")])
+    rows.append([("‹ Back", BACK_SESSIONS)])
     return kb(rows)
+
+
+def ready(s: dict, count: int) -> InlineKeyboardMarkup:
+    return kb([
+        [(f"Auto sell {_onoff(s['auto_sell'])}", "t:auto_sell")],
+        [(f"Sell all ({count})", "rd:all")],
+        [("Prices", "rd:prices"), ("List", "rd:list")],
+        [("‹ Back", BACK_MAIN)],
+    ])
+
+
+def ready_list(rows: list[dict]) -> InlineKeyboardMarkup:
+    out = []
+    for p in rows:
+        state = p.get("sell_state") or "idle"
+        label = f"{p.get('phone') or p['item_id']} · {state}"
+        out.append([(label[:38], f"rd:{p['_id']}")])
+    out.append([("↻ Refresh", BACK_READY)])
+    out.append([("‹ Back", BACK_MAIN)])
+    return kb(out)
+
+
+def ready_detail(p: dict) -> InlineKeyboardMarkup:
+    pid = p["_id"]
+    return kb([
+        [("Sell now", f"sl:{pid}")],
+        [("Session file", f"f:{pid}"), ("Check", f"c:{pid}")],
+        [("‹ Back", BACK_READY)],
+    ])
 
 
 def receivers(rows: list[dict]) -> InlineKeyboardMarkup:
@@ -122,40 +148,29 @@ def receivers(rows: list[dict]) -> InlineKeyboardMarkup:
         mark = "🟢" if r.get("enabled") else "⚪"
         cap = r.get("cap")
         cap_text = "?" if cap is None or cap < 0 else str(cap)
-        out.append([(f"{mark} @{r['username']} · cap {cap_text}", f"rv:{r['_id']}")])
-    out.append([("Add receiver", "r:add"), ("Refresh", "r:sync")])
-    out.append([("Warm all", "r:warm"), ("Back", BACK_MAIN)])
+        out.append([(f"{mark} @{r['username']} · {cap_text}", f"rv:{r['_id']}")])
+    out.append([("Add", "r:add"), ("↻ Sync", "r:sync")])
+    out.append([("Warm all", "r:warm"), ("‹ Back", BACK_MAIN)])
     return kb(out)
 
 
 def receiver_detail(r: dict) -> InlineKeyboardMarkup:
     rid = r["_id"]
-    lion = (r.get("kind") == "lion")
-    probe = [("Prices via link", f"rp:{rid}")] if lion else [
-        ("Cap via /cap", f"rc:{rid}"), ("Prices", f"rp:{rid}")]
+    probe = [("Prices (link)", f"rp:{rid}")] if r.get("kind") == "lion" else [
+        ("/cap", f"rc:{rid}"), ("Prices", f"rp:{rid}")]
     return kb([
         probe,
-        [("Confirm " + str(r.get("confirm_seconds") or "auto"), f"rs:{rid}")],
-        [("Warm /start", f"rw:{rid}")],
-        [("🟢 On" if r.get("enabled") else "⚪ Off", f"rt:{rid}"),
-         ("Delete", f"rd:{rid}")],
-        [("Back", BACK_RECEIVERS)],
-    ])
-
-
-def sell_menu(s: dict, ready: int) -> InlineKeyboardMarkup:
-    return kb([
-        [("Auto sell " + _onoff(s["auto_sell"], "on", "off"), "t:auto_sell")],
-        [(f"Sell ready ({ready})", "sl:all")],
-        [("Prices", "sl:prices"), ("Back", BACK_MAIN)],
+        [("Warm", f"rw:{rid}")],
+        [("🟢 On" if r.get("enabled") else "⚪ Off", f"rt:{rid}"), ("Delete", f"rd:{rid}")],
+        [("‹ Back", BACK_RECEIVERS)],
     ])
 
 
 def wallet(entries: list[dict]) -> InlineKeyboardMarkup:
-    rows = [[("Refresh", BACK_WALLET), ("Payments", "m:payments")]]
+    rows = [[("↻", BACK_WALLET), ("Payments", "m:payments")]]
     if len(entries) > 1:
         rows.append([("Exchange", "m:exchange")])
-    rows.append([("Back", BACK_MAIN)])
+    rows.append([("‹ Back", BACK_MAIN)])
     return kb(rows)
 
 
@@ -181,7 +196,7 @@ def exchange(pool: list[dict], step: str, offset: int = 0,
     if nav:
         rows.append(nav)
 
-    rows.append([("Back", BACK_WALLET)])
+    rows.append([("‹ Back", BACK_WALLET)])
     return kb(rows)
 
 
@@ -194,11 +209,11 @@ def amount(currency: str, available: float) -> InlineKeyboardMarkup:
 
 def report() -> InlineKeyboardMarkup:
     return kb([
-        [("Refresh", "r:view")],
+        [("↻", "r:view")],
         [("Export ledger", "l:csv")],
-        [("Back", BACK_MAIN)],
+        [("‹ Back", BACK_MAIN)],
     ])
 
 
 def ledger() -> InlineKeyboardMarkup:
-    return kb([[("Export CSV", "l:csv")], [("Back", BACK_MAIN)]])
+    return kb([[("Export CSV", "l:csv")], [("‹ Back", BACK_MAIN)]])
