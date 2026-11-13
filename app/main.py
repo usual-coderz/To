@@ -84,6 +84,7 @@ async def main():
     tasks = [
         asyncio.create_task(_supervise("buy_loop", buy_loop, bot, lzt)),
         asyncio.create_task(_supervise("cleaner_loop", cleaner_loop, bot, lzt)),
+        asyncio.create_task(_supervise("sell_worker", seller.worker, bot, lzt)),
         asyncio.create_task(_supervise("price_loop", price_loop)),
         asyncio.create_task(_supervise("chart_loop", chart_loop, bot)),
     ]
