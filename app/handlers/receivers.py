@@ -5,7 +5,8 @@ from aiogram.types import CallbackQuery, Message
 from app import db, keyboards as kb, pricing, receivers
 from app.handlers.menu import show
 from app.utils import tg
-from app.utils.texts import prices_text, receiver_detail_text, receivers_text
+from app.utils.texts import (extracted_text, prices_text, receiver_detail_text,
+                             receivers_text)
 
 router = Router()
 
@@ -57,6 +58,8 @@ async def cb_sync(cq: CallbackQuery):
     text = (f"sync: receivers {out['receivers']} · caps {out['caps']}"
             f" · prices {out['prices']} · errors {out['errors']}\n\n"
             + receivers_text(rows))
+    if out.get("empty"):
+        text += "\n\n" + "\n".join(tg.esc(e) for e in out["empty"])
     await show(cq, text, kb.receivers(rows))
 
 
@@ -75,17 +78,22 @@ async def cb_detail(cq: CallbackQuery):
 async def cb_cap(cq: CallbackQuery):
     rid = cq.data.split(":", 1)[1]
     r = await db.get_receiver(rid)
-    if not r:
+    if not r or r["tg_id"] != cq.from_user.id:
         return await cq.answer("gone", show_alert=True)
     if r.get("kind") == "lion":
         return await cq.answer("lion uses the price link", show_alert=True)
-    await cq.answer("/cap sent…")
-    cap = await receivers.capacity(cq.from_user.id, rid)
+    await cq.answer("/cap sent, reading…")
+    out = await receivers.capacity(cq.from_user.id, rid)
     r = await db.get_receiver(rid)
     if not r:
         return
-    note = "no reply" if cap < 0 else f"cap {cap}"
-    await show(cq, receiver_detail_text(r) + f"\n\n🔄 {note}", kb.receiver_detail(r))
+    head = receiver_detail_text(r, len(out["offers"]))
+    note = "no reply" if not out["replies"] else f"cap {out['cap']} · parsed {len(out['offers'])}"
+    body = extracted_text(out["offers"], r["username"])
+    if not out["replies"]:
+        body = "<b>Extracted</b>\nno reply — raw:\n<code>" + \
+               tg.esc((out.get("raw") or "empty")[:600]) + "</code>"
+    await show(cq, f"{head}\n\n🔄 {note}\n\n{body}", kb.receiver_detail(r))
 
 
 @router.callback_query(F.data.startswith("rp:"))
@@ -95,14 +103,20 @@ async def cb_prices(cq: CallbackQuery):
     if not r or r["tg_id"] != cq.from_user.id:
         return await cq.answer("gone", show_alert=True)
     await cq.answer("fetching…")
-    await receivers.capacity(cq.from_user.id, rid)
+    out = await receivers.capacity(cq.from_user.id, rid)
     rows = await pricing.receiver_table(cq.from_user.id, rid)
     r = await db.get_receiver(rid)
     if not r:
         return
-    body = prices_text(rows) if rows else "<b>Prices</b>\nno live prices"
-    await show(cq, receiver_detail_text(r, len(rows)) + "\n\n" + body,
-               kb.receiver_detail(r))
+    head = receiver_detail_text(r, len(rows))
+    if out["offers"]:
+        body = extracted_text(out["offers"], r["username"])
+    elif rows:
+        body = prices_text(rows)
+    else:
+        body = ("<b>Extracted</b>\nnothing parsed — raw reply:\n<code>"
+                + tg.esc((out.get("raw") or "no reply")[:600]) + "</code>")
+    await show(cq, f"{head}\n\n{body}", kb.receiver_detail(r))
 
 
 @router.callback_query(F.data.startswith("rw:"))
@@ -112,8 +126,8 @@ async def cb_warm_one(cq: CallbackQuery):
     r = await db.get_receiver(rid)
     if not r:
         return await cq.answer("gone", show_alert=True)
-    await show(cq, receiver_detail_text(r) + ("\n\n✅ /start sent" if ok else "\n\n❌ failed"),
-               kb.receiver_detail(r))
+    tail = "\n\n✅ /start sent" if ok else "\n\n❌ failed"
+    await show(cq, receiver_detail_text(r) + tail, kb.receiver_detail(r))
     await cq.answer("done")
 
 
@@ -121,7 +135,7 @@ async def cb_warm_one(cq: CallbackQuery):
 async def cb_confirm(cq: CallbackQuery):
     rid = cq.data.split(":", 1)[1]
     r = await db.get_receiver(rid)
-    if not r:
+    if not r or r["tg_id"] != cq.from_user.id:
         return await cq.answer("gone", show_alert=True)
     await db.set_receiver(rid, confirm_seconds=0)
     r = await db.get_receiver(rid)
