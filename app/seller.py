@@ -4,11 +4,12 @@ import time
 
 from app import db, pricing, receiver_hub, sellparse
 from app.config import (SELL_CONFIRM_DEFAULT, SELL_CONFIRM_MIN, SELL_CONCURRENCY,
-                        SELL_MAX_TRIES, SELL_OTP_TIMEOUT, SELL_QUEUE_BATCH,
-                        SELL_QUEUE_TICK, SELL_REPLY_TIMEOUT, SELL_RETRY_DELAY)
-from app.session_manager import clean_client, device_list, reset_others, set_2fa
+                        SELL_LOGOUT_DELAY, SELL_MAX_TRIES, SELL_OTP_TIMEOUT,
+                        SELL_QUEUE_BATCH, SELL_QUEUE_TICK, SELL_REPLY_TIMEOUT,
+                        SELL_RETRY_DELAY, SELL_VERDICT_WAIT)
+from app.session_manager import clean_client, device_list, remove_2fa, reset_others
 from app.utils import countries, tg
-from app.utils.texts import sell_fail_line, trade_text
+from app.utils.texts import sell_audit_text, sell_fail_line, trade_text
 
 log = logging.getLogger("seller")
 
@@ -99,14 +100,26 @@ async def _wait_otp(conn, timeout: int) -> str:
     return ""
 
 
-async def _fail(bot, tg_id, pid, country, sid, receiver, reason, retry=True):
+async def _audit(bot, p: dict, stage: str, reason: str, receiver: str, price: float):
+    sup = await db.get_username(p["tg_id"])
+    await _notify(bot, p["tg_id"],
+                  sell_audit_text(p, reason, stage, receiver, price, sup))
+
+
+async def _fail(bot, p: dict, sid, receiver, reason, stage="verification",
+                price=0.0, retry=True):
+    tg_id = p["tg_id"]
+    pid = str(p["_id"])
+    country = (p.get("country") or "").upper()
     text = sellparse.reason_of(reason)
     if sid:
         await db.close_sale(sid, "failed", text)
     if retry:
-        await db.bump_sell_try(pid, SELL_RETRY_DELAY, text)
+        await db.bump_sell_try(pid, SELL_RETRY_DELAY, f"{stage}: {text}")
     else:
-        await db.set_sell(pid, "failed", SELL_RETRY_DELAY, text)
+        await db.set_sell(pid, "failed", SELL_RETRY_DELAY, f"{stage}: {text}")
+    fresh = await db.get_purchase(pid) or p
+    await _audit(bot, fresh, stage, text, receiver, price)
     await _notify(bot, tg_id, sell_fail_line(country, text))
     await _cancel(receiver)
     return False
@@ -133,47 +146,48 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
     _RUNNING.add(pid)
     try:
         if not phone:
-            return await _fail(bot, tg_id, pid, country, "", "", "no phone", False)
+            return await _fail(bot, p, "", "", "no phone", "precheck", sell_price, False)
         if not p.get("session_string"):
-            return await _fail(bot, tg_id, pid, country, "", "", "no session", False)
+            return await _fail(bot, p, "", "", "no session", "precheck", sell_price, False)
         if not receiver_hub.running():
             await receiver_hub.start()
         if not receiver_hub.running():
-            return await _fail(bot, tg_id, pid, country, "", "", "userbot offline")
+            return await _fail(bot, p, "", "", "userbot offline", "precheck",
+                               sell_price, False)
 
         live, devices = await _precheck(p["session_string"], proxy)
         if not live:
             await db.set_sell(pid, "dead", SELL_RETRY_DELAY, "session dead")
+            await _audit(bot, p, "precheck", "session dead", receiver, sell_price)
             await _notify(bot, tg_id, sell_fail_line(country, "session dead"))
             return False
 
-        password = s.get("twofa_password") or db.DEFAULT_2FA
         conn = clean_client(p["session_string"], proxy)
         try:
             await conn.connect()
             if not await conn.is_user_authorized():
                 await db.set_sell(pid, "dead", SELL_RETRY_DELAY, "session dead")
+                await _audit(bot, p, "precheck", "session dead", receiver, sell_price)
                 await _notify(bot, tg_id, sell_fail_line(country, "session dead"))
                 return False
 
             await reset_others(conn)
-            try:
-                await set_2fa(conn, password, p.get("password") or "")
-            except Exception as e:
-                log.info(f"2fa prep {phone}: {e}")
-            await db.set_purchase(pid, password=password)
+            twofa_off = await remove_2fa(conn, p.get("password") or "")
+            log.info(f"2fa off {phone}: {twofa_off}")
 
             sid = await db.add_sale(tg_id, pid, country, offer.get("receiver_id"),
                                     receiver, buy_price, sell_price, 0)
 
             if not await _dm(receiver, phone):
-                return await _fail(bot, tg_id, pid, country, sid, "", "receiver dm failed")
+                return await _fail(bot, p, sid, receiver, "receiver dm failed",
+                                   "handover", sell_price)
 
             reply = await receiver_hub.collect(receiver, None, 3.0, SELL_REPLY_TIMEOUT)
             if not reply:
-                return await _fail(bot, tg_id, pid, country, sid, receiver, "no receiver reply")
+                return await _fail(bot, p, sid, receiver, "no receiver reply",
+                                   "handover", sell_price)
             if sellparse.rejected(reply):
-                return await _fail(bot, tg_id, pid, country, sid, receiver, reply)
+                return await _fail(bot, p, sid, receiver, reply, "handover", sell_price)
 
             if not sellparse.accepted(reply) and not sellparse.wants_code(reply):
                 extra = await receiver_hub.collect(receiver, None, 3.0, 45.0)
@@ -183,13 +197,17 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
             if not sellparse.accepted(reply):
                 code = sellparse.otp_of(reply) or await _wait_otp(conn, SELL_OTP_TIMEOUT)
                 if not code:
-                    return await _fail(bot, tg_id, pid, country, sid, receiver, "no otp")
-                await receiver_hub.send(receiver, code)
+                    return await _fail(bot, p, sid, receiver, "no otp received",
+                                       "otp", sell_price)
+                if not await receiver_hub.send(receiver, code):
+                    return await _fail(bot, p, sid, receiver, "otp send failed",
+                                       "otp", sell_price)
                 reply = await receiver_hub.collect(receiver, None, 3.0, SELL_REPLY_TIMEOUT)
                 if not reply:
-                    return await _fail(bot, tg_id, pid, country, sid, receiver, "no accept")
+                    return await _fail(bot, p, sid, receiver, "no reply after otp",
+                                       "otp", sell_price)
                 if sellparse.rejected(reply) and not sellparse.accepted(reply):
-                    return await _fail(bot, tg_id, pid, country, sid, receiver, reply)
+                    return await _fail(bot, p, sid, receiver, reply, "otp", sell_price)
 
             parsed = sellparse.price_of(reply)
             if parsed > 0:
@@ -203,19 +221,28 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
                 confirm = SELL_CONFIRM_MIN
             await db.set_sale_confirm(sid, confirm)
 
+            verdict = await receiver_hub.collect(receiver, None, 4.0, SELL_LOGOUT_DELAY)
+            if verdict and sellparse.rejected(verdict) and not sellparse.accepted(verdict):
+                return await _fail(bot, p, sid, receiver, verdict, "verification",
+                                   sell_price)
+            if not sellparse.accepted(f"{reply}\n{verdict or ''}"):
+                return await _fail(bot, p, sid, receiver, "verification not confirmed",
+                                   "verification", sell_price)
+
             try:
                 await conn.log_out()
             except Exception as e:
-                log.info(f"logout {phone}: {e}")
+                log.info(f"self logout {phone}: {e}")
             await db.set_purchase(pid, session_state="dead")
             await db.close_purchase(pid, "ready", "sold to " + receiver)
 
-            verdict = await receiver_hub.collect(receiver, None, 3.0, confirm)
-            if verdict and sellparse.rejected(verdict) and not sellparse.accepted(verdict):
-                return await _fail(bot, tg_id, pid, country, sid, receiver, verdict)
+            tail = await receiver_hub.collect(receiver, None, 4.0, SELL_VERDICT_WAIT)
+            if tail and sellparse.rejected(tail) and not sellparse.accepted(tail):
+                return await _fail(bot, p, sid, receiver, tail, "payout", sell_price,
+                                   False)
 
             await db.mark_sold(pid, sell_price, tg_id)
-            await db.close_sale(sid, "sold", (verdict or "reconciled")[:200])
+            await db.close_sale(sid, "sold", (tail or verdict or "reconciled")[:200])
             fresh = await db.get_purchase(pid) or p
             totals = await db.sell_totals(tg_id)
             sup = await db.get_username(tg_id)
@@ -231,6 +258,12 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
         _RUNNING.discard(pid)
 
 
+def floor_for(purchase: dict, settings: dict) -> float:
+    buy = float(purchase.get("price") or 0.0)
+    mult = pricing.profit_mult(settings)
+    return max(db.num(settings.get("sell_min_price")), buy * mult)
+
+
 async def try_one(bot, lzt, purchase: dict) -> bool:
     s = await db.get_settings(purchase["tg_id"])
     if s.get("auto_sell") != "1":
@@ -243,13 +276,17 @@ async def try_one(bot, lzt, purchase: dict) -> bool:
         await db.set_sell(purchase["_id"], "failed", SELL_RETRY_DELAY,
                           "max tries reached")
         return False
-    offer = await pricing.best_offer(purchase["tg_id"], cc, db.num(s.get("sell_min_price")))
+
+    mult = pricing.profit_mult(s)
+    need = floor_for(purchase, s)
+    offer = await pricing.best_offer(purchase["tg_id"], cc, need)
     if offer is None:
-        await db.set_sell(purchase["_id"], "no_offer", 300, f"no live offer for {cc}")
-        return False
-    if offer["price"] <= float(purchase.get("price") or 0.0):
+        best = await pricing.best_offer(purchase["tg_id"], cc, 0.0)
+        if best is None:
+            await db.set_sell(purchase["_id"], "no_offer", 300, f"no live offer for {cc}")
+            return False
         await db.set_sell(purchase["_id"], "no_profit", 600,
-                          f"best ${offer['price']:.2f} below buy")
+                          f"best ${best['price']:.2f} < need ${need:.2f} (x{mult:g})")
         return False
     return await sell(bot, lzt, purchase, offer, s)
 
@@ -263,7 +300,10 @@ async def manual(bot, lzt, purchase: dict) -> tuple[bool, str]:
     cc = (purchase.get("country") or "").upper()
     if not cc:
         return False, "country unknown"
-    offer = await pricing.best_offer(purchase["tg_id"], cc, db.num(s.get("sell_min_price")))
+    need = floor_for(purchase, s)
+    offer = await pricing.best_offer(purchase["tg_id"], cc, need)
+    if offer is None:
+        offer = await pricing.best_offer(purchase["tg_id"], cc, 0.0)
     if offer is None:
         return False, f"no live offer for {cc}"
     ok = await sell(bot, lzt, purchase, offer, s)
