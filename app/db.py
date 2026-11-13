@@ -16,6 +16,7 @@ DEFAULT_2FA = "AccStore2fa"
 LOGIN_STALE = 900
 
 ACTIVE = ("login", "queued", "cleaning", "ready")
+SELLABLE = ("", "queued", "failed", "no_offer", "no_profit", "no_country")
 
 DEFAULTS = {
     "price_min": "0.05", "price_max": "1.00",
@@ -129,7 +130,7 @@ NORMALIZERS = {
     "mail_provider": _enum(("auto", "native", "temp"), "auto"),
     "twofa_password": _pwd(DEFAULTS["twofa_password"]),
     "auto_sell": _flag("1"),
-    "sell_confirm_seconds": _f("600", 300.0, 7200.0),
+    "sell_confirm_seconds": _f("600", 60.0),
     "sell_min_price": _f("0.00", 0.0),
 }
 
@@ -164,6 +165,7 @@ _INDEXES = (
     ("purchases", [("tg_id", ASCENDING)], {}),
     ("purchases", [("tg_id", ASCENDING), ("phone", ASCENDING)], {}),
     ("purchases", [("started_at", ASCENDING)], {}),
+    ("purchases", [("tg_id", ASCENDING), ("status", ASCENDING), ("sell_state", ASCENDING)], {}),
     ("ledger", [("tg_id", ASCENDING), ("created_at", ASCENDING)], {}),
     ("ledger", [("purchase_id", ASCENDING)], {}),
     ("settings", [("tg_id", ASCENDING)], {"unique": True}),
@@ -326,7 +328,8 @@ async def add_purchase(tg_id, item_id, phone, country, price, password="", mail=
         "account_created_ts": int(account_created_ts or 0),
         "spam_flag": bool(spam_flag),
         "expiry_tries": 0, "session_state": "pending", "checked_at": 0,
-        "closed_at": 0, "note": note, "sell_state": "",
+        "closed_at": 0, "note": note, "sell_state": "", "sell_reason": "",
+        "sell_try": 0, "sell_next": 0,
     })).inserted_id
     await _db.ledger.insert_one({
         "tg_id": tg_id, "purchase_id": pid, "item_id": item_id,
@@ -396,6 +399,38 @@ async def ready_purchases(tg_id: int, limit: int = 100) -> list[dict]:
     return await _db.purchases.find(
         {"tg_id": tg_id, "status": "ready"}
     ).sort("closed_at", DESCENDING).limit(limit).to_list(None)
+
+
+async def ready_count(tg_id: int) -> int:
+    return await _db.purchases.count_documents({"tg_id": tg_id, "status": "ready"})
+
+
+async def sell_queue(tg_id: int, limit: int = 5) -> list[dict]:
+    now = _now()
+    return await _db.purchases.find({
+        "tg_id": tg_id, "status": "ready", "session_string": {"$ne": ""},
+        "sell_state": {"$in": list(SELLABLE)},
+        "sell_next": {"$lte": now},
+    }).sort("closed_at", ASCENDING).limit(limit).to_list(None)
+
+
+async def set_sell(pid, state: str, delay: int = 0, reason: str = ""):
+    oid = _oid(pid)
+    if oid:
+        upd = {"sell_state": state, "sell_next": _now() + max(0, int(delay))}
+        if reason:
+            upd["sell_reason"] = reason[:300]
+        await _db.purchases.update_one({"_id": oid}, {"$set": upd})
+
+
+async def bump_sell_try(pid, delay: int, reason: str = ""):
+    oid = _oid(pid)
+    if oid:
+        upd = {"$set": {"sell_state": "failed",
+                        "sell_next": _now() + max(0, int(delay))}}
+        if reason:
+            upd["$set"]["sell_reason"] = reason[:300]
+        await _db.purchases.update_one({"_id": oid}, {"$inc": {"sell_try": 1}, **upd})
 
 
 async def over_age(tg_id: int, hours: float = TARGET_HOURS, limit: int = 500) -> list[dict]:
@@ -511,7 +546,8 @@ async def mark_sold(pid, sell_price: float, tg_id: int | None = None) -> bool:
         {"$set": {"sell_price": float(sell_price), "status": "sold", "closed_at": now}})
     await _db.purchases.update_one(
         {"_id": oid},
-        {"$set": {"status": "sold", "closed_at": now, "expires_at": 0, "sell_state": "sold"}})
+        {"$set": {"status": "sold", "closed_at": now, "expires_at": 0,
+                  "sell_state": "sold", "sell_next": 0, "sell_reason": ""}})
     return True
 
 
@@ -668,11 +704,6 @@ async def latest_prices(tg_id: int, max_age: float) -> list[dict]:
     return await cursor.to_list(None)
 
 
-async def price_count(tg_id: int, max_age: float) -> int:
-    return await _db.prices.count_documents(
-        {"tg_id": tg_id, "ts": {"$gte": _now() - int(max_age)}})
-
-
 async def add_sale(tg_id: int, purchase_id, country: str, receiver_id, receiver: str,
                    buy_price: float, sell_price: float, confirm_seconds: int) -> str:
     now = _now()
@@ -685,8 +716,21 @@ async def add_sale(tg_id: int, purchase_id, country: str, receiver_id, receiver:
     })).inserted_id
     await _db.purchases.update_one(
         {"_id": _oid(purchase_id)},
-        {"$set": {"sell_state": "selling", "sell_receiver": receiver_key(receiver)}})
+        {"$set": {"sell_state": "selling", "sell_next": 0, "sell_reason": "",
+                  "sell_receiver": receiver_key(receiver)}})
     return str(sid)
+
+
+async def set_sale_price(sid, price: float):
+    oid = _oid(sid)
+    if oid:
+        await _db.sales.update_one({"_id": oid}, {"$set": {"sell_price": float(price)}})
+
+
+async def set_sale_confirm(sid, seconds: int):
+    oid = _oid(sid)
+    if oid:
+        await _db.sales.update_one({"_id": oid}, {"$set": {"confirm_seconds": int(seconds)}})
 
 
 async def close_sale(sid, status: str, note: str = ""):
@@ -698,21 +742,29 @@ async def close_sale(sid, status: str, note: str = ""):
         {"$set": {"status": status, "closed_at": _now(), "note": note[:300]}})
 
 
+async def sell_totals(tg_id: int) -> dict:
+    investment = sold = 0.0
+    count = 0
+    cursor = _db.sales.find({"tg_id": tg_id, "status": "sold"},
+                            {"buy_price": 1, "sell_price": 1})
+    async for row in cursor:
+        count += 1
+        investment += float(row.get("buy_price") or 0.0)
+        sold += float(row.get("sell_price") or 0.0)
+    profit = sold - investment
+    return {"investment": investment, "sold": sold, "profit": profit, "count": count,
+            "roi": (profit / investment * 100) if investment else 0.0}
+
+
 async def sale_stats(tg_id: int) -> dict:
-    out = {"total": 0, "sold": 0, "failed": 0, "revenue": 0.0, "spent": 0.0}
-    cursor = _db.sales.find({"tg_id": tg_id},
-                            {"status": 1, "sell_price": 1, "buy_price": 1})
+    out = {"total": 0, "sold": 0, "failed": 0}
+    cursor = _db.sales.find({"tg_id": tg_id}, {"status": 1})
     async for row in cursor:
         out["total"] += 1
         if row.get("status") == "sold":
             out["sold"] += 1
-            out["revenue"] += float(row.get("sell_price") or 0.0)
-            out["spent"] += float(row.get("buy_price") or 0.0)
         elif row.get("status") == "failed":
             out["failed"] += 1
-    profit = out["revenue"] - out["spent"]
-    out["profit"] = profit
-    out["roi"] = (profit / out["spent"] * 100) if out["spent"] else 0.0
     return out
 
 
