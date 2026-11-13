@@ -72,7 +72,10 @@ async def main():
 
     @dp.errors()
     async def on_error(event: ErrorEvent):
-        log.exception(f"update {event.update_id}: {event.exception}")
+        update = getattr(event, "update", None)
+        uid = getattr(update, "update_id", "?")
+        log.error(f"update {uid}: {event.exception!r}")
+        log.debug("traceback", exc_info=event.exception)
         return True
 
     for r in ROUTERS:
