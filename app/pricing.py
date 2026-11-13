@@ -14,7 +14,10 @@ LION = "lion"
 _FLAG = "[\U0001F1E6-\U0001F1FF]{2}"
 _OFFER = re.compile(
     rf"(?P<flag>{_FLAG})?\s*\b(?P<cc>[A-Z]{{2}})\b\s*\+?(?P<dial>\d{{1,4}})?"
-    r"\s*(?:→|->|=>|:|=|—|–|\|)?\s*\$\s*(?P<price>\d{1,4}(?:[.,]\d{1,2})?)")
+    r"\s*(?:→|->|=>|:|=|—|–|\|)\s*\$?\s*(?P<price>\d{1,4}(?:[.,]\d{1,2})?)")
+_DOLLAR = re.compile(
+    rf"(?P<flag>{_FLAG})?\s*\b(?P<cc>[A-Z]{{2}})\b\s*\+?(?P<dial>\d{{1,4}})?"
+    r"\s*\$?\s*(?P<price>\d{1,4}(?:[.,]\d{1,2})?)\s*\$")
 _LOOSE = re.compile(
     rf"(?P<flag>{_FLAG})?\s*\b(?P<cc>[A-Z]{{2}})\b\s*\+?(?P<dial>\d{{1,4}})?"
     r"[^\n\d$]{0,8}(?P<price>\d{1,4}(?:[.,]\d{1,2})?)")
@@ -31,30 +34,30 @@ def _num(raw: str) -> float:
 
 
 def _dial(raw) -> str:
-    text = "".join(ch for ch in str(raw or "") if ch.isdigit())
-    return text[:4]
+    return "".join(ch for ch in str(raw or "") if ch.isdigit())[:4]
 
 
 def parse_offers(text: str) -> list[dict]:
     found: dict[str, dict] = {}
-    source = text or ""
-    for rx in (_OFFER, _LOOSE):
-        for line in source.splitlines():
-            clean = line.strip()
-            if not clean or "$" not in clean and "→" not in clean:
-                continue
+    for line in (text or "").splitlines():
+        clean = line.strip()
+        if not clean:
+            continue
+        for rx in (_OFFER, _DOLLAR, _LOOSE):
+            hit = False
             for m in rx.finditer(clean):
                 cc = m.group("cc").upper()
                 price = _num(m.group("price"))
-                if not price or not countries.name_of(cc):
+                if not price or price > 10_000 or not countries.name_of(cc):
                     continue
                 if cc in found and found[cc]["price"] >= price:
                     continue
-                flag = m.group("flag") or countries.flag_of(cc)
-                found[cc] = {"country": cc, "flag": flag,
+                found[cc] = {"country": cc,
+                             "flag": m.group("flag") or countries.flag_of(cc),
                              "dial": _dial(m.group("dial")), "price": price}
-        if found:
-            break
+                hit = True
+            if hit:
+                break
     return sorted(found.values(), key=lambda o: -o["price"])
 
 
@@ -85,7 +88,7 @@ def kind_of(username: str) -> str:
 
 
 def _blank() -> dict:
-    return {"cap": -1, "confirm": 0, "offers": [], "replies": 0, "raw": ""}
+    return {"cap": -1, "confirm": 0, "offers": [], "replies": 0, "raw": "", "warm": False}
 
 
 def _absorb(out: dict, reply: str):
@@ -111,9 +114,19 @@ async def probe(receiver: dict) -> dict:
     username = receiver.get("username") or ""
     kind = receiver.get("kind") or kind_of(username)
     out = _blank()
+
     if kind == LION:
         _absorb(out, await receiver_hub.start_and_read(username, LION_START, PROBE_TIMEOUT))
         return out
+
+    _absorb(out, await receiver_hub.command(username, CAP_COMMAND, PROBE_TIMEOUT))
+    if out["replies"]:
+        return out
+
+    out["warm"] = await receiver_hub.start_bot(username)
+    if not out["warm"]:
+        return out
+    await asyncio.sleep(2.5)
     _absorb(out, await receiver_hub.command(username, CAP_COMMAND, PROBE_TIMEOUT))
     return out
 
@@ -144,13 +157,16 @@ async def refresh_all(tg_id: int) -> dict:
             except Exception as e:
                 log.info(f"refresh {receiver.get('username')}: {e}")
                 out["errors"] += 1
-                out["empty"].append(f"@{receiver.get('username')} error")
+                out["empty"].append(f"@{receiver.get('username')} error {e}"[:90])
                 return
             if result["cap"] > 0:
                 out["caps"] += 1
             out["prices"] += len(result["offers"])
             if not result["offers"]:
-                out["empty"].append(f"@{receiver.get('username')} no offers")
+                reason = "no reply" if not result["replies"] else "no offers parsed"
+                if result.get("warm") and not result["replies"]:
+                    reason = "warm sent, still no reply"
+                out["empty"].append(f"@{receiver.get('username')} {reason}")
 
     await asyncio.gather(*[one(r) for r in rows], return_exceptions=True)
     return out
