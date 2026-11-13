@@ -632,12 +632,21 @@ async def fail_receiver(rid):
         await _db.receivers.update_one({"_id": oid}, {"$inc": {"fails": 1}})
 
 
-async def save_prices(tg_id: int, receiver_id, prices: dict):
-    if not prices:
+async def save_prices(tg_id: int, receiver_id, offers: list[dict]) -> int:
+    if not offers:
         return 0
     now = _now()
-    rows = [{"tg_id": tg_id, "receiver_id": _oid(receiver_id), "country": cc,
-             "price": float(price), "ts": now} for cc, price in prices.items()]
+    rows = []
+    for offer in offers:
+        cc = str(offer.get("country") or "").strip().upper()
+        value = num(offer.get("price"))
+        if not cc or value <= 0:
+            continue
+        rows.append({"tg_id": tg_id, "receiver_id": _oid(receiver_id), "country": cc,
+                     "flag": str(offer.get("flag") or ""), "dial": str(offer.get("dial") or ""),
+                     "price": float(value), "ts": now})
+    if not rows:
+        return 0
     await _db.prices.insert_many(rows)
     await _db.prices.delete_many({"tg_id": tg_id, "ts": {"$lt": now - 172_800}})
     return len(rows)
@@ -649,7 +658,8 @@ async def latest_prices(tg_id: int, max_age: float) -> list[dict]:
         {"$match": {"tg_id": tg_id, "ts": {"$gte": cutoff}}},
         {"$sort": {"ts": DESCENDING}},
         {"$group": {"_id": {"receiver_id": "$receiver_id", "country": "$country"},
-                    "price": {"$first": "$price"}, "ts": {"$first": "$ts"}}},
+                    "price": {"$first": "$price"}, "ts": {"$first": "$ts"},
+                    "flag": {"$first": "$flag"}, "dial": {"$first": "$dial"}}},
     ]
     cursor = await _db.prices.aggregate(pipeline)
     return await cursor.to_list(None)
