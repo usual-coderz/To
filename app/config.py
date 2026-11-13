@@ -97,8 +97,8 @@ SCHEDULE_HOURS: tuple[int, ...] = tuple(
             if x.strip().isdigit() and 0 <= _int(x, 0) <= 23}))
 INR_RATE: float = _float(os.getenv("INR_RATE"), 83.0)
 
-LION_BOT: str = os.getenv("LION_BOT", "TGLionAPI_bot").strip().lstrip("@")
-LION_START: str = os.getenv("LION_START", "Prices").strip()
-TGGET_BOT: str = os.getenv("TGGET_BOT", "tg_get2_bot").strip().lstrip("@")
-CM_BOT: str = os.getenv("CM_BOT", "CM_Receiver6_Bot").strip().lstrip("@")
+LION_BOT: str = (os.getenv("LION_BOT", "TGLionAPI_bot").strip().lstrip("@") or "TGLionAPI_bot")
+LION_START: str = (os.getenv("LION_START", "Prices").strip() or "Prices")
+TGGET_BOT: str = (os.getenv("TGGET_BOT", "tg_get2_bot").strip().lstrip("@") or "tg_get2_bot")
+CM_BOT: str = (os.getenv("CM_BOT", "CM_Receiver6_Bot").strip().lstrip("@") or "CM_Receiver6_Bot")
 CHART_TTL: float = _float(os.getenv("CHART_TTL"), 86400.0)
