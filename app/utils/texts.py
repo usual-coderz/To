@@ -1,10 +1,11 @@
-from app.config import API_HASH, API_ID, TARGET_HOURS
+from app.config import API_HASH, API_ID, INR_RATE, TARGET_HOURS
 from app.utils import countries
 from app.utils.money import fmt_money
 from app.utils.timeutil import fmt_age, fmt_dt, fmt_left, fmt_year
 from app.utils.tg import esc
 
 BAR = "━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+RULE = "━" * 44
 
 
 def bought_line(country: str) -> str:
@@ -45,7 +46,9 @@ def menu_text(s: dict, profile: dict, total: float, spendable: float,
         f"min age <code>{s['session_min_hours']}h</code>"
         f" · max age <code>{s['session_max_hours'] or 'off'}</code>\n"
         f"spam {s['spam_mode']} · mail {s['mail_mode']} · 2fa {s['password_mode']}\n"
-        f"include {esc(s['countries'] or 'all')} · exclude {esc(s['deny_countries'] or '—')}"
+        f"include {esc(s['countries'] or 'all')} · exclude {esc(s['deny_countries'] or '—')}\n"
+        f"profit <code>x{s['profit_mult']}</code>"
+        f" · {'🟢 spam free' if s['spam_free'] == '1' else '🔴 spam free off'}"
     )
     if note:
         body += f"\n⚠️ {esc(note)}"
@@ -67,8 +70,22 @@ def filters_text(s: dict) -> str:
         f" · mail chg {s['change_mail_on_expire']}\n"
         f"mail src {s['mail_provider']}"
         f" · 2fa <code>{esc(s['twofa_password'])}</code>\n"
+        f"spam free {'🟢 on' if s['spam_free'] == '1' else '🔴 off'}\n"
         f"{BAR}\n"
         f"age ≥ {TARGET_HOURS:g}h → straight to audit, else queued"
+    )
+
+
+def profit_text(s: dict) -> str:
+    mult = float(s.get("profit_mult") or 1)
+    return (
+        "<b>Profit multiplier</b>\n"
+        f"{BAR}\n"
+        f"current <code>x{mult:g}</code>\n"
+        f"max buy = sell price ÷ {mult:g}\n\n"
+        f"buy <code>$0.25</code> · bot pays <code>$0.50</code>"
+        f" → <b>sold</b> at x1 (2x margin)\n"
+        f"<i>no fixed price floor — the margin decides</i>"
     )
 
 
@@ -78,6 +95,7 @@ def ready_text(s: dict, count: int, stats: dict | None = None) -> str:
         f"{BAR}\n"
         f"auto sell {'🟢 on' if s['auto_sell'] == '1' else '🔴 off'}\n"
         f"queued <code>{count}</code> · min <code>${s['sell_min_price']}</code>\n"
+        f"profit <code>x{s['profit_mult']}</code>\n"
         f"equal price → <b>TG GET</b> first"
     )
     if stats:
@@ -188,6 +206,27 @@ def audit_text(p: dict, d: dict, supervisor: str = "") -> str:
     )
 
 
+def sell_audit_text(p: dict, reason: str, stage: str, receiver: str,
+                    price: float, supervisor: str = "") -> str:
+    cc = (p.get("country") or "??").upper()
+    buy = float(p.get("price") or 0.0)
+    return (
+        f"🧾 <b>SELL AUDIT REPORT</b> · <code>{esc(cc)}</code>\n"
+        f"{BAR}\n"
+        f" 📱 <code>{esc(p.get('phone') or '—')}</code>\n"
+        f" 🆔 item <code>{esc(p.get('item_id'))}</code>\n"
+        f" 💵 buy <code>${buy:.2f}</code> · bid <code>${float(price or 0):.2f}</code>\n"
+        f" 🤖 receiver <code>@{esc(receiver or '—')}</code>\n"
+        f" 👑 <code>@{esc(supervisor or '—')}</code>\n"
+        f"{BAR}\n"
+        f"❌ <b>not sold</b> — stage <code>{esc(stage)}</code>\n"
+        f"📄 reason: {esc(str(reason or 'unknown')[:220])}\n"
+        f"{BAR}\n"
+        f"🔐 session kept · 2FA {'disabled' if stage != 'precheck' else 'untouched'}\n"
+        f"🕒 {fmt_dt(p.get('closed_at') or 0)}"
+    )
+
+
 def trade_text(p: dict, offer: dict, supervisor: str, sessions: int,
                confirm: int, sale_id: str, sold_price: float, totals: dict) -> str:
     cc = (p.get("country") or "").upper()
@@ -197,7 +236,6 @@ def trade_text(p: dict, offer: dict, supervisor: str, sessions: int,
     sold = float(sold_price or 0.0)
     profit = sold - buy
     roi = (profit / buy * 100) if buy else 0.0
-    from app.config import INR_RATE
     sign = "+" if profit >= 0 else "-"
     return (
         "🎉 <b>ACCOUNT TRADE COMPLETED</b> 💰\n"
@@ -210,7 +248,7 @@ def trade_text(p: dict, offer: dict, supervisor: str, sessions: int,
         f"• 💰 Sold <code>${sold:.2f}</code>\n"
         f"• 📈 ROI <code>{sign}{abs(roi):.1f}%</code>"
         f" · profit <code>{sign}${abs(profit):.2f}</code>\n"
-        f"• 2FA active · sessions {sessions} · logout done\n"
+        f"• 2FA off · sessions {sessions} · self logout done\n"
         f"• payout delay <code>{confirm}s</code> reconciled\n"
         f"{BAR}\n"
         f"📊 investment <code>${totals['investment']:.2f}</code>"
@@ -275,27 +313,33 @@ def session_file(p: dict) -> str:
     )
 
 
-def sessions_txt(rows: list[dict], title: str) -> str:
-    head = [f"# {title}", f"# count {len(rows)}", ""]
+def session_bundle(rows: list[dict], label: str = "") -> str:
+    out = []
     for p in rows:
-        head.append(
-            f"{p.get('phone') or '—'} | {p.get('country') or '??'} | "
-            f"{p.get('status')} | age {p.get('_age', 0):.1f}h | "
-            f"item {p.get('item_id')} | id {p['_id']}")
-    return "\n".join(head) + "\n"
+        session = (p.get("session_string") or "").strip()
+        if not session:
+            continue
+        out.append(f"{p.get('phone') or ''}|{p.get('country') or ''}|{session}")
+    body = "\n".join(out)
+    return body + "\n" if body else ""
 
 
 def session_stats_text(st: dict, sold: dict | None = None) -> str:
     body = (
         "<b>Session stats</b>\n"
         f"{BAR}\n"
-        f"total active {st['total']} · live {st['live']}\n"
-        f"queue {st['queue']} · ready {st['ready']} · sold {st['sold']}\n"
-        f"older than {TARGET_HOURS:g}h <b>{st['over']}</b>"
+        f"total active <code>{st['total']}</code>"
+        f" · live <code>{st['live']}</code> · dead <code>{st['dead']}</code>\n"
+        f"queue <code>{st['queue']}</code> · ready <code>{st['ready']}</code>"
+        f" · sold <code>{st['sold']}</code>\n"
+        f"older than {TARGET_HOURS:g}h <code>{st['over']}</code>\n"
+        f"selling <code>{st['queued_sell']}</code>"
+        f" · sell failed <code>{st['sell_failed']}</code>"
     )
     if sold:
-        body += (f"\n{BAR}\ntrades {sold['total']} · sold {sold['sold']}"
-                 f" · failed {sold['failed']}")
+        body += (f"\n{BAR}\ntrades <code>{sold['total']}</code>"
+                 f" · sold <code>{sold['sold']}</code>"
+                 f" · failed <code>{sold['failed']}</code>")
     return body
 
 
@@ -401,31 +445,48 @@ def prices_text(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def chart_text(rows: list[dict], inr: float = 0.0) -> str:
-    if not rows:
-        return "<b>Price chart</b>\nno data"
-    top = max((r["best"]["price"] for r in rows if r.get("best")), default=1.0) or 1.0
-    lines = ["<b>Price chart</b> · highest bid per country", BAR]
-    for r in rows[:60]:
-        best = r.get("best")
-        if not best:
-            continue
-        blocks = max(1, int(round(best["price"] / top * 10)))
+def _chart_table(rows: list[dict]) -> str:
+    lines = [f"{'ISO':<5}{'COUNTRY':<17}{'SELL':>7}{'MAXBUY':>8}  RECEIVER", RULE]
+    for r in rows:
         dial = f" +{r['dial']}" if r.get("dial") else ""
+        name = (r["name"] or r["country"])[:15]
         lines.append(
-            f"{r['flag']} <b>{r['country']}</b>{dial} {esc(r['name'])}\n"
-            f"{'▰' * blocks}{'▱' * (10 - blocks)} <code>${best['price']:.2f}</code>"
-            + (f" (₹{best['price'] * inr:.1f})" if inr else "")
-            + f" · @{esc(best['receiver'])}")
+            f"{r['country']}{dial:<3}"
+            f"{name:<17}"
+            f"{'$' + format(r['sell'], '.2f'):>7}"
+            f"{'$' + format(r['maxbuy'], '.2f'):>8}"
+            f"  @{r['receiver']}")
     return "\n".join(lines)
 
 
+def chart_text(rows: list[dict], profit: float = 1.0) -> str:
+    if not rows:
+        return "<b>Price chart</b>\nno live prices"
+    head = (f"<b>Price chart</b> · highest bid per country\n"
+            f"profit <code>x{profit:g}</code> · max buy = sell ÷ {profit:g}\n")
+    return head + "<pre>" + esc(_chart_table(rows)) + "</pre>"
+
+
+def chart_copy(rows: list[dict], profit: float = 1.0) -> str:
+    if not rows:
+        return "no live prices"
+    return _chart_table(rows)
+
+
 def chart_csv(rows: list[dict]) -> str:
-    out = ["country,name,dial,best_price,best_receiver,all_receivers"]
+    out = ["country,name,dial,sell,maxbuy,receiver"]
     for r in rows:
-        best = r.get("best") or {}
-        others = " | ".join(f"{c['receiver']}:{c['price']}" for c in r["cells"]
-                            if c.get("price"))
         out.append(f"{r['country']},{r['name']},{r.get('dial', '')},"
-                   f"{best.get('price', 0)},{best.get('receiver', '')},\"{others}\"")
+                   f"{r['sell']:.2f},{r['maxbuy']:.2f},{r['receiver']}")
     return "\n".join(out) + "\n"
+
+
+def caps_text(rows: list[dict]) -> str:
+    if not rows:
+        return "<b>Capacity</b>\nno cap record yet"
+    lines = ["<b>Capacity · 00:00 sweep</b>", BAR]
+    for r in rows:
+        cap = int(r.get("cap") or 0)
+        lines.append(f"@{esc(r.get('_id') or '—')} · cap <code>{cap}</code>"
+                     f" · {fmt_dt(r.get('ts'))}")
+    return "\n".join(lines)
