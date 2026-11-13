@@ -5,7 +5,7 @@ from aiogram import Router
 from aiogram.filters import Command
 from aiogram.types import Message
 
-from app import db, engine, receiver_hub, receivers, seller
+from app import db, engine, pricing, receiver_hub, receivers, seller
 from app.config import OWNER_IDS, TARGET_HOURS
 from app.deps import lzt
 from app.lzt import extract_auth_key, extract_dc_id
@@ -14,6 +14,7 @@ from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import mail_state, pass_state, spam_state
 from app.utils.money import fmt_money
+from app.utils.texts import extracted_text
 from app.utils.timeutil import fmt_left
 
 router = Router()
@@ -49,6 +50,28 @@ async def cmd_hub(m: Message):
         ok = await receiver_hub._resolve(r["username"]) if online else None
         lines.append(f"{'✅' if ok else '❌'} @{r['username']} [{r.get('kind')}]")
     await m.answer("<code>" + tg.esc("\n".join(lines)) + "</code>")
+
+
+@router.message(Command("probe"))
+async def cmd_probe(m: Message):
+    if not _owner(m):
+        return
+    parts = (m.text or "").split(maxsplit=1)
+    if len(parts) < 2:
+        return await m.answer("Usage: /probe @username")
+    key = parts[1].strip().lstrip("@")
+    receiver = await db.get_receiver_by_key(m.from_user.id, key)
+    if not receiver:
+        return await m.answer("❌ receiver not registered, add it first")
+    await m.answer("🔎 probing…")
+    out = await pricing.probe(receiver)
+    head = (f"@{tg.esc(key)} · kind {receiver.get('kind')}"
+            f" · replies {out['replies']} · cap {out['cap']}"
+            f" · parsed {len(out['offers'])}")
+    body = extracted_text(out["offers"], key)
+    raw = (out.get("raw") or "empty")[:2500]
+    await tg.send(m.bot, m.chat.id,
+                  f"{head}\n\n{body}\n\n<b>Raw</b>\n<code>{tg.esc(raw)}</code>")
 
 
 @router.message(Command("warm"))
