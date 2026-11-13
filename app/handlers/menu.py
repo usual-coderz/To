@@ -7,7 +7,7 @@ from app.config import OWNER_IDS
 from app.deps import lzt
 from app.utils import tg
 from app.utils import wallet as wallet_view
-from app.utils.texts import menu_text
+from app.utils.texts import menu_text, profit_text
 from app.utils.timeutil import fmt_dt
 
 router = Router()
@@ -72,6 +72,13 @@ async def cmd_start(m: Message):
 async def cb_main(cq: CallbackQuery):
     text, markup = await render_menu(cq.from_user.id)
     await show(cq, text, markup)
+    await cq.answer()
+
+
+@router.callback_query(F.data == "m:profit")
+async def cb_profit(cq: CallbackQuery):
+    s = await db.get_settings(cq.from_user.id)
+    await show(cq, profit_text(s), kb.profit(s))
     await cq.answer()
 
 
