@@ -8,7 +8,7 @@ from aiogram.types import CallbackQuery, Message
 from app import db, keyboards as kb
 from app.handlers.menu import show
 from app.utils import tg
-from app.utils.texts import filters_text
+from app.utils.texts import filters_text, profit_text
 
 router = Router()
 
@@ -23,6 +23,7 @@ NUMERIC = {
     "daily_spend_cap": ("Daily spend cap", "0 = unlimited", 0.0, 100_000.0, 2),
     "sell_confirm_seconds": ("Confirm window", "300-7200 seconds", 300.0, 7200.0, 0),
     "sell_min_price": ("Min sell price", "0 = sell anything", 0.0, 10_000.0, 2),
+    "profit_mult": ("Profit multiplier", "1 = no margin · 1.2 = 20% margin", 1.0, 10.0, 2),
 }
 
 TEXT_KEYS = {"twofa_password": "8-64 characters, used as the new cloud password"}
@@ -34,21 +35,30 @@ COUNTRY_KEYS = {
 
 AGE_KEYS = {"session_min_hours", "session_max_hours"}
 
-MAIN_KEYS = {"auto_buy", "auto_sell"}
+MAIN_KEYS = {"auto_buy", "auto_sell", "spam_free"}
+
+PROFIT_KEYS = {"profit_mult"}
 
 _SPLIT_RE = re.compile(r"[,\s;|]+")
 
 
 def screen_for(key: str) -> str:
-    return "main" if key in MAIN_KEYS else "filters"
+    if key in MAIN_KEYS:
+        return "main"
+    if key in PROFIT_KEYS:
+        return "profit"
+    return "filters"
 
 
 async def render_screen(cq: CallbackQuery, key: str):
-    if screen_for(key) == "main":
+    screen = screen_for(key)
+    if screen == "main":
         from app.handlers.menu import render_menu
         text, markup = await render_menu(cq.from_user.id)
         return await show(cq, text, markup)
     s = await db.get_settings(cq.from_user.id)
+    if screen == "profit":
+        return await show(cq, profit_text(s), kb.profit(s))
     return await show(cq, filters_text(s), kb.filters(s))
 
 
@@ -105,7 +115,7 @@ async def cb_price(cq: CallbackQuery):
 @router.callback_query(F.data == "m:spam")
 async def cb_spam(cq: CallbackQuery):
     await show(cq, "<b>Spam filter</b>\n"
-                   "<i>no</i> — server filters, item flag only noted\n"
+                   "<i>no</i> — fully spam free, geo spam rejected too\n"
                    "<i>yes</i> — only spam-blocked accounts\n"
                    "<i>any</i> — no server filter, local check enforces",
                kb.pick("s:spam_mode", ["no", "yes", "any"]))
@@ -225,7 +235,7 @@ async def on_text(m: Message):
     else:
         label, _, lo, hi, _ = NUMERIC[key]
         try:
-            number = float(raw.replace(" ", "").replace(",", "."))
+            number = float(raw.replace(" ", "").replace(",", ".").replace("x", ""))
         except ValueError:
             _set_pending(m.from_user.id, key, hit["chat_id"], hit["message_id"])
             return await m.answer(f"{label}: number expected · /cancel")
@@ -246,6 +256,10 @@ async def on_text(m: Message):
                 "checked locally after check-account")
 
     s = await db.get_settings(m.from_user.id)
+    if key in PROFIT_KEYS:
+        return await _replace(m.bot, hit["chat_id"], hit["message_id"],
+                              f"✅ saved <code>x{stored}</code>{note}\n\n{profit_text(s)}",
+                              kb.profit(s))
     await _replace(m.bot, hit["chat_id"], hit["message_id"],
                    f"✅ saved <code>{tg.esc(stored or '-')}</code>{note}\n\n{filters_text(s)}",
                    kb.filters(s))
