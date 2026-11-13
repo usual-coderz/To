@@ -176,6 +176,7 @@ async def start_bot(username: str, param: str = "") -> bool:
     entity = await _resolve(username)
     if entity is None:
         return False
+    param = (param or "").strip()
     if param:
         try:
             await client(functions.messages.StartBotRequest(
@@ -184,17 +185,16 @@ async def start_bot(username: str, param: str = "") -> bool:
             return True
         except Exception as e:
             log.info(f"start_bot {username} param={param}: {e}")
-    try:
-        await client(functions.messages.StartBotRequest(
-            bot=entity, peer=entity, random_id=random.getrandbits(63)))
-        return True
-    except Exception as e:
-        log.info(f"start_bot {username} plain: {e}")
+        try:
+            await client.send_message(entity, "/start " + param)
+            return True
+        except Exception as e:
+            log.info(f"start_param_fallback {username}: {e}")
     try:
         await client.send_message(entity, "/start")
         return True
     except Exception as e:
-        log.info(f"start_fallback {username}: {e}")
+        log.info(f"start_plain {username}: {e}")
         return False
 
 
