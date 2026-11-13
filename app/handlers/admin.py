@@ -12,7 +12,7 @@ from app.lzt import extract_auth_key, extract_dc_id
 from app.session_manager import dc_addr, login_with_auth_key
 from app.utils import tg
 from app.utils import wallet as wallet_view
-from app.utils.filters import mail_state, pass_state, spam_state
+from app.utils.filters import geo_spam_state, mail_state, pass_state, spam_state
 from app.utils.money import fmt_money
 from app.utils.texts import extracted_text
 from app.utils.timeutil import fmt_left
@@ -250,6 +250,7 @@ async def cmd_diag(m: Message):
         f"auto_buy {s['auto_buy']} · auto_sell {s['auto_sell']} · cap ${s['daily_spend_cap']}"
         f" · spent {spent:.2f}\n"
         f"price {s['price_min']}–{s['price_max']} · currency {s['currency']}\n"
+        f"profit x{s['profit_mult']} · spam free {s['spam_free']}\n"
         f"target {TARGET_HOURS:g}h · min age {s['session_min_hours']}h"
         f" · max age {s['session_max_hours'] or 'off'} · queued {queued}\n"
         f"2fa <code>{tg.esc(s['twofa_password'])}</code>"
@@ -277,14 +278,16 @@ async def cmd_peek(m: Message):
     item = chk.get("item") or {}
     key = extract_auth_key(item)
     dc = extract_dc_id(item)
-    keep = ("price", "telegram_spam_block", "spam_block", "telegram_email", "email_type",
-            "telegram_password", "country", "created_at", "registration_date",
-            "telegram_session_age", "session_age", "session_age_period", "nsb")
+    keep = ("price", "telegram_spam_block", "spam_block", "telegram_spam_geo", "spam_geo",
+            "telegram_email", "email_type", "telegram_password", "country", "created_at",
+            "registration_date", "telegram_session_age", "session_age",
+            "session_age_period", "nsb")
     lines = [f"{k} = {item.get(k)!r}" for k in keep if k in item]
     lines.append("—")
     lines.append(f"auth_key = {'present len ' + str(len(key)) if key else 'MISSING'}")
     lines.append(f"dc_id = {dc or 'MISSING'} -> {_dc_hint(dc)}")
     lines.append(f"spam_state = {spam_state(item)!r}")
+    lines.append(f"geo_spam_state = {geo_spam_state(item)!r}")
     lines.append(f"email_state = {mail_state(item)!r}")
     lines.append(f"pass_state = {pass_state(item)!r}")
     lines.append("—")
