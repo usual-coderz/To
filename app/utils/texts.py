@@ -289,45 +289,66 @@ def payment_text(p: dict) -> str:
             f" · {esc(kind)} · {esc(str(note)[:30])}")
 
 
-def receivers_text(rows: list[dict], prices: dict | None = None) -> str:
+def _offer_line(cc: str, dial: str, name: str, price: float, receiver: str = "") -> str:
+    flag = countries.flag_of(cc)
+    head = f"{flag} <b>{cc}</b> +{dial}" if dial else f"{flag} <b>{cc}</b>"
+    body = f"{head} {esc(name)} → ${price:.2f}"
+    return f"{body} @{esc(receiver)}" if receiver else body
+
+
+def receivers_text(rows: list[dict]) -> str:
     if not rows:
         return "<b>Receivers</b>\nno receiver added"
     lines = ["<b>Receivers</b>", BAR]
     for r in rows:
         cap = r.get("cap")
         cap_text = "?" if cap is None or cap < 0 else str(cap)
-        conf = r.get("confirm_seconds") or "auto"
+        probe = "link" if r.get("kind") == "lion" else "/cap"
         mark = "🟢" if r.get("enabled") else "⚪"
         lines.append(f"{mark} @{esc(r['username'])} · {esc(r.get('kind'))}"
-                     f" · cap {cap_text} · confirm {conf}s · fails {r.get('fails', 0)}")
-        if prices and r["username"] in prices:
-            lines.append(f"   price reply: {esc(str(prices[r['username']])[:60])}")
+                     f" · {probe} · cap {cap_text}"
+                     f" · confirm {r.get('confirm_seconds') or 'auto'}s"
+                     f" · fails {r.get('fails', 0)}")
     return "\n".join(lines)
 
 
-def receiver_detail_text(r: dict, prices: int = 0) -> str:
+def receiver_detail_text(r: dict, offers: int = 0) -> str:
     cap = r.get("cap")
+    probe = "link" if r.get("kind") == "lion" else "/cap"
     return (
         f"<b>@{esc(r['username'])}</b>\n"
         f"{BAR}\n"
-        f"kind {esc(r.get('kind'))} · {'🟢 on' if r.get('enabled') else '⚪ off'}\n"
+        f"kind {esc(r.get('kind'))} · probe {probe}"
+        f" · {'🟢 on' if r.get('enabled') else '⚪ off'}\n"
         f"cap {'?' if cap is None or cap < 0 else cap}"
         f" · confirm {r.get('confirm_seconds') or 'auto'}s\n"
-        f"fails {r.get('fails', 0)} · countries cached {prices}"
+        f"fails {r.get('fails', 0)} · countries cached {offers}"
     )
+
+
+def extracted_text(offers: list[dict], receiver: str = "") -> str:
+    if not offers:
+        return "<b>Extracted</b>\nnothing parsed"
+    lines = [f"<b>Extracted</b> · {len(offers)}", BAR]
+    for o in offers[:80]:
+        lines.append(_offer_line(o["country"], o.get("dial", ""),
+                                 countries.name_of(o["country"]), o["price"], receiver))
+    return "\n".join(lines)
 
 
 def prices_text(rows: list[dict]) -> str:
     if not rows:
         return "<b>Prices</b>\nno live prices"
-    lines = ["<b>Best offers</b>", BAR]
-    for r in rows[:40]:
+    lines = ["<b>Extracted offers</b>", BAR]
+    for r in rows[:60]:
         offer = r["offers"][0]
+        lines.append(_offer_line(r["country"], offer.get("dial", ""),
+                                 countries.name_of(r["country"]), offer["price"],
+                                 offer["receiver"]))
         alt = ", ".join(f"@{esc(o['receiver'])} ${o['price']:.2f}"
                         for o in r["offers"][1:3])
-        lines.append(f"{countries.label_of(r['country'])} → ${offer['price']:.2f}"
-                     f" @{esc(offer['receiver'])}"
-                     + (f"\n   next {alt}" if alt else ""))
+        if alt:
+            lines.append(f"   next {alt}")
     return "\n".join(lines)
 
 
@@ -341,8 +362,9 @@ def chart_text(rows: list[dict], inr: float = 0.0) -> str:
         if not best:
             continue
         blocks = max(1, int(round(best["price"] / top * 10)))
+        dial = f" +{r['dial']}" if r.get("dial") else ""
         lines.append(
-            f"{r['flag']} <b>{r['country']}</b> {esc(r['name'])}\n"
+            f"{r['flag']} <b>{r['country']}</b>{dial} {esc(r['name'])}\n"
             f"{'▰' * blocks}{'▱' * (10 - blocks)} ${best['price']:.2f}"
             + (f" (₹{best['price'] * inr:.1f})" if inr else "")
             + f" · @{esc(best['receiver'])}")
@@ -350,13 +372,13 @@ def chart_text(rows: list[dict], inr: float = 0.0) -> str:
 
 
 def chart_csv(rows: list[dict]) -> str:
-    out = ["country,name,best_price,best_receiver,all_receivers"]
+    out = ["country,name,dial,best_price,best_receiver,all_receivers"]
     for r in rows:
         best = r.get("best") or {}
         others = " | ".join(f"{c['receiver']}:{c['price']}" for c in r["cells"]
                             if c.get("price"))
-        out.append(f"{r['country']},{r['name']},{best.get('price', 0)},"
-                   f"{best.get('receiver', '')},\"{others}\"")
+        out.append(f"{r['country']},{r['name']},{r.get('dial', '')},"
+                   f"{best.get('price', 0)},{best.get('receiver', '')},\"{others}\"")
     return "\n".join(out) + "\n"
 
 
