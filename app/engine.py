@@ -3,7 +3,7 @@ import logging
 import time
 from collections import Counter
 
-from app import db, seller
+from app import db, pricing, seller
 from app.config import (CYCLE_INTERVAL, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
                         LOGIN_CONCURRENCY, LOGIN_RETRY_DELAY, LOGIN_TRIES, MAX_SCAN,
                         SESSION_RETRY, TARGET_HOURS, TICK)
@@ -426,6 +426,7 @@ async def clean_purchase(bot, lzt, p: dict):
     fresh["password"] = (data.get("password") if data.get("twofa_ok")
                          else (p.get("password") or ""))
     await _send_audit(bot, p["tg_id"], fresh, data)
+    await db.set_sell(pid, "queued", 0)
     if s.get("auto_sell") == "1":
         seller.schedule(bot, lzt, fresh)
 
@@ -560,10 +561,6 @@ async def price_loop():
     while True:
         try:
             for owner in await db.all_owners():
-                s = await db.get_settings(owner["_id"])
-                if s.get("auto_sell") != "1" and not await db.list_receivers(owner["_id"]):
-                    continue
-                from app import pricing
                 await pricing.refresh_all(owner["_id"])
         except Exception as e:
             log.exception(f"price_loop: {e}")
