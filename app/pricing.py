@@ -116,7 +116,8 @@ async def probe(receiver: dict) -> dict:
     out = _blank()
 
     if kind == LION:
-        _absorb(out, await receiver_hub.start_and_read(username, LION_START, PROBE_TIMEOUT))
+        _absorb(out, await receiver_hub.start_and_read(
+            username, (LION_START or "Prices").strip(), PROBE_TIMEOUT))
         return out
 
     _absorb(out, await receiver_hub.command(username, CAP_COMMAND, PROBE_TIMEOUT))
