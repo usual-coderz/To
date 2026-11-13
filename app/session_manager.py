@@ -306,11 +306,6 @@ async def check_session(session_string: str, proxy_cfg: str = ""):
         await _drop(c)
 
 
-# --- email change -----------------------------------------------------------
-# Telethon >=1.36: VerifyEmailRequest(purpose, verification=EmailVerificationCode(code))
-# Telethon <1.36:  VerifyEmailRequest(purpose, code)
-# The request is built from the installed signature, never guessed at runtime.
-
 def _send_verify_request(purpose, email):
     params = inspect.signature(
         functions.account.SendVerifyEmailCodeRequest.__init__).parameters
@@ -489,6 +484,33 @@ async def set_2fa(c: TelegramClient, password: str, current: str = ""):
                 break
     if last:
         raise last
+
+
+async def remove_2fa(c: TelegramClient, current: str = "") -> bool:
+    info = None
+    try:
+        info = await c(functions.account.GetPasswordRequest())
+    except Exception as e:
+        log.info(f"password state: {e}")
+        return False
+    if not bool(getattr(info, "has_password", False)):
+        return True
+
+    candidates: list[str] = [current, ""] if current else [""]
+    for cand in candidates:
+        for _ in range(2):
+            try:
+                await c.edit_2fa(current_password=cand or None, new_password=None, hint="")
+                return True
+            except FloodWaitError as e:
+                await asyncio.sleep(min(int(e.seconds) + 2, 60))
+            except (PasswordHashInvalidError, SessionPasswordNeededError) as e:
+                log.info(f"remove 2fa wrong password: {e}")
+                break
+            except Exception as e:
+                log.info(f"remove 2fa: {e}")
+                break
+    return False
 
 
 async def spambot_status(c: TelegramClient) -> str:
