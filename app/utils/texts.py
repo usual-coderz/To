@@ -26,26 +26,25 @@ def sell_fail_line(country: str, reason: str = "") -> str:
 
 
 def menu_text(s: dict, profile: dict, total: float, spendable: float,
-              queued: int, note: str = "") -> str:
+              queued: int, ready: int, note: str = "") -> str:
     body = (
         "<b>AccStore</b>\n"
         f"{BAR}\n"
-        f"👤 {esc(profile.get('username', '?'))}\n"
+        f"👤 <code>{esc(profile.get('username', '?'))}</code>\n"
         f"💵 <b>{fmt_money(total, s['currency'])}</b>"
     )
     if spendable + 1e-9 < total:
         body += f" · {fmt_money(spendable, s['currency'])} spendable"
     body += (
         f"\n{BAR}\n"
-        f"{'🟢 running' if s['auto_buy'] == '1' else '🔴 stopped'}"
-        f" · queue {queued}\n"
-        f"auto sell {'🟢 on' if s['auto_sell'] == '1' else '🔴 off'}"
-        f" · min ${s['sell_min_price']}\n"
-        f"price {s['price_min']}–{s['price_max']} · spam {s['spam_mode']}\n"
-        f"target {TARGET_HOURS:g}h · min age {s['session_min_hours']}h"
-        f" · max age {s['session_max_hours'] or 'off'}\n"
-        f"mail {s['mail_mode']} · 2fa {s['password_mode']}"
-        f" · cap ${s['daily_spend_cap']}\n"
+        f"{'🟢 buying' if s['auto_buy'] == '1' else '🔴 buying off'}"
+        f" · {'🟢 selling' if s['auto_sell'] == '1' else '🔴 selling off'}\n"
+        f"queue <code>{queued}</code> · ready <code>{ready}</code>\n"
+        f"price <code>{s['price_min']}–{s['price_max']}</code>"
+        f" · cap <code>${s['daily_spend_cap']}</code>\n"
+        f"min age <code>{s['session_min_hours']}h</code>"
+        f" · max age <code>{s['session_max_hours'] or 'off'}</code>\n"
+        f"spam {s['spam_mode']} · mail {s['mail_mode']} · 2fa {s['password_mode']}\n"
         f"include {esc(s['countries'] or 'all')} · exclude {esc(s['deny_countries'] or '—')}"
     )
     if note:
@@ -57,17 +56,64 @@ def filters_text(s: dict) -> str:
     return (
         "<b>Filters</b>\n"
         f"{BAR}\n"
-        f"price {s['price_min']} – {s['price_max']}\n"
+        f"price <code>{s['price_min']} – {s['price_max']}</code>\n"
         f"spam {s['spam_mode']} · mail {s['mail_mode']} · 2fa {s['password_mode']}\n"
-        f"min age {s['session_min_hours']}h · max age {s['session_max_hours'] or 'off'}\n"
+        f"min age <code>{s['session_min_hours']}h</code>"
+        f" · max age <code>{s['session_max_hours'] or 'off'}</code>\n"
         f"include {esc(s['countries'] or 'all')}\n"
         f"exclude {esc(s['deny_countries'] or '—')}\n"
-        f"cap ${s['daily_spend_cap']} · terminate {s['terminate_on_expire']}"
+        f"cap <code>${s['daily_spend_cap']}</code>"
+        f" · terminate {s['terminate_on_expire']}"
         f" · mail chg {s['change_mail_on_expire']}\n"
-        f"mail src {s['mail_provider']} · 2fa <code>{esc(s['twofa_password'])}</code>\n"
+        f"mail src {s['mail_provider']}"
+        f" · 2fa <code>{esc(s['twofa_password'])}</code>\n"
         f"{BAR}\n"
         f"age ≥ {TARGET_HOURS:g}h → straight to audit, else queued"
     )
+
+
+def ready_text(s: dict, count: int, stats: dict | None = None) -> str:
+    body = (
+        "<b>Ready to sell</b>\n"
+        f"{BAR}\n"
+        f"auto sell {'🟢 on' if s['auto_sell'] == '1' else '🔴 off'}\n"
+        f"queued <code>{count}</code> · min <code>${s['sell_min_price']}</code>\n"
+        f"equal price → <b>TG GET</b> first"
+    )
+    if stats:
+        body += (f"\n{BAR}\nsold <code>{stats['sold']}</code>"
+                 f" · failed <code>{stats['failed']}</code>")
+    return body
+
+
+def ready_row(p: dict) -> str:
+    reason = p.get("sell_reason") or ""
+    body = (f"<code>{esc(p.get('phone') or p['item_id'])}</code>"
+            f" · {esc(p.get('country') or '??')}"
+            f" · {esc(p.get('sell_state') or 'idle')}"
+            f" · try {p.get('sell_try', 0)}")
+    if reason:
+        body += f"\n   ↳ {esc(reason[:60])}"
+    return body
+
+
+def ready_detail_text(p: dict) -> str:
+    created = p.get("account_created_ts") or 0
+    reason = p.get("sell_reason") or ""
+    body = (
+        f"📱 <code>{esc(p.get('phone') or '—')}</code>\n"
+        f"{BAR}\n"
+        f"item <code>{esc(p['item_id'])}</code> · {esc(p.get('country') or '??')}\n"
+        f"bought <code>${float(p.get('price') or 0):.2f}</code>"
+        f" · age {fmt_age(p.get('age_at_buy_hours'))}\n"
+        f"created {fmt_dt(created) if created else 'unknown'}\n"
+        f"sell <code>{esc(p.get('sell_state') or 'idle')}</code>"
+        f" · try {p.get('sell_try', 0)}\n"
+        f"2fa <code>{esc(p.get('password') or '—')}</code>"
+    )
+    if reason:
+        body += f"\n⚠️ {esc(reason[:200])}"
+    return body
 
 
 def wallet_text(snap: dict) -> str:
@@ -121,7 +167,7 @@ def audit_text(p: dict, d: dict, supervisor: str = "") -> str:
     mail = f"Added ({esc(d.get('mail'))})" if d.get("mail_ok") else "not changed"
 
     return (
-        f"🌟 <b>Audit Report</b> | {esc(p.get('phone') or p['item_id'])}\n"
+        f"🌟 <b>Audit Report</b> | <code>{esc(p.get('phone') or p['item_id'])}</code>\n"
         f"{BAR}\n"
         f" ├ 🌍 Country: {esc(p.get('country') or '??')}\n"
         f" ├ 📅 Age: {fmt_year(created)}\n"
@@ -143,32 +189,34 @@ def audit_text(p: dict, d: dict, supervisor: str = "") -> str:
 
 
 def trade_text(p: dict, offer: dict, supervisor: str, sessions: int,
-               confirm: int, sale_id: str = "") -> str:
+               confirm: int, sale_id: str, sold_price: float, totals: dict) -> str:
     cc = (p.get("country") or "").upper()
     phone = (p.get("phone") or "").lstrip("+")
     masked = f"{phone[:4]}{'*' * max(0, len(phone) - 7)}{phone[-3:]}" if len(phone) > 7 else phone
     buy = float(p.get("price") or 0.0)
-    sold = float(offer.get("price") or 0.0)
+    sold = float(sold_price or 0.0)
     profit = sold - buy
     roi = (profit / buy * 100) if buy else 0.0
     from app.config import INR_RATE
     sign = "+" if profit >= 0 else "-"
     return (
-        "🎉 <b>ACCOUNT TRADE COMPLETED SUCCESSFULLY!</b> 💰\n"
+        "🎉 <b>ACCOUNT TRADE COMPLETED</b> 💰\n"
         f"{BAR}\n"
-        f"👑 Supervisor: @{esc(supervisor or '—')} | "
-        f"Receiver: @{esc(offer.get('receiver') or '—')}\n"
-        f"• 🆔 Job: {esc(sale_id[:14])} | LZT: {esc(p.get('item_id'))}\n"
-        f"• 📱 Phone: {esc(masked)} ({esc(cc or '??')})\n"
-        f"• 💵 Buy Price: ${buy:.2f} (₹{buy * INR_RATE:.1f})\n"
-        f"• 💰 Sold Price: ${sold:.2f}\n"
-        f"• 📈 Net Profit: {sign}${abs(profit):.2f} ({sign}{abs(roi):.1f}%)\n"
-        f"• 2FA Password: Verified Active\n"
-        f"• Session Count Pre-Term: {sessions} (Ours + Receiver)\n"
-        f"• Spam Status: Good ✅\n"
-        f"• Local Session: Terminated & Logged Out\n"
-        f"• Payout Delay: {confirm}s (Reconciled)\n"
-        f"• Mode: 🟢 LIVE TRADE"
+        f"👑 <code>@{esc(supervisor or '—')}</code>"
+        f" → <code>@{esc(offer.get('receiver') or '—')}</code>\n"
+        f"• 🆔 <code>{esc(sale_id[:14])}</code> | LZT <code>{esc(p.get('item_id'))}</code>\n"
+        f"• 📱 <code>{esc(masked)}</code> ({esc(cc or '??')})\n"
+        f"• 💵 Buy <code>${buy:.2f}</code> (₹{buy * INR_RATE:.0f})\n"
+        f"• 💰 Sold <code>${sold:.2f}</code>\n"
+        f"• 📈 ROI <code>{sign}{abs(roi):.1f}%</code>"
+        f" · profit <code>{sign}${abs(profit):.2f}</code>\n"
+        f"• 2FA active · sessions {sessions} · logout done\n"
+        f"• payout delay <code>{confirm}s</code> reconciled\n"
+        f"{BAR}\n"
+        f"📊 investment <code>${totals['investment']:.2f}</code>"
+        f" · total sell <code>${totals['sold']:.2f}</code>\n"
+        f"profit <code>${totals['profit']:.2f}</code>"
+        f" ({totals['roi']:.1f}%) · trades <code>{totals['count']}</code>"
     )
 
 
@@ -183,11 +231,11 @@ def session_detail(p: dict, checked: str = "") -> str:
     created = p.get("account_created_ts") or 0
     state = p.get("status") or "queued"
     body = (
-        f"📱 <b>{esc(p.get('phone') or '—')}</b>\n"
+        f"📱 <code>{esc(p.get('phone') or '—')}</code>\n"
         f"item <code>{esc(p['item_id'])}</code> · {esc(p.get('country') or '??')}\n"
         f"created {fmt_dt(created) if created else 'unknown'}"
         f" · age {fmt_age(p.get('age_at_buy_hours'))} at buy\n"
-        f"bought {fmt_dt(p.get('started_at'))} for {fmt_money(p.get('price') or 0.0)}\n"
+        f"bought {fmt_dt(p.get('started_at'))} for <code>${float(p.get('price') or 0):.2f}</code>\n"
         f"state <b>{esc(state)}</b> · target {TARGET_HOURS:g}h\n"
         f"⏳ {fmt_left(p.get('expires_at')) if state in ('queued', 'cleaning') else 'cleaned'}\n"
         f"session {esc(p.get('session_state') or 'pending')}"
@@ -196,6 +244,8 @@ def session_detail(p: dict, checked: str = "") -> str:
     )
     if p.get("sell_state"):
         body += f"\n💱 sell {esc(p['sell_state'])}"
+        if p.get("sell_reason"):
+            body += f"\n⚠️ {esc(str(p['sell_reason'])[:150])}"
     if checked:
         body += f"\n\n{esc(checked)}"
     if p.get("note"):
@@ -245,8 +295,7 @@ def session_stats_text(st: dict, sold: dict | None = None) -> str:
     )
     if sold:
         body += (f"\n{BAR}\ntrades {sold['total']} · sold {sold['sold']}"
-                 f" · failed {sold['failed']}\n"
-                 f"profit {sold['profit']:.2f} · roi {sold['roi']:.1f}%")
+                 f" · failed {sold['failed']}")
     return body
 
 
@@ -292,7 +341,7 @@ def payment_text(p: dict) -> str:
 def _offer_line(cc: str, dial: str, name: str, price: float, receiver: str = "") -> str:
     flag = countries.flag_of(cc)
     head = f"{flag} <b>{cc}</b> +{dial}" if dial else f"{flag} <b>{cc}</b>"
-    body = f"{head} {esc(name)} → ${price:.2f}"
+    body = f"{head} {esc(name)} → <code>${price:.2f}</code>"
     return f"{body} @{esc(receiver)}" if receiver else body
 
 
@@ -365,7 +414,7 @@ def chart_text(rows: list[dict], inr: float = 0.0) -> str:
         dial = f" +{r['dial']}" if r.get("dial") else ""
         lines.append(
             f"{r['flag']} <b>{r['country']}</b>{dial} {esc(r['name'])}\n"
-            f"{'▰' * blocks}{'▱' * (10 - blocks)} ${best['price']:.2f}"
+            f"{'▰' * blocks}{'▱' * (10 - blocks)} <code>${best['price']:.2f}</code>"
             + (f" (₹{best['price'] * inr:.1f})" if inr else "")
             + f" · @{esc(best['receiver'])}")
     return "\n".join(lines)
@@ -380,14 +429,3 @@ def chart_csv(rows: list[dict]) -> str:
         out.append(f"{r['country']},{r['name']},{r.get('dial', '')},"
                    f"{best.get('price', 0)},{best.get('receiver', '')},\"{others}\"")
     return "\n".join(out) + "\n"
-
-
-def sell_menu_text(s: dict, ready: int) -> str:
-    return (
-        "<b>Sell</b>\n"
-        f"{BAR}\n"
-        f"auto sell {'🟢 on' if s['auto_sell'] == '1' else '🔴 off'}\n"
-        f"min sell price ${s['sell_min_price']} · confirm {s['sell_confirm_seconds']}s\n"
-        f"ready accounts {ready}\n"
-        f"tie on equal price → TG GET first"
-    )
