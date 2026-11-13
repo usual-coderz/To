@@ -1,15 +1,13 @@
 import asyncio
-import csv
-import io
 import logging
 import time
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from app import db, pricing
-from app.config import INR_RATE, SCHEDULE_HOURS, SCHEDULE_TZ
+from app import db, pricing, receiver_hub
+from app.config import CHART_TTL, INR_RATE, SCHEDULE_HOURS, SCHEDULE_TZ
 from app.utils import tg
-from app.utils.texts import chart_text, chart_csv
+from app.utils.texts import chart_csv, chart_text
 
 log = logging.getLogger("scheduler")
 
@@ -28,26 +26,35 @@ def _slot(now: datetime) -> tuple[str, datetime]:
     return best
 
 
+async def _matrix(tg_id: int) -> tuple[list[dict], dict]:
+    if not receiver_hub.running():
+        await receiver_hub.start()
+    out = await pricing.refresh_all(tg_id)
+    rows = await pricing.price_matrix(tg_id, CHART_TTL)
+    if rows:
+        return rows, out
+    await asyncio.sleep(5.0)
+    out = await pricing.refresh_all(tg_id)
+    return await pricing.price_matrix(tg_id, CHART_TTL), out
+
+
 async def _build(bot, tg_id: int):
-    if not pricing_ready():
-        from app import receiver_hub
-        if not receiver_hub.running():
-            await receiver_hub.start()
-    await pricing.refresh_all(tg_id)
-    rows = await pricing.price_matrix(tg_id)
+    rows, diag = await _matrix(tg_id)
+    if not rows:
+        hint = "\n".join(diag.get("empty") or []) or "no receivers enabled"
+        body = ("<b>Price chart</b>\nno data\n\n"
+                f"receivers {diag.get('receivers', 0)} · prices {diag.get('prices', 0)}"
+                f" · errors {diag.get('errors', 0)}\n{hint}\n\n"
+                "check /hub, then /receivers → Warm all, phir Refresh")
+        await tg.send(bot, tg_id, body)
+        return
     await db.save_chart(tg_id, [
-        {"country": r["country"], "name": r["name"],
-         "price": (r["best"] or {}).get("price", 0.0),
-         "receiver": (r["best"] or {}).get("receiver", "")} for r in rows])
-    text = chart_text(rows, INR_RATE)
-    await tg.send(bot, tg_id, text)
-    payload = chart_csv(rows).encode()
-    await tg.send_document(bot, tg_id, payload,
+        {"country": r["country"], "name": r["name"], "dial": r.get("dial", ""),
+         "price": (r.get("best") or {}).get("price", 0.0),
+         "receiver": (r.get("best") or {}).get("receiver", "")} for r in rows])
+    await tg.send(bot, tg_id, chart_text(rows, INR_RATE))
+    await tg.send_document(bot, tg_id, chart_csv(rows).encode(),
                            f"prices_{datetime.now(_TZ).strftime('%Y%m%d_%H%M')}.csv")
-
-
-def pricing_ready() -> bool:
-    return True
 
 
 async def run_now(bot, tg_id: int):
