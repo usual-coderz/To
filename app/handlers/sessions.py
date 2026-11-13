@@ -6,8 +6,8 @@ from app import db, keyboards as kb, seller
 from app.handlers.menu import show
 from app.session_manager import check_session
 from app.utils import tg
-from app.utils.texts import (session_detail, session_file, session_stats_text,
-                             sessions_txt)
+from app.utils.texts import (session_bundle, session_detail, session_file,
+                             session_stats_text)
 from app.utils.timeutil import fmt_dt, now
 
 router = Router()
@@ -28,6 +28,34 @@ async def _rows(tg_id: int, page: str) -> list[dict]:
     return rows
 
 
+async def _panel(bot, chat_id: int, tg_id: int, edit=None):
+    stats = await db.session_stats(tg_id)
+    text = (f"<b>Sessions</b>\n"
+            f"queue <code>{stats['queue']}</code>"
+            f" · 24h+ <code>{stats['over']}</code>"
+            f" · ready <code>{stats['ready']}</code>\n"
+            f"live <code>{stats['live']}</code> · dead <code>{stats['dead']}</code>"
+            f" · sold <code>{stats['sold']}</code>")
+    markup = kb.sessions(stats)
+    if edit is not None:
+        await show(edit, text, markup)
+    else:
+        await tg.send(bot, chat_id, text, markup)
+
+
+async def _send_file(bot, chat_id: int, tg_id: int, page: str) -> int:
+    rows = await _rows(tg_id, page)
+    if not rows:
+        return 0
+    label = PAGES.get(page, page)
+    body = session_bundle(rows, label)
+    if not body.strip():
+        return -1
+    await tg.send_document(bot, chat_id, body.encode(),
+                           f"{label.replace('+', 'p')}_{now()}.session")
+    return len(rows)
+
+
 @router.message(Command("session"))
 async def cmd_session(m: Message):
     arg = (m.text or "").split(maxsplit=1)
@@ -36,22 +64,12 @@ async def cmd_session(m: Message):
         if not p:
             return await m.answer("not found")
         return await tg.send(m.bot, m.chat.id, session_detail(p), kb.session_detail(p))
-    await _menu(m.bot, m.chat.id, m.from_user.id)
-
-
-async def _menu(bot, chat_id: int, tg_id: int):
-    stats = await db.session_stats(tg_id)
-    text = (f"<b>Sessions</b>\nqueue {stats['queue']} · 24h+ {stats['over']}"
-            f" · ready {stats['ready']}")
-    await tg.send(bot, chat_id, text, kb.sessions(stats))
+    await _panel(m.bot, m.chat.id, m.from_user.id)
 
 
 @router.callback_query(F.data == "m:sessions")
 async def cb_sessions(cq: CallbackQuery):
-    stats = await db.session_stats(cq.from_user.id)
-    text = (f"<b>Sessions</b>\nqueue {stats['queue']} · 24h+ {stats['over']}"
-            f" · ready {stats['ready']}")
-    await show(cq, text, kb.sessions(stats))
+    await _panel(cq.bot, cq.message.chat.id, cq.from_user.id, cq)
     await cq.answer()
 
 
@@ -63,29 +81,29 @@ async def cb_page(cq: CallbackQuery):
         sold = await db.sale_stats(cq.from_user.id)
         await show(cq, session_stats_text(st, sold), kb.back("m:sessions"))
         return await cq.answer()
-    rows = await _rows(cq.from_user.id, page)
-    if not rows:
-        await show(cq, f"<b>{PAGES.get(page, page)}</b>\nempty",
-                   kb.back("m:sessions"))
-        return await cq.answer()
-    head = f"<b>{PAGES.get(page, page)}</b> · {len(rows)}"
-    await show(cq, head, kb.session_list(rows[:20], page))
-    await cq.answer()
+    label = PAGES.get(page, page)
+    count = await _send_file(cq.bot, cq.from_user.id, cq.from_user.id, page)
+    if count == 0:
+        await show(cq, f"<b>{label}</b>\nempty", kb.back("m:sessions"))
+        return await cq.answer("empty", show_alert=True)
+    if count == -1:
+        await show(cq, f"<b>{label}</b>\nno session stored", kb.back("m:sessions"))
+        return await cq.answer("no session", show_alert=True)
+    await show(cq, f"<b>{label}</b> · {count} session(s) sent as "
+                   f"<code>.session</code>", kb.session_file_bar(page))
+    await cq.answer(f"{count} sent")
 
 
-@router.callback_query(F.data.startswith("t:"))
-async def cb_txt(cq: CallbackQuery):
+@router.callback_query(F.data.startswith("ql:"))
+async def cb_list(cq: CallbackQuery):
     page = cq.data.split(":", 1)[1]
     rows = await _rows(cq.from_user.id, page)
     if not rows:
+        await show(cq, f"<b>{PAGES.get(page, page)}</b>\nempty", kb.back("m:sessions"))
         return await cq.answer("empty", show_alert=True)
-    stats = await db.session_stats(cq.from_user.id)
-    title = (f"{PAGES.get(page, page)} | queue {stats['queue']}"
-             f" | over24 {stats['over']} | ready {stats['ready']}")
-    name = f"{page}_{now()}.txt"
-    await tg.send_document(cq.bot, cq.from_user.id,
-                           sessions_txt(rows, title).encode(), name)
-    await cq.answer(f"{len(rows)} sessions")
+    await show(cq, f"<b>{PAGES.get(page, page)}</b> · {len(rows)}",
+               kb.session_list(rows[:20], page))
+    await cq.answer()
 
 
 @router.callback_query(F.data.startswith("v:"))
@@ -124,6 +142,8 @@ async def cb_file(cq: CallbackQuery):
     p = await db.get_purchase(cq.data.split(":", 1)[1])
     if not p or p["tg_id"] != cq.from_user.id:
         return await cq.answer("gone", show_alert=True)
+    if not p.get("session_string"):
+        return await cq.answer("no session stored", show_alert=True)
     name = (p.get("phone") or str(p["item_id"])).lstrip("+") or "session"
     await tg.send_document(cq.bot, cq.from_user.id, session_file(p).encode(), f"{name}.py")
     await cq.answer("sent")
