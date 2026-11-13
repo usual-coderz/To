@@ -39,7 +39,8 @@ async def cb_list(cq: CallbackQuery):
     rows = await db.ready_purchases(cq.from_user.id, 30)
     if not rows:
         return await cq.answer("nothing ready", show_alert=True)
-    body = "<b>Ready</b> · " + str(len(rows)) + "\n\n" + "\n\n".join(ready_row(p) for p in rows[:15])
+    body = (f"<b>Ready</b> · {len(rows)}\n\n"
+            + "\n\n".join(ready_row(p) for p in rows[:15]))
     await show(cq, body, kb.ready_list(rows))
     await cq.answer()
 
@@ -62,7 +63,7 @@ async def cb_all(cq: CallbackQuery):
     await _render(cq.bot, cq.message.chat.id, cq.from_user.id, cq)
 
 
-@router.callback_query(F.data.startswith("rv:"))
+@router.callback_query(F.data.startswith("rd:"))
 async def cb_view(cq: CallbackQuery):
     p = await db.get_purchase(cq.data.split(":", 1)[1])
     if not p or p["tg_id"] != cq.from_user.id:
