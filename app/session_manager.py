@@ -448,69 +448,84 @@ async def reset_others(c: TelegramClient) -> int:
     return killed
 
 
-async def _edit_2fa(c: TelegramClient, password: str, current: str | None):
-    await c.edit_2fa(current_password=current or None, new_password=password, hint="")
-
-
-async def set_2fa(c: TelegramClient, password: str, current: str = ""):
-    info = None
-    try:
-        info = await c(functions.account.GetPasswordRequest())
-    except Exception as e:
-        log.info(f"get password state: {e}")
-
-    if bool(getattr(info, "has_password", False)):
-        candidates: list[str | None] = [current, ""] if current else [""]
-    else:
-        candidates = [None]
-
-    last: Exception | None = None
-    for cand in candidates:
-        for _ in range(2):
-            try:
-                await _edit_2fa(c, password, cand)
-                return
-            except FloodWaitError as e:
-                await asyncio.sleep(min(int(e.seconds) + 2, 60))
-                continue
-            except (PasswordHashInvalidError, SessionPasswordNeededError) as e:
-                last = e
-                break
-            except EmailUnconfirmedError as e:
-                last = e
-                break
-            except Exception as e:
-                last = e
-                break
-    if last:
-        raise last
-
-
-async def remove_2fa(c: TelegramClient, current: str = "") -> bool:
-    info = None
+async def has_password(c: TelegramClient) -> bool:
     try:
         info = await c(functions.account.GetPasswordRequest())
     except Exception as e:
         log.info(f"password state: {e}")
         return False
-    if not bool(getattr(info, "has_password", False)):
-        return True
+    return bool(getattr(info, "has_password", False))
 
-    candidates: list[str] = [current, ""] if current else [""]
-    for cand in candidates:
+
+async def _edit_2fa(c: TelegramClient, password: str | None, current: str | None):
+    await c.edit_2fa(current_password=current or None, new_password=password, hint="")
+
+
+async def set_2fa(c: TelegramClient, password: str, *candidates: str):
+    has = await has_password(c)
+    if has:
+        order: list[str | None] = [x for x in candidates if x] + [""]
+    else:
+        order = [None]
+
+    last: Exception | None = None
+    for cand in order:
         for _ in range(2):
             try:
-                await c.edit_2fa(current_password=cand or None, new_password=None, hint="")
-                return True
+                await _edit_2fa(c, password, cand)
             except FloodWaitError as e:
                 await asyncio.sleep(min(int(e.seconds) + 2, 60))
+                continue
             except (PasswordHashInvalidError, SessionPasswordNeededError) as e:
-                log.info(f"remove 2fa wrong password: {e}")
+                log.info(f"set 2fa rejected {cand!r}: {e}")
+                last = e
+                break
+            except EmailUnconfirmedError as e:
+                log.info(f"set 2fa email unconfirmed: {e}")
+                last = e
                 break
             except Exception as e:
-                log.info(f"remove 2fa: {e}")
+                log.info(f"set 2fa: {e}")
+                last = e
                 break
-    return False
+            await asyncio.sleep(1.0)
+            if await has_password(c):
+                return
+        if not has:
+            break
+    if await has_password(c):
+        return
+    if last:
+        raise last
+
+
+async def remove_2fa(c: TelegramClient, *candidates: str) -> bool:
+    if not await has_password(c):
+        return True
+
+    order: list[str | None] = []
+    for cand in candidates:
+        if cand and cand not in order:
+            order.append(cand)
+    order.append("")
+
+    for cand in order:
+        for _ in range(2):
+            try:
+                await _edit_2fa(c, None, cand)
+            except FloodWaitError as e:
+                await asyncio.sleep(min(int(e.seconds) + 2, 60))
+                continue
+            except (PasswordHashInvalidError, SessionPasswordNeededError) as e:
+                log.info(f"remove 2fa rejected {cand!r}: {e}")
+                break
+            except Exception as e:
+                log.info(f"remove 2fa {cand!r}: {e}")
+                break
+            await asyncio.sleep(1.2)
+            if not await has_password(c):
+                return True
+    return not await has_password(c)
 
 
 async def spambot_status(c: TelegramClient) -> str:
