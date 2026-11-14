@@ -1,6 +1,5 @@
 import html
 import math
-import time
 
 from aiogram import F, Router
 from aiogram.filters import Command
@@ -8,6 +7,7 @@ from aiogram.types import CallbackQuery, Message
 
 from app import keyboards as kb
 from app.deps import lzt
+from app.handlers import state
 from app.handlers.menu import show
 from app.lzt import LztError
 from app.utils import tg
@@ -17,26 +17,12 @@ from app.utils.texts import payment_text, wallet_text
 
 router = Router()
 
-EXCH_TTL = 300.0
-EXCH: dict[int, dict] = {}
-
 
 def _st(uid: int) -> dict:
-    st = EXCH.get(uid)
-    if not st:
+    hit = state.get(uid)
+    if not hit or hit["kind"] != "exchange":
         return {}
-    if time.time() - st.get("ts", 0.0) > EXCH_TTL:
-        EXCH.pop(uid, None)
-        return {}
-    return st
-
-
-def _touch(st: dict):
-    st["ts"] = time.time()
-
-
-def has_pending(uid: int) -> bool:
-    return "to_id" in _st(uid)
+    return hit
 
 
 async def _snap_or_reply(target, edit: bool = False) -> dict | None:
@@ -61,7 +47,7 @@ async def _deliver(bot, uid: int, amount: float, chat_id: int = 0, message_id: i
     if chat_id and message_id:
         try:
             await bot.edit_message_text(text=text, chat_id=chat_id, message_id=message_id,
-                                        reply_markup=markup)
+                                        reply_markup=markup, link_preview_options=tg.LP)
             return
         except Exception:
             pass
@@ -70,7 +56,7 @@ async def _deliver(bot, uid: int, amount: float, chat_id: int = 0, message_id: i
 
 @router.message(Command("wallet"))
 async def cmd_wallet(m: Message):
-    EXCH.pop(m.from_user.id, None)
+    state.clear(m.from_user.id)
     snap = await _snap_or_reply(m)
     if snap is None:
         return
@@ -80,7 +66,7 @@ async def cmd_wallet(m: Message):
 
 @router.callback_query(F.data == "m:wallet")
 async def cb_wallet(cq: CallbackQuery):
-    EXCH.pop(cq.from_user.id, None)
+    state.clear(cq.from_user.id)
     snap = await _snap_or_reply(cq, edit=True)
     if snap is None:
         return await cq.answer()
@@ -97,11 +83,10 @@ async def cb_payments(cq: CallbackQuery):
                    kb.back("m:wallet"))
         return await cq.answer()
     if not rows:
-        await show(cq, "<b>Payments</b>\nnothing returned by the API",
-                   kb.back("m:wallet"))
+        await show(cq, "<b>Payments</b>\nnothing returned by the API", kb.back("m:wallet"))
         return await cq.answer()
     body = "\n".join(payment_text(p) for p in rows[:10])
-    await show(cq, f"<b>Payments</b>\n{body}", kb.back("m:wallet"))
+    await show(cq, f"<b>Payments</b>\n{tg.pre(body, 3000)}", kb.back("m:wallet"))
     await cq.answer()
 
 
@@ -114,7 +99,8 @@ async def cb_exchange(cq: CallbackQuery):
     if len(pool) < 2:
         await show(cq, "need two spendable balances", kb.back("m:wallet"))
         return await cq.answer()
-    EXCH[cq.from_user.id] = {"ts": time.time(), "pool": pool}
+    state.set(cq.from_user.id, "exchange")
+    state.PENDING[cq.from_user.id]["pool"] = pool
     await show(cq, "<b>Exchange</b> — source balance", kb.exchange(pool, "from"))
     await cq.answer()
 
@@ -161,12 +147,12 @@ async def cb_step(cq: CallbackQuery):
     if step == "to":
         pool = [b for b in pool if b["balance_id"] != st.get("from_id")]
     if not pool:
-        EXCH.pop(cq.from_user.id, None)
+        state.clear(cq.from_user.id)
         return await cq.answer("balances changed, restart", show_alert=True)
     if idx >= len(pool):
         return await cq.answer("pick again", show_alert=True)
 
-    _touch(st)
+    st["ts"] = __import__("time").time()
     pick = pool[idx]
 
     if step == "from":
@@ -193,7 +179,7 @@ async def cb_step(cq: CallbackQuery):
         f"<b>{st['cur']} → {st['to_cur']}</b>\n"
         f"available: {fmt_money(avail, st['cur'])}\n\n"
         f"Send amount in <b>{st['cur']}</b>, or tap:",
-        reply_markup=kb.amount(st["cur"], avail))
+        reply_markup=kb.amount(st["cur"], avail), link_preview_options=tg.LP)
     st["prompt"] = (msg.chat.id, msg.message_id)
     await cq.answer()
 
@@ -228,7 +214,7 @@ async def cb_amount_btn(cq: CallbackQuery):
 
 @router.callback_query(F.data == "xc")
 async def cb_exch_cancel(cq: CallbackQuery):
-    EXCH.pop(cq.from_user.id, None)
+    state.clear(cq.from_user.id)
     snap = await _snap_or_reply(cq, edit=True)
     if snap is None:
         return await cq.answer()
@@ -249,15 +235,12 @@ async def cmd_amount(m: Message):
     await _deliver(m.bot, m.from_user.id, amount, chat_id, message_id)
 
 
-@router.message(F.text, lambda m: has_pending(m.from_user.id))
 async def on_amount(m: Message):
-    if (m.text or "").startswith("/"):
-        return
     st = _st(m.from_user.id)
     if st.get("busy"):
         return await m.answer("busy…")
     try:
-        amount = float(m.text.replace(",", ".").strip())
+        amount = float((m.text or "").replace(",", ".").strip())
     except ValueError:
         return await m.answer("number expected · /cancel")
     chat_id, message_id = (st.get("prompt") or (0, 0))
@@ -280,10 +263,10 @@ async def _do(uid: int, bot, amount: float) -> str:
 
     src = next((b for b in balances if b.get("balance_id") == st["from_id"]), None)
     if not src:
-        EXCH.pop(uid, None)
+        state.clear(uid)
         return "⚠️ source balance gone, restart"
     if not any(b.get("balance_id") == st["to_id"] for b in balances):
-        EXCH.pop(uid, None)
+        state.clear(uid)
         return "⚠️ target balance gone, restart"
 
     avail = free_of(src)
@@ -299,7 +282,7 @@ async def _do(uid: int, bot, amount: float) -> str:
         st["busy"] = False
         return f"⚠️ failed: {tg.esc(str(e))}"
 
-    EXCH.pop(uid, None)
+    state.clear(uid)
     snap = await wallet_view.snapshot(lzt, st["cur"])
     return (f"✅ exchanged {fmt_money(amount, st['cur'])} → {st['to_cur']}\n\n"
             + wallet_text(snap))
