@@ -123,14 +123,16 @@ async def collect(username: str, since: int | None = None, idle: float = IDLE_GA
     seen: set[int] = set()
 
     try:
-        tail = await client.get_messages(entity, limit=1)
+        tail = await client.get_messages(entity, limit=3)
     except Exception:
         tail = []
-    if tail:
-        text = (tail[0].raw_text or "").strip()
+    for msg in reversed(tail or []):
+        if getattr(msg, "out", False):
+            continue
+        text = (msg.raw_text or "").strip()
         if text:
             parts.append(text)
-            seen.add(int(tail[0].id or 0))
+            seen.add(int(msg.id or 0))
 
     end = time.monotonic() + max_wait
     quiet = time.monotonic() + idle
@@ -146,6 +148,9 @@ async def collect(username: str, since: int | None = None, idle: float = IDLE_GA
         for m in sorted(msgs or [], key=lambda x: int(x.id or 0)):
             mid = int(m.id or 0)
             if mid <= floor or mid in seen:
+                continue
+            if getattr(m, "out", False):
+                seen.add(mid)
                 continue
             text = (m.raw_text or "").strip()
             if not text:
@@ -233,10 +238,11 @@ async def read_last(username: str) -> str:
     if entity is None:
         return ""
     try:
-        msgs = await client.get_messages(entity, limit=3)
+        msgs = await client.get_messages(entity, limit=6)
     except Exception:
         return ""
-    parts = [(m.raw_text or "").strip() for m in reversed(msgs or []) if m.raw_text]
+    parts = [(m.raw_text or "").strip() for m in reversed(msgs or [])
+             if m.raw_text and not getattr(m, "out", False)]
     return "\n".join(parts)
 
 
