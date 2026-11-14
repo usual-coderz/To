@@ -22,7 +22,9 @@ from app.utils.texts import audit_text, bought_line, failed_line, session_file
 log = logging.getLogger("engine")
 
 _BAL_WARNED: dict[int, float] = {}
+_LIMIT_WARNED: dict[int, float] = {}
 WARN_COOLDOWN = 900.0
+LIMIT_COOLDOWN = 3600.0
 
 _BG: set[asyncio.Task] = set()
 _NEXT_RUN: dict[int, float] = {}
@@ -69,6 +71,15 @@ async def _balance_warn(bot, tg_id, text):
         return
     _BAL_WARNED[tg_id] = time.time()
     await _notify(bot, tg_id, text)
+
+
+async def _limit_warn(bot, tg_id):
+    if time.time() - _LIMIT_WARNED.get(tg_id, 0.0) < LIMIT_COOLDOWN:
+        return
+    _LIMIT_WARNED[tg_id] = time.time()
+    await _notify(bot, tg_id,
+                  "🚫 <b>daily check limit</b> reached\n"
+                  "<i>buying paused — buy any account to reset it, or wait for the reset</i>")
 
 
 def phone_of_item(item: dict) -> str:
@@ -504,6 +515,8 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
         if why == "no_balance":
             break
         if why == "check_limit":
+            await _limit_warn(bot, tg_id)
+            await db.save_report(tg_id, note="daily check limit reached — buying paused")
             break
         if cap > 0 and await db.spent_today(tg_id) >= cap:
             reasons["cap_hit"] += 1
@@ -524,6 +537,8 @@ async def buy_loop(bot, lzt):
                 _NEXT_RUN.pop(stale, None)
             for stale in [k for k in _BAL_WARNED if k not in live_ids]:
                 _BAL_WARNED.pop(stale, None)
+            for stale in [k for k in _LIMIT_WARNED if k not in live_ids]:
+                _LIMIT_WARNED.pop(stale, None)
             for tg_id in live_ids:
                 if _NEXT_RUN.get(tg_id, 0.0) > now:
                     continue
