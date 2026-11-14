@@ -7,7 +7,8 @@ from app import db, receivers, seller
 from app.config import (CYCLE_INTERVAL, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
                         LOGIN_CONCURRENCY, LOGIN_RETRY_DELAY, LOGIN_TRIES, MAX_SCAN,
                         SESSION_RETRY, TARGET_HOURS, TICK)
-from app.lzt import LztError, classify, extract_auth_key, extract_dc_id
+from app.lzt import (LztError, classify, extract_auth_key, extract_dc_id,
+                     item_id_of)
 from app.mail_engine import IMAPMailClient, TempMailClient
 from app.session_manager import (change_email, check_session, clean_client, device_list,
                                  login_with_auth_key, normalize_phone, owned_counts,
@@ -145,7 +146,10 @@ async def _fast_buy(lzt, item_id: int, price: float, balance_id: int):
 
 
 async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tuple[bool, str]:
-    item_id = item["item_id"]
+    item_id = item_id_of(item)
+    if not item_id:
+        return False, "no_id"
+
     search_price = db.num(item.get("price"))
     currency = s["currency"]
     floor_age = db.num(s.get("session_min_hours"))
@@ -163,10 +167,12 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
 
     fresh = _merge(dict(item), checked.get("item") or {})
     price = db.num(fresh.get("price"), search_price)
+    if price <= 0:
+        return False, "no_price"
 
     ok, why = passes(fresh, s, authoritative=True)
     if not ok:
-        log.info(f"skip {item_id}: {why}")
+        log.info(f"skip {item_id}: {why} price={price:g}")
         return False, why
 
     soft = ""
@@ -189,12 +195,31 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
                             f"💳 low balance {fmt_money(snap['total'], currency)}")
         return False, "no_balance"
 
-    try:
-        res = await _fast_buy(lzt, item_id, price, int(wallet.get("balance_id") or 0))
-    except LztError as e:
-        why = classify(e)
-        log.info(f"buy {item_id}: {why}: {e}")
-        return False, why
+    balance_id = int(wallet.get("balance_id") or 0)
+    res: dict | None = None
+    why = ""
+    for attempt in range(2):
+        try:
+            res = await _fast_buy(lzt, item_id, price, balance_id)
+            why = ""
+            break
+        except LztError as e:
+            why = classify(e)
+            log.info(f"buy {item_id} attempt {attempt + 1}: {why}: {e}")
+            if why == "price_changed" and attempt == 0:
+                try:
+                    chk = await lzt.check_account(item_id)
+                except LztError as e2:
+                    log.info(f"recheck {item_id}: {classify(e2)}: {e2}")
+                    break
+                new_price = db.num((chk.get("item") or {}).get("price"))
+                if new_price <= 0:
+                    break
+                price = new_price
+                continue
+            break
+    if res is None:
+        return False, (why or "buy_failed")
 
     try:
         snap.update(await wallet_view.snapshot(lzt, currency))
@@ -227,8 +252,9 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         await _notify(bot, tg_id, failed_line(country, "no phone on item"))
         return True, "no_phone"
 
-    log.info(f"bought {item_id} pid={pid} age={age:.2f}h key={'yes' if auth_key else 'no'}"
-             f" dc={auth_dc or '?'} mature={age >= TARGET_HOURS}")
+    log.info(f"bought {item_id} pid={pid} price={price:g} age={age:.2f}h "
+             f"key={'yes' if auth_key else 'no'} dc={auth_dc or '?'} "
+             f"mature={age >= TARGET_HOURS}")
     _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s,
                        merged, auth_key, auth_dc))
     return True, (soft or "bought")
@@ -495,14 +521,17 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
             stopped = True
             break
 
-        item_id = it.get("item_id")
-        if item_id in seen:
+        item_id = item_id_of(it)
+        if not item_id or item_id in seen:
             continue
         seen.add(item_id)
+
         ok, why = passes(it, s)
         if not ok:
+            log.info(f"pre {item_id}: {why}")
             reasons[why] += 1
             continue
+
         try:
             done, why = await buy_one(bot, lzt, tg_id, it, s, snap)
         except Exception as e:
@@ -523,7 +552,7 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
             break
 
     log.info(f"[{tg_id}] scanned={len(items)} bought={bought} stopped={stopped} "
-             f"rejects={dict(reasons.most_common(5))}")
+             f"rejects={dict(reasons.most_common(6))}")
     await db.save_report(tg_id, scanned=len(items), bought=bought, reasons=dict(reasons))
 
 
