@@ -81,7 +81,7 @@ MAIL_PROVIDERS: str = os.getenv(
 TWOFA_PASSWORD: str = (os.getenv("TWOFA_PASSWORD", "AccStore2fa").strip() or "AccStore2fa")
 
 SELL_CONCURRENCY: int = _int(os.getenv("SELL_CONCURRENCY"), 2)
-SELL_OTP_TIMEOUT: int = _int(os.getenv("SELL_OTP_TIMEOUT"), 120)
+SELL_OTP_TIMEOUT: int = _int(os.getenv("SELL_OTP_TIMEOUT"), 150)
 SELL_REPLY_TIMEOUT: int = _int(os.getenv("SELL_REPLY_TIMEOUT"), 180)
 SELL_CONFIRM_DEFAULT: int = _int(os.getenv("SELL_CONFIRM_DEFAULT"), 600)
 SELL_CONFIRM_MIN: int = _int(os.getenv("SELL_CONFIRM_MIN"), 60)
