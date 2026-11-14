@@ -7,7 +7,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from app import db, keyboards as kb
 from app.handlers.menu import show
-from app.utils.texts import report_text, stats_text
+from app.utils.texts import ledger_text, report_text, stats_text
 
 router = Router()
 
@@ -34,10 +34,7 @@ async def cb_stats(cq: CallbackQuery):
 
 @router.callback_query(F.data == "m:ledger")
 async def cb_ledger(cq: CallbackQuery):
-    st = await db.ledger_stats(cq.from_user.id)
-    await show(cq, f"<b>Ledger</b>\nrows {st['total']} · closed {st['done']}\n"
-                   f"spent {st['spent']:.2f} · revenue {st['revenue']:.2f}\n\n"
-                   f"<i>export for the full CSV</i>", kb.ledger())
+    await show(cq, ledger_text(await db.ledger_stats(cq.from_user.id)), kb.ledger())
     await cq.answer()
 
 
