@@ -114,21 +114,29 @@ def extract_telegram_code(text: str, expected_length: int = None):
         r"\b(\d{3})[\s-](\d{3})\b\s+(?:is\s+your\s+(?:telegram|verification|login|code))",
         r"\b(\d{5,6})\b\s+(?:is\s+your\s+(?:telegram|verification|login|code))",
     )
+
+    found: list[str] = []
     for pattern in patterns:
-        m = re.search(pattern, t, re.I)
-        if not m:
-            continue
-        cand = "".join(m.groups())
-        if expected_length is None or len(cand) == expected_length:
-            return cand
-    if expected_length in (None, 6):
-        m = re.search(r"\b(\d{3})[\s-](\d{3})\b", t)
-        if m:
-            return m.group(1) + m.group(2)
-    for cand in re.findall(r"\b(\d{5,6})\b", t):
-        if expected_length is None or len(cand) == expected_length:
-            return cand
-    return None
+        for m in re.finditer(pattern, t, re.I):
+            cand = "".join(g for g in m.groups() if g)
+            if 4 <= len(cand) <= 6 and cand.isdigit() and cand not in found:
+                found.append(cand)
+        if found and expected_length is None:
+            return found[0]
+
+    if expected_length:
+        for cand in found:
+            if len(cand) == expected_length:
+                return cand
+    if found:
+        return found[0]
+
+    loose = [c for c in re.findall(r"\b(\d{5,6})\b", t) if c.isdigit()]
+    if expected_length:
+        for cand in loose:
+            if len(cand) == expected_length:
+                return cand
+    return loose[0] if loose else None
 
 
 def _vault_read() -> dict:
@@ -161,6 +169,7 @@ class TempMailClient:
         self._base = ""
         self._provider = ""
         self._password = ""
+        self._opened = False
         self._seen: set[str] = set()
         self._blocked: set[str] = blocked_domains()
         self._index = random.randrange(max(1, len(proxies.POOL) or 1))
@@ -288,6 +297,7 @@ class TempMailClient:
                     continue
                 self._token, self._base, self._provider = token, base, name
                 self._password = pwd
+                self._opened = True
                 self._remember(address, pwd, name)
                 return address
         return ""
@@ -333,6 +343,7 @@ class TempMailClient:
                 _down("guerrilla")
                 return ""
             self._token, self._sid, self._provider = sid, sid, "guerrilla"
+            self._opened = True
             self._remember(address, "", "guerrilla")
             return address
         return ""
@@ -362,6 +373,7 @@ class TempMailClient:
         self._token, self._sid = sid, sid
         self._url_token = url_token
         self._provider = "dropmail"
+        self._opened = True
         self._remember(address, "", "dropmail")
         return address
 
@@ -375,8 +387,38 @@ class TempMailClient:
         if r.status_code != 200:
             log.info(f"plus open {address}: HTTP {r.status_code}")
             return ""
-        data = r.json() or {}
-        return str(data.get("epin") or "")
+        return str((r.json() or {}).get("epin") or "")
+
+    async def _plus_ready(self, address: str, epin: str) -> bool:
+        url = f"{PLUS}/mails?email={address}&limit=1"
+        if epin:
+            url += f"&epin={epin}"
+        try:
+            r = await self._request("GET", url)
+        except MailError as e:
+            log.info(f"plus probe {address}: {e}")
+            return False
+        if r.status_code != 200:
+            return False
+        return isinstance(r.json(), dict)
+
+    async def _create_plus(self, exclude: set) -> str:
+        pool = [d for d in PLUS_DOMAINS if d.lower() not in exclude] or PLUS_DOMAINS
+        random.shuffle(pool)
+        for domain in pool[:4]:
+            address = self._rand("tg_", 12) + "@" + domain
+            epin = await self._open_plus(address)
+            if not await self._plus_ready(address, epin):
+                log.info(f"plus mailbox {address} not ready")
+                continue
+            self._email, self._token = address, ""
+            self._provider, self._base = "plus", ""
+            self._sid, self._url_token, self._password = epin, "", ""
+            self._opened = True
+            self._remember(address, "", "plus")
+            return address
+        _down("plus")
+        return ""
 
     async def create_temp_email(self, exclude_domains: list = None) -> str:
         exclude = {d.lower().strip() for d in (exclude_domains or []) if d}
@@ -396,6 +438,8 @@ class TempMailClient:
                     address = await self._create_guerrilla(exclude)
                 elif name == "dropmail":
                     address = await self._create_dropmail(exclude)
+                elif name == "plus":
+                    address = await self._create_plus(exclude)
             except Exception as e:
                 log.info(f"create {name}: {e}")
             if address:
@@ -403,15 +447,9 @@ class TempMailClient:
                 log.info(f"mailbox {address} via {name}")
                 return address
 
-        pool = [d for d in PLUS_DOMAINS if d.lower() not in exclude] or PLUS_DOMAINS
-        random.shuffle(pool)
-        address = self._rand("tg_", 12) + "@" + pool[0]
-        self._email, self._token, self._sid = address, "", ""
-        self._base, self._url_token, self._provider = "", "", "plus"
-        self._password = ""
-        self._sid = await self._open_plus(address)
-        self._remember(address, "", "plus")
-        log.info(f"mailbox {address} via plus")
+        address = await self._create_plus(exclude)
+        if address:
+            log.info(f"mailbox {address} via plus fallback")
         return address
 
     async def fetch_verification_code(self, target_email: str = None,
@@ -436,14 +474,15 @@ class TempMailClient:
         raise TimeoutError(f"no code in {timeout}s for {target}")
 
     async def _check_inbox(self, target: str, expected_length=None):
-        want = expected_length or CODE_LEN
+        want = expected_length or None
         if self._provider == "guerrilla" and self._sid:
             return await self._check_guerrilla(want)
         if self._provider == "dropmail" and self._sid:
             return await self._check_dropmail(want)
         if self._provider == "plus":
-            if not self._sid:
+            if not self._opened and not self._sid:
                 self._sid = await self._open_plus(target)
+                self._opened = True
             return await self._check_plus(target, want)
         if self._provider in API_BASE and not self._base:
             self._base = API_BASE[self._provider]
@@ -595,6 +634,7 @@ def client_from(data: dict):
     mc._sid = str(data.get("mail_sid") or "")
     mc._url_token = str(data.get("mail_url_token") or "")
     mc._base = str(data.get("mail_base") or "") or API_BASE.get(provider, "")
+    mc._opened = bool(mc._sid) or provider == "plus"
     return mc
 
 
@@ -657,7 +697,7 @@ class IMAPMailClient:
                                 body += payload.decode("utf-8", "replace")
                     else:
                         body = (msg.get_payload(decode=True) or b"").decode("utf-8", "replace")
-                    code = extract_telegram_code(f"{subj} {body}", expected_length or CODE_LEN)
+                    code = extract_telegram_code(f"{subj} {body}", expected_length)
                     if code:
                         return code
                 time.sleep(3)
