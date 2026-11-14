@@ -31,17 +31,16 @@ def _next_slot(now: datetime, hours: tuple[int, ...]) -> tuple[str, datetime] | 
 
 async def _chart(bot, tg_id: int):
     try:
-        rows = await pricing.price_matrix(tg_id, CHART_TTL)
+        s = await db.get_settings(tg_id)
+        rows = await pricing.chart_rows(tg_id, s, CHART_TTL)
         if not rows:
             await tg.send(bot, tg_id,
                           "<b>Price chart</b>\nno cached prices yet\n"
                           "sweep 12:00 aur 16:00 pe chalta hai")
             return
-        s = await db.get_settings(tg_id)
         await db.save_chart(tg_id, [
             {"country": r["country"], "name": r["name"], "dial": r.get("dial", ""),
-             "price": (r.get("best") or {}).get("price", 0.0),
-             "receiver": (r.get("best") or {}).get("receiver", "")} for r in rows])
+             "price": r["sell"], "receiver": r["receiver"]} for r in rows])
         await tg.send(bot, tg_id, chart_text(rows, pricing.profit_mult(s)))
         await tg.send_document(bot, tg_id, chart_csv(rows).encode(),
                                f"prices_{datetime.now(_TZ).strftime('%Y%m%d_%H%M')}.csv")
