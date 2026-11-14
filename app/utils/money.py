@@ -207,8 +207,9 @@ def total_of(payload: dict, currency: str) -> float:
 
 def pick_for_buy(balances: list[dict], currency: str, price: float) -> dict | None:
     need = _num(price, 0.0) or 0.0
-    for b in sorted(balances, key=_rank):
-        if b.get("usable_for_buy") and same_currency(b.get("currency"), currency) \
-                and free_of(b) >= need:
+    ranked = [b for b in sorted(balances, key=_rank)
+              if b.get("usable_for_buy") and same_currency(b.get("currency"), currency)]
+    for b in ranked:
+        if free_of(b) >= need:
             return b
-    return None
+    return ranked[0] if ranked else None
