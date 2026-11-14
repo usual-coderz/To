@@ -7,10 +7,10 @@ from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 from aiogram.types import CallbackQuery, ErrorEvent, Message
 
-from app import db, receiver_hub, seller
+from app import db, receiver_hub, seller, scheduler
 from app.config import BOT_TOKEN, MONGO_DB, MONGO_URI, OWNER_IDS, PURCHASE_KEEP_DAYS
 from app.deps import lzt
-from app.engine import buy_loop, cleaner_loop, drain_bg, price_loop
+from app.engine import buy_loop, cleaner_loop, drain_bg, price_loop, session_watch_loop
 from app.handlers import ROUTERS
 from app.handlers.menu import allowed
 from app.scheduler import loop as chart_loop
@@ -83,8 +83,10 @@ async def main():
         asyncio.create_task(_supervise("buy_loop", buy_loop, bot, lzt)),
         asyncio.create_task(_supervise("cleaner_loop", cleaner_loop, bot, lzt)),
         asyncio.create_task(_supervise("sell_worker", seller.worker, bot, lzt)),
+        asyncio.create_task(_supervise("session_watch", session_watch_loop, bot)),
         asyncio.create_task(_supervise("price_loop", price_loop)),
         asyncio.create_task(_supervise("chart_loop", chart_loop, bot)),
+        asyncio.create_task(_supervise("initial_sweep", scheduler.initial, bot)),
     ]
 
     loop = asyncio.get_running_loop()
