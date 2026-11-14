@@ -53,6 +53,8 @@ _SYMS = "$€₽₴£₸¥₺"
 _TRUE = {"1", "true", "yes", "y", "on", "да", "blocked", "ban", "spam"}
 _FALSE = {"0", "false", "no", "n", "off", "", "none", "nomatter", "-"}
 
+PRICE_EPS = 1e-6
+
 
 def _clean(text: str) -> str:
     s = str(text).strip()
@@ -287,10 +289,10 @@ def passes(item: dict, s: dict, authoritative: bool = False) -> tuple[bool, str]
     price = _num(item.get("price"))
     if price is not None:
         floor = _num(s.get("price_min")) or 0.0
-        cap_price = _num(s.get("price_max")) or float("inf")
-        if price < floor:
+        cap_price = _num(s.get("price_max")) or 0.0
+        if floor and price + PRICE_EPS < floor:
             return False, "price_min"
-        if price > cap_price:
+        if cap_price and price - PRICE_EPS > cap_price:
             return False, "price_max"
 
     if s.get("nsb_only") == "1" and _flag(item.get("nsb")) is False:
@@ -322,43 +324,43 @@ def passes(item: dict, s: dict, authoritative: bool = False) -> tuple[bool, str]
     geo = geo_spam_state(item)
     mode = s.get("spam_mode", "no")
     strict = s.get("spam_free", "1") == "1"
-    if mode == "any" and not strict:
-        if spam is None:
-            unknown = True
-        elif spam is True and s.get("verify_spam", "1") == "1":
+    if mode == "any":
+        if spam is True and s.get("verify_spam", "1") == "1":
             return False, "spam"
-    elif mode == "yes":
         if spam is None:
             unknown = True
-        elif spam is False:
+    elif mode == "yes":
+        if spam is False:
             return False, "spam_missing"
+        if spam is None:
+            unknown = True
     else:
         if spam is True:
             return False, "spam"
         if geo is True:
             return False, "geo_spam"
-        if strict and (spam is None or geo is None):
+        if spam is None:
             unknown = True
-        elif spam is None:
+        elif strict and geo is None:
             unknown = True
 
     mail = mail_state(item)
     mode = s.get("mail_mode", "any")
-    if mail is None:
-        unknown = True
-    elif mode == "yes" and mail is False:
+    if mode == "yes" and mail is False:
         return False, "no_mail"
     elif mode == "no" and mail is True:
         return False, "has_mail"
+    elif mail is None:
+        unknown = True
 
     has_pw = pass_state(item)
     mode = s.get("password_mode", "any")
-    if has_pw is None:
-        unknown = True
-    elif mode == "yes" and has_pw is False:
+    if mode == "yes" and has_pw is False:
         return False, "no_2fa"
     elif mode == "no" and has_pw is True:
         return False, "has_2fa"
+    elif has_pw is None:
+        unknown = True
 
     if not cc:
         unknown = True
