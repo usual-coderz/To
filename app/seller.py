@@ -23,6 +23,8 @@ SERVICE_ID = 777000
 SERVICE_NAMES = ("777000", "Telegram")
 NUDGE_AFTER = 40
 NUDGE_WORDS = ("resend",)
+FIRST_WAIT = 60
+HISTORY_GAP = 3.5
 
 
 def _sem() -> asyncio.Semaphore:
@@ -99,12 +101,12 @@ async def _poll_tg(conn, entity, timeout: float, since: int, skip: set[str]) -> 
     warned = False
     while time.monotonic() < end:
         try:
-            msgs = await conn.get_messages(entity, limit=10, min_id=since)
+            msgs = await conn.get_messages(entity, limit=5, min_id=since)
         except Exception as e:
             if not warned:
                 log.info(f"otp tg read: {e}")
                 warned = True
-            await asyncio.sleep(3.0)
+            await asyncio.sleep(4.0)
             continue
         warned = False
         fresh = sorted(msgs or [], key=lambda m: int(m.id or 0))
@@ -114,7 +116,7 @@ async def _poll_tg(conn, entity, timeout: float, since: int, skip: set[str]) -> 
             if code and code not in skip:
                 log.info(f"otp tg hit: {code}")
                 return code
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(HISTORY_GAP)
     return ""
 
 
@@ -217,7 +219,10 @@ async def sell(bot, lzt, purchase: dict, offer: dict, settings: dict) -> bool:
 async def _handshake(bot, p: dict, conn, receiver: str, s: dict, since: int,
                      sell_price: float) -> tuple[bool, str, str]:
     password = (p.get("password") or s.get("twofa_password") or db.DEFAULT_2FA)
-    reply, since = await receiver_hub.wait_new(receiver, since, SELL_REPLY_TIMEOUT)
+
+    reply, since = await receiver_hub.wait_new(receiver, since, FIRST_WAIT)
+    if not reply:
+        reply, since = await receiver_hub.wait_new(receiver, since, SELL_REPLY_TIMEOUT)
     if not reply:
         return False, "no receiver reply", "handover"
 
@@ -302,10 +307,13 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
             entity = await _service_entity(conn)
             since = await _baseline(conn, entity)
 
+            if not await receiver_hub.tail_id(receiver):
+                await receiver_hub.start_bot(receiver)
+                await asyncio.sleep(2.5)
+
             sid = await db.add_sale(tg_id, pid, country, offer.get("receiver_id"),
                                     receiver, buy_price, sell_price, 0)
 
-            await receiver_hub.drain(receiver)
             since = await receiver_hub.tail_id(receiver)
             if not await receiver_hub.send(receiver, phone):
                 await receiver_hub.start_bot(receiver)
