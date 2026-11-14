@@ -10,7 +10,7 @@ from app.config import OWNER_IDS, TARGET_HOURS
 from app.deps import lzt
 from app.lzt import extract_auth_key, extract_dc_id
 from app.session_manager import dc_addr, login_with_auth_key
-from app.utils import tg
+from app.utils import iso3, tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import geo_spam_state, mail_state, pass_state, spam_state
 from app.utils.money import fmt_money
@@ -74,6 +74,34 @@ async def cmd_probe(m: Message):
     body = extracted_text(out["offers"], key)
     raw = (out.get("raw") or "empty")[:2500]
     await tg.send(m.bot, m.chat.id, f"{head}\n\n{body}\n\n<b>Raw</b>\n{tg.pre(raw)}")
+
+
+@router.message(Command("searchtest"))
+async def cmd_searchtest(m: Message):
+    if not _owner(m):
+        return
+    s = await db.get_settings(m.from_user.id)
+    params = lzt._search_params(s)
+    allow, bad = iso3.parse(s.get("countries"))
+    deny, bad_deny = iso3.parse(s.get("deny_countries"))
+    lines = [f"GET /telegram", str(params)]
+    if allow:
+        lines.append(f"iso3 allow {','.join(allow)}")
+    if deny:
+        lines.append(f"iso3 deny {','.join(deny)}")
+    if bad or bad_deny:
+        lines.append(f"dropped {','.join(bad + bad_deny)}")
+    await m.answer(tg.pre("\n".join(lines), 1800))
+    try:
+        items = await lzt.search(s)
+    except Exception as e:
+        return await m.answer(f"❌ {html.escape(str(e)[:400])}")
+    await m.answer(f"✅ {len(items)} item(s)")
+    if not items:
+        return
+    rows = [f"{i.get('item_id')} · ${i.get('price')} · {i.get('country') or '?'}"
+            for i in items[:10]]
+    await m.answer(tg.pre("\n".join(rows), 2000))
 
 
 @router.message(Command("warm"))
@@ -256,6 +284,8 @@ async def cmd_diag(m: Message):
     spent = await db.spent_today(m.from_user.id)
     queued = await db.queue_count(m.from_user.id)
     kinds = ", ".join(f"{b['kind']}:{b['amount']:g}" for b in snap["entries"]) or "none"
+    allow, bad = iso3.parse(s.get("countries"))
+    deny, bad_deny = iso3.parse(s.get("deny_countries"))
     lines = [
         f"auto_buy {s['auto_buy']} · auto_sell {s['auto_sell']}",
         f"cap ${s['daily_spend_cap']} · spent {spent:.2f}",
@@ -267,6 +297,8 @@ async def cmd_diag(m: Message):
         f"total {fmt_money(snap['total'], s['currency'])}"
         f" · spendable {fmt_money(snap['spendable'], s['currency'])}",
         f"entries {kinds}",
+        f"iso3 allow {','.join(allow) or '—'} · deny {','.join(deny) or '—'}",
+        f"dropped {','.join(bad + bad_deny) or '—'}",
         f"note {snap['note'] or '—'}",
         f"error {snap['error'] or '—'}",
     ]
