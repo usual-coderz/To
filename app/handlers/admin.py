@@ -44,12 +44,12 @@ async def cmd_hub(m: Message):
         except Exception:
             pass
     rows = await db.list_receivers(m.from_user.id)
-    lines = [f"userbot {'🟢 ' + tg.esc(me) if online else '🔴 offline'}",
+    lines = [f"userbot {'online ' + me if online else 'offline'}",
              f"receivers {len(rows)}"]
     for r in rows:
         ok = await receiver_hub._resolve(r["username"]) if online else None
         lines.append(f"{'✅' if ok else '❌'} @{r['username']} [{r.get('kind')}]")
-    await m.answer("<code>" + tg.esc("\n".join(lines)) + "</code>")
+    await m.answer(tg.pre("\n".join(lines), 2000))
 
 
 @router.message(Command("probe"))
@@ -73,8 +73,7 @@ async def cmd_probe(m: Message):
             f" · parsed {len(out['offers'])}")
     body = extracted_text(out["offers"], key)
     raw = (out.get("raw") or "empty")[:2500]
-    await tg.send(m.bot, m.chat.id,
-                  f"{head}\n\n{body}\n\n<b>Raw</b>\n<code>{tg.esc(raw)}</code>")
+    await tg.send(m.bot, m.chat.id, f"{head}\n\n{body}\n\n<b>Raw</b>\n{tg.pre(raw)}")
 
 
 @router.message(Command("warm"))
@@ -220,14 +219,13 @@ async def cmd_queue(m: Message):
     rows = await db.active_purchases(m.from_user.id, limit=20)
     if not rows:
         return await m.answer("queue empty")
-    lines = ["<b>Queue</b>"]
+    lines = []
     for p in rows:
         state = p.get("status") or "?"
         left = fmt_left(p.get("expires_at")) if state in ("queued", "cleaning") else "cleaned"
-        age = db.current_age(p)
-        lines.append(f"<code>{tg.esc(p['_id'])}</code> · {tg.esc(p.get('phone') or '—')}"
-                     f" · {state} · age {age:.1f}h · {left}")
-    await tg.send(m.bot, m.chat.id, "\n".join(lines))
+        lines.append(f"{p['_id']} · {p.get('phone') or '—'}"
+                     f" · {state} · age {db.current_age(p):.1f}h · {left}")
+    await m.answer(f"<b>Queue</b>\n{tg.pre(chr(10).join(lines), 3000)}")
 
 
 @router.message(Command("clean"))
@@ -258,23 +256,21 @@ async def cmd_diag(m: Message):
     spent = await db.spent_today(m.from_user.id)
     queued = await db.queue_count(m.from_user.id)
     kinds = ", ".join(f"{b['kind']}:{b['amount']:g}" for b in snap["entries"]) or "none"
-    await m.answer(
-        "<b>diag</b>\n"
-        f"auto_buy {s['auto_buy']} · auto_sell {s['auto_sell']} · cap ${s['daily_spend_cap']}"
-        f" · spent {spent:.2f}\n"
-        f"price {s['price_min']}–{s['price_max']} · currency {s['currency']}\n"
-        f"profit x{s['profit_mult']} · spam free {s['spam_free']}\n"
-        f"target {TARGET_HOURS:g}h · min age {s['session_min_hours']}h"
-        f" · max age {s['session_max_hours'] or 'off'} · queued {queued}\n"
-        f"2fa <code>{tg.esc(s['twofa_password'])}</code>"
-        f" · mail src {s['mail_provider']}\n"
-        f"hub {'🟢 online' if receiver_hub.running() else '🔴 offline'}\n"
+    lines = [
+        f"auto_buy {s['auto_buy']} · auto_sell {s['auto_sell']}",
+        f"cap ${s['daily_spend_cap']} · spent {spent:.2f}",
+        f"price {s['price_min']}-{s['price_max']} · currency {s['currency']}",
+        f"profit x{s['profit_mult']} · target {TARGET_HOURS:g}h",
+        f"min age {s['session_min_hours']}h · max {s['session_max_hours'] or 'off'}",
+        f"queued {queued} · 2fa {s['twofa_password']} · mail src {s['mail_provider']}",
+        f"hub {'online' if receiver_hub.running() else 'offline'}",
         f"total {fmt_money(snap['total'], s['currency'])}"
-        f" · spendable {fmt_money(snap['spendable'], s['currency'])}\n"
-        f"entries {tg.esc(kinds)}\n"
-        f"note {tg.esc(snap['note'] or '—')}\n"
-        f"error {tg.esc(snap['error'] or '—')}"
-    )
+        f" · spendable {fmt_money(snap['spendable'], s['currency'])}",
+        f"entries {kinds}",
+        f"note {snap['note'] or '—'}",
+        f"error {snap['error'] or '—'}",
+    ]
+    await m.answer(f"<b>diag</b>\n{tg.pre(chr(10).join(lines), 2500)}")
 
 
 @router.message(Command("peek"))
@@ -305,4 +301,4 @@ async def cmd_peek(m: Message):
     lines.append(f"pass_state = {pass_state(item)!r}")
     lines.append("—")
     lines.append("keys: " + ", ".join(sorted(item)[:60]))
-    await m.answer(f"<code>{html.escape(chr(10).join(lines))}</code>")
+    await m.answer(tg.pre("\n".join(lines), 3500))
