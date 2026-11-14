@@ -7,7 +7,7 @@ from aiogram.types import CallbackQuery, Message
 from app import db, keyboards as kb
 from app.handlers import state
 from app.handlers.menu import show
-from app.utils import tg
+from app.utils import iso3, tg
 from app.utils.texts import filters_text, profit_text
 
 router = Router()
@@ -74,6 +74,16 @@ async def _replace(bot, chat_id: int, message_id: int, text: str, markup):
     await tg.send(bot, chat_id, text, markup)
 
 
+def _country_note(stored: str) -> str:
+    if not stored:
+        return ""
+    off = [c for c in stored.split(",") if c and not iso3.supported(c)]
+    if not off:
+        return ""
+    return (f"\n⚠️ market par nahi hai, sirf local filter: "
+            f"<code>{tg.esc(','.join(off))}</code>")
+
+
 @router.callback_query(F.data == "m:filters")
 async def cb_filters(cq: CallbackQuery):
     state.clear(cq.from_user.id)
@@ -135,7 +145,8 @@ async def cb_input(cq: CallbackQuery):
     key = cq.data.split(":", 1)[1]
     if key in COUNTRY_KEYS:
         hint = COUNTRY_KEYS[key]
-        body = "Send ISO codes, comma separated (e.g. <code>AE,LY,JO</code>)\n<code>all</code> = clear"
+        body = ("Send ISO2 codes, comma separated (e.g. <code>AE,LY,JO</code>)\n"
+                "<code>all</code> = clear")
         label = "Include countries" if key == "countries" else "Exclude countries"
     elif key in NUMERIC:
         label, hint, lo, hi, _ = NUMERIC[key]
@@ -177,7 +188,8 @@ async def on_value(m: Message, hit: dict):
         if len(tokens) == 1 and tokens[0].lower() in ("all", "-", "clear", "none"):
             val = ""
         else:
-            codes = [t.upper() for t in tokens if len(t) == 2 and t.isalpha()]
+            codes = [t.upper() for t in tokens
+                     if len(t) == 2 and t.isalpha() and t.upper() in iso3.NAMES2]
             if not codes:
                 state.set(uid, "setting", key, hit["chat_id"], hit["message_id"])
                 return await m.answer("need ISO codes like AE,LY · /cancel")
@@ -210,7 +222,7 @@ async def on_value(m: Message, hit: dict):
     if key in AGE_KEYS:
         await db.reschedule(uid)
 
-    note = ""
+    note = _country_note(stored) if key in COUNTRY_KEYS else ""
     if key == "session_min_hours" and 0 < db.num(stored) < 24:
         note = "\n⚠️ below 24h the market filter cannot apply — checked locally"
 
