@@ -3,7 +3,7 @@ import logging
 import time
 from collections import Counter
 
-from app import db, pricing, seller
+from app import db, receivers, seller
 from app.config import (CYCLE_INTERVAL, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
                         LOGIN_CONCURRENCY, LOGIN_RETRY_DELAY, LOGIN_TRIES, MAX_SCAN,
                         SESSION_RETRY, TARGET_HOURS, TICK)
@@ -564,7 +564,7 @@ async def price_loop():
     while True:
         try:
             for owner in await db.all_owners():
-                await pricing.refresh_all(owner["_id"])
+                await receivers.refresh_stale(owner["_id"])
         except Exception as e:
             log.exception(f"price_loop: {e}")
-        await asyncio.sleep(120)
+        await asyncio.sleep(300)
