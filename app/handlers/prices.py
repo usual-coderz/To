@@ -27,7 +27,7 @@ async def cb_chart(cq: CallbackQuery):
         s = await db.get_settings(cq.from_user.id)
         rows = await pricing.chart_rows(cq.from_user.id, s)
         body = chart_copy(rows, pricing.profit_mult(s))
-        await tg.send(cq.bot, cq.from_user.id, f"<pre>{tg.esc(body)}</pre>")
+        await tg.send(cq.bot, cq.from_user.id, tg.pre(body, 3600))
         return await cq.answer("copied")
     if action == "ch:caps":
         rows = await db.last_caps(cq.from_user.id)
