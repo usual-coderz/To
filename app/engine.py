@@ -15,8 +15,8 @@ from app.session_manager import (change_email, check_session, clean_client, devi
                                  reset_others, set_2fa, spambot_status)
 from app.utils import tg
 from app.utils import wallet as wallet_view
-from app.utils.filters import (account_created_ts, age_for_queue, country_of,
-                               geo_spam_state, passes, phone_of, spam_state)
+from app.utils.filters import (account_created_ts, age_for_queue, country_of, passes,
+                               phone_of, spam_state)
 from app.utils.money import fmt_money, pick_for_buy
 from app.utils.texts import audit_text, bought_line, failed_line, session_file
 
@@ -176,13 +176,9 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         return False, why
 
     soft = ""
-    if s.get("spam_mode") == "no" and s.get("spam_free", "1") != "1":
-        if spam_state(fresh) is True:
-            soft = "spam_flag"
-            log.info(f"note {item_id}: spam flag set but server filter says clean")
-        elif geo_spam_state(fresh) is True:
-            soft = "geo_spam_flag"
-            log.info(f"note {item_id}: geo spam flag set")
+    if spam_state(fresh) is True:
+        soft = "spam_flag"
+        log.info(f"note {item_id}: spam flag present, server filter already applied")
     if why == "ok_unknown":
         log.info(f"note {item_id}: fields unknown, relying on server filters")
 
