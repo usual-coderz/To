@@ -13,6 +13,9 @@ log = logging.getLogger("scheduler")
 
 _TZ = ZoneInfo(SCHEDULE_TZ)
 _RUN: dict[tuple[int, str, str], int] = {}
+_STARTUP_DONE: set[int] = set()
+
+STARTUP_DELAY = 25.0
 
 
 def _next_slot(now: datetime, hours: tuple[int, ...]) -> tuple[str, datetime] | None:
@@ -32,7 +35,7 @@ async def _chart(bot, tg_id: int):
         if not rows:
             await tg.send(bot, tg_id,
                           "<b>Price chart</b>\nno cached prices yet\n"
-                          "warm sweep chalta hai 00:00 aur 16:00 pe")
+                          "sweep 12:00 aur 16:00 pe chalta hai")
             return
         s = await db.get_settings(tg_id)
         await db.save_chart(tg_id, [
@@ -66,6 +69,25 @@ async def _warm_fetch(bot, tg_id: int):
     except Exception as e:
         log.exception(f"warm sweep {tg_id}: {e}")
         await tg.send(bot, tg_id, f"⚠️ warm sweep failed: {tg.esc(str(e)[:150])}")
+
+
+async def initial(bot):
+    await asyncio.sleep(STARTUP_DELAY)
+    try:
+        if not receiver_hub.running():
+            await receiver_hub.start()
+    except Exception as e:
+        log.info(f"startup hub: {e}")
+    for owner in await db.all_owners():
+        tg_id = owner["_id"]
+        if tg_id in _STARTUP_DONE:
+            continue
+        _STARTUP_DONE.add(tg_id)
+        try:
+            await _warm_fetch(bot, tg_id)
+        except Exception as e:
+            log.info(f"startup sweep {tg_id}: {e}")
+        await asyncio.sleep(5.0)
 
 
 async def loop(bot):
