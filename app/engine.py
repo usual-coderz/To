@@ -3,7 +3,7 @@ import logging
 import time
 from collections import Counter
 
-from app import db, receivers, seller
+from app import db, receivers, seller, session_export
 from app.config import (CYCLE_INTERVAL, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
                         LOGIN_CONCURRENCY, LOGIN_RETRY_DELAY, LOGIN_TRIES, MAX_SCAN,
                         SESSION_RETRY, TARGET_HOURS, TICK)
@@ -339,7 +339,12 @@ async def _send_audit(bot, tg_id, p, data):
     sup = await db.get_username(tg_id)
     await tg.send(bot, tg_id, audit_text(p, data, sup))
     name = (p.get("phone") or str(p["item_id"])).lstrip("+") or "session"
-    await tg.send_document(bot, tg_id, session_file(p).encode(), f"{name}.py")
+    try:
+        blob = session_export.sqlite_bytes(p.get("session_string") or "")
+    except Exception as e:
+        log.info(f"session export {name}: {e}")
+        return
+    await tg.send_document(bot, tg_id, blob, f"{name}.session")
 
 
 async def _fail(bot, p, note: list[str]):
@@ -371,8 +376,6 @@ async def clean_purchase(bot, lzt, p: dict):
         await conn.connect()
         if not await conn.is_user_authorized():
             raise SessionDead("session dead")
-
-        await remove_2fa(conn, p.get("password"), s.get("twofa_password"), db.DEFAULT_2FA)
 
         if s.get("change_mail_on_expire") == "1":
             mc, addr = await _mail_client_for(p, s)
