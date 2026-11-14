@@ -6,7 +6,8 @@ from app import db, keyboards as kb, pricing, seller
 from app.deps import lzt
 from app.handlers.menu import show
 from app.utils import tg
-from app.utils.texts import prices_text, ready_detail_text, ready_row, ready_text
+from app.utils.texts import (prices_text, ready_detail_text, ready_list_text,
+                             ready_text)
 
 router = Router()
 
@@ -39,9 +40,7 @@ async def cb_list(cq: CallbackQuery):
     rows = await db.ready_purchases(cq.from_user.id, 30)
     if not rows:
         return await cq.answer("nothing ready", show_alert=True)
-    body = (f"<b>Ready</b> · {len(rows)}\n\n"
-            + "\n\n".join(ready_row(p) for p in rows[:15]))
-    await show(cq, body, kb.ready_list(rows))
+    await show(cq, ready_list_text(rows[:15]), kb.ready_list(rows))
     await cq.answer()
 
 
