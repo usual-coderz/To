@@ -10,7 +10,7 @@ from app.config import OWNER_IDS, TARGET_HOURS
 from app.deps import lzt
 from app.lzt import extract_auth_key, extract_dc_id
 from app.session_manager import dc_addr, login_with_auth_key
-from app.utils import iso3, tg
+from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import geo_spam_state, mail_state, pass_state, spam_state
 from app.utils.money import fmt_money
