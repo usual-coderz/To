@@ -7,7 +7,7 @@ from app.handlers.menu import show
 from app.session_manager import check_session
 from app.utils import tg
 from app.utils.texts import (session_bundle, session_detail, session_file,
-                             session_stats_text)
+                             session_list_text, session_stats_text)
 from app.utils.timeutil import fmt_dt, now
 
 router = Router()
@@ -89,8 +89,8 @@ async def cb_page(cq: CallbackQuery):
     if count == -1:
         await show(cq, f"<b>{label}</b>\nno session stored", kb.back("m:sessions"))
         return await cq.answer("no session", show_alert=True)
-    await show(cq, f"<b>{label}</b> · {count} session(s) sent as "
-                   f"<code>.session</code>", kb.session_file_bar(page))
+    await show(cq, f"<b>{label}</b> · {count} session(s) sent as <code>.session</code>",
+               kb.session_file_bar(page))
     await cq.answer(f"{count} sent")
 
 
@@ -101,7 +101,7 @@ async def cb_list(cq: CallbackQuery):
     if not rows:
         await show(cq, f"<b>{PAGES.get(page, page)}</b>\nempty", kb.back("m:sessions"))
         return await cq.answer("empty", show_alert=True)
-    await show(cq, f"<b>{PAGES.get(page, page)}</b> · {len(rows)}",
+    await show(cq, session_list_text(rows[:20], PAGES.get(page, page)),
                kb.session_list(rows[:20], page))
     await cq.answer()
 
@@ -133,8 +133,7 @@ async def cb_check(cq: CallbackQuery):
         note += f" · @{me.username or me.id}"
     await db.set_purchase(pid, session_state="live" if alive else "dead", checked_at=now())
     p = await db.get_purchase(pid)
-    await show(cq, session_detail(p, f"🔎 {note} · {fmt_dt(now())}"),
-               kb.session_detail(p))
+    await show(cq, session_detail(p, f"🔎 {note} · {fmt_dt(now())}"), kb.session_detail(p))
 
 
 @router.callback_query(F.data.startswith("f:"))
