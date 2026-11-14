@@ -1,8 +1,9 @@
 import asyncio
 import logging
+import time
 
 from app import db, pricing, receiver_hub
-from app.config import CAP_REFRESH, PRICE_REFRESH
+from app.config import CAP_REFRESH, PRICE_REFRESH, WARM_TTL
 
 log = logging.getLogger("receivers")
 
@@ -38,8 +39,9 @@ async def warm(tg_id: int, rid: str = "") -> int:
         if not receiver or receiver["tg_id"] != tg_id:
             continue
         if await receiver_hub.start_bot(receiver["username"]):
+            await db.mark_warm(receiver["_id"])
             done += 1
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.5)
     return done
 
 
@@ -50,15 +52,7 @@ async def capacity(tg_id: int, rid: str) -> dict:
         return blank
     if not receiver_hub.running():
         await receiver_hub.start()
-    out = await pricing.probe(receiver)
-    if out["offers"]:
-        await db.save_prices(tg_id, rid, out["offers"])
-        await db.set_receiver(rid, price_at=db._now())
-    if out["cap"] < 0:
-        await db.fail_receiver(rid)
-    else:
-        await db.bump_receiver(rid, out["cap"], out["confirm"] or None)
-    return out
+    return await pricing.record(receiver)
 
 
 async def capacity_all(tg_id: int) -> dict:
@@ -67,7 +61,7 @@ async def capacity_all(tg_id: int) -> dict:
         await receiver_hub.start()
     out = {}
     for receiver in rows:
-        out[receiver["username"]] = (await capacity(tg_id, str(receiver["_id"])))["cap"]
+        out[receiver["username"]] = (await pricing.record(receiver))["cap"]
     return out
 
 
@@ -75,22 +69,46 @@ async def capacity_sweep(tg_id: int) -> dict:
     rows = await db.list_receivers(tg_id, enabled_only=True)
     if not receiver_hub.running():
         await receiver_hub.start()
-    out = {"total": len(rows), "ok": 0, "missing": 0, "empty": []}
+    out = {"total": len(rows), "ok": 0, "missing": 0, "prices": 0, "empty": []}
     for receiver in rows:
         try:
-            cap = await pricing.record_capacity(receiver)
+            result = await pricing.record(receiver, True)
         except Exception as e:
             log.info(f"cap sweep {receiver.get('username')}: {e}")
             out["missing"] += 1
             out["empty"].append(f"@{receiver.get('username')} error {e}"[:90])
             continue
-        if cap >= 0:
+        out["prices"] += len(result["offers"])
+        if result["cap"] >= 0:
             out["ok"] += 1
         else:
             out["missing"] += 1
             out["empty"].append(f"@{receiver.get('username')} no cap answer")
-        await asyncio.sleep(2.0)
+        await asyncio.sleep(2.5)
     return out
+
+
+async def due_warm(tg_id: int) -> list[dict]:
+    now = int(time.time())
+    rows = await db.list_receivers(tg_id, enabled_only=True)
+    return [r for r in rows if now - int(r.get("warm_at") or 0) > WARM_TTL * 3600]
+
+
+async def refresh_stale(tg_id: int) -> int:
+    rows = await due_warm(tg_id)
+    if not rows:
+        return 0
+    if not receiver_hub.running():
+        await receiver_hub.start()
+    done = 0
+    for receiver in rows:
+        try:
+            await pricing.record(receiver)
+            done += 1
+        except Exception as e:
+            log.info(f"stale refresh {receiver.get('username')}: {e}")
+        await asyncio.sleep(2.0)
+    return done
 
 
 async def sync(tg_id: int) -> dict:
@@ -103,3 +121,7 @@ def stale(receiver: dict, now: int) -> bool:
 
 def price_stale(receiver: dict, now: int) -> bool:
     return now - int(receiver.get("price_at") or 0) > PRICE_REFRESH
+
+
+def warm_stale(receiver: dict, now: int) -> bool:
+    return now - int(receiver.get("warm_at") or 0) > WARM_TTL * 3600
