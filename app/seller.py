@@ -19,13 +19,14 @@ _RUNNING: set[str] = set()
 
 MAX_CODE_SENDS = 3
 MAX_STEPS = 8
+MAX_REOPEN = 1
 SERVICE_ID = 777000
 SERVICE_NAMES = ("777000", "Telegram")
 NUDGE_AFTER = 35
 NUDGE_WORDS = ("resend",)
 FIRST_WAIT = 60
 HISTORY_GAP = 3.5
-UB_POLL = 8.0
+REOPEN_GAP = 4.0
 
 
 def _sem() -> asyncio.Semaphore:
@@ -85,6 +86,10 @@ async def _service_entity(conn):
                 return entity
         except Exception as e:
             log.info(f"service entity {target}: {e}")
+    try:
+        return await conn.get_input_entity(SERVICE_ID)
+    except Exception as e:
+        log.info(f"service input entity: {e}")
     return SERVICE_ID
 
 
@@ -100,9 +105,11 @@ async def _baseline(conn, entity) -> int:
 async def _poll_tg(conn, entity, timeout: float, since: int, skip: set[str]) -> str:
     end = time.monotonic() + timeout
     warned = False
+    first = True
     while time.monotonic() < end:
         try:
-            msgs = await conn.get_messages(entity, limit=6, min_id=since)
+            msgs = await conn.get_messages(entity, limit=6,
+                                           min_id=0 if first else since)
         except Exception as e:
             if not warned:
                 log.info(f"otp tg read: {e}")
@@ -110,6 +117,7 @@ async def _poll_tg(conn, entity, timeout: float, since: int, skip: set[str]) -> 
             await asyncio.sleep(4.0)
             continue
         warned = False
+        first = False
         fresh = sorted(msgs or [], key=lambda m: int(m.id or 0))
         for msg in fresh:
             since = max(since, int(msg.id or 0))
@@ -124,6 +132,7 @@ async def _poll_tg(conn, entity, timeout: float, since: int, skip: set[str]) -> 
 async def _poll_mail(p: dict, timeout: float, skip: set[str]) -> str:
     client = mail_engine.client_from(p)
     if client is None:
+        log.info(f"otp mail: no readable mailbox ({p.get('mail') or 'none'})")
         return ""
     end = time.monotonic() + timeout
     try:
@@ -177,9 +186,8 @@ async def _race(coros, timeout: float) -> str:
             task.cancel()
 
 
-async def _wait_otp(conn, p: dict, receiver: str, timeout: int,
+async def _wait_otp(conn, entity, p: dict, receiver: str, timeout: int,
                     otp_since: int, skip: set[str]) -> str:
-    entity = await _service_entity(conn)
     if not otp_since:
         otp_since = await _baseline(conn, entity)
     log.info(f"otp wait {p.get('phone')} from id {otp_since} "
@@ -229,8 +237,19 @@ async def _reply_wait(receiver: str, since: int, timeout: float) -> tuple[str, i
     return text, cursor
 
 
-async def _handshake(bot, p: dict, conn, receiver: str, s: dict, ub_since: int,
-                     otp_since: int, sell_price: float) -> tuple[bool, str, str]:
+async def _reopen(conn, entity, receiver: str, phone: str, ub_since: int):
+    log.info(f"reopen handover {phone}")
+    await _cancel(receiver)
+    await asyncio.sleep(REOPEN_GAP)
+    otp_since = await _baseline(conn, entity)
+    if not await receiver_hub.send(receiver, phone):
+        return otp_since, ub_since, ""
+    reply, ub_since = await _reply_wait(receiver, ub_since, FIRST_WAIT)
+    return otp_since, ub_since, reply
+
+
+async def _handshake(bot, p: dict, conn, entity, receiver: str, s: dict, ub_since: int,
+                     otp_since: int, phone: str, sell_price: float):
     password = (p.get("password") or s.get("twofa_password") or db.DEFAULT_2FA)
 
     reply, ub_since = await _reply_wait(receiver, ub_since, FIRST_WAIT)
@@ -241,6 +260,7 @@ async def _handshake(bot, p: dict, conn, receiver: str, s: dict, ub_since: int,
 
     sent: set[str] = set()
     stage = "handover"
+    reopened = 0
 
     for _ in range(MAX_STEPS):
         if sellparse.accepted(reply):
@@ -250,7 +270,15 @@ async def _handshake(bot, p: dict, conn, receiver: str, s: dict, ub_since: int,
         if needs_code:
             if len(sent) >= MAX_CODE_SENDS:
                 return False, reply, "otp"
-            code = await _wait_otp(conn, p, receiver, SELL_OTP_TIMEOUT, otp_since, sent)
+            code = await _wait_otp(conn, entity, p, receiver, SELL_OTP_TIMEOUT,
+                                   otp_since, sent)
+            if not code and reopened < MAX_REOPEN:
+                reopened += 1
+                otp_since, ub_since, reply = await _reopen(conn, entity, receiver,
+                                                           phone, ub_since)
+                if not reply:
+                    return False, "no otp received", "otp"
+                continue
             if not code:
                 return False, "no otp received", "otp"
             sent.add(code)
@@ -319,6 +347,8 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
 
             entity = await _service_entity(conn)
             otp_since = await _baseline(conn, entity)
+            log.info(f"otp source ready mail={p.get('mail') or '-'} "
+                     f"provider={p.get('mail_provider') or '-'} id={otp_since}")
 
             if not await receiver_hub.tail_id(receiver):
                 await receiver_hub.start_bot(receiver)
@@ -336,8 +366,8 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
                     return await _fail(bot, p, sid, receiver, "receiver dm failed",
                                        "handover", sell_price)
 
-            ok, reply, stage = await _handshake(bot, p, conn, receiver, s, ub_since,
-                                                otp_since, sell_price)
+            ok, reply, stage = await _handshake(bot, p, conn, entity, receiver, s,
+                                                ub_since, otp_since, phone, sell_price)
             if not ok:
                 return await _fail(bot, p, sid, receiver, reply, stage, sell_price)
 
