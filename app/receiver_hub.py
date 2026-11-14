@@ -24,8 +24,8 @@ IDLE_GAP = 3.0
 MAX_WAIT = 25.0
 MAX_MSGS = 60
 BUF_MAX = 200
-WAIT_SLICE = 5.0
-CATCH_UP_AFTER = 12.0
+WAIT_SLICE = 4.0
+POLL_EVERY = 8.0
 
 
 def running() -> bool:
@@ -192,7 +192,7 @@ async def wait_new(username: str, since: int, timeout: float) -> tuple[str, int]
 
     cursor = int(since or _STAMP.get(peer, 0) or 0)
     end = time.monotonic() + timeout
-    caught = False
+    last_poll = time.monotonic()
     parts: list[str] = []
     ev = _ev(peer)
 
@@ -205,15 +205,15 @@ async def wait_new(username: str, since: int, timeout: float) -> tuple[str, int]
         if parts:
             return "\n".join(parts), cursor
 
-        left = end - time.monotonic()
-        if not caught and left <= timeout - CATCH_UP_AFTER:
-            caught = True
+        if time.monotonic() - last_poll >= POLL_EVERY:
+            last_poll = time.monotonic()
             await _catch_up(peer, cursor)
             continue
 
+        left = end - time.monotonic()
         ev.clear()
         try:
-            await asyncio.wait_for(ev.wait(), min(left, WAIT_SLICE))
+            await asyncio.wait_for(ev.wait(), max(0.5, min(left, WAIT_SLICE)))
         except asyncio.TimeoutError:
             pass
 
