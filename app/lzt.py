@@ -32,6 +32,8 @@ MAX_DEPTH = 5
 GEO_KEY = "allow_geo_spamblock"
 COUNTRY_KEYS = ("country[]", "not_country[]")
 
+ID_KEYS = ("item_id", "id", "itemId")
+
 
 class LztError(Exception):
     def __init__(self, message: str, status: int = 0):
@@ -41,6 +43,8 @@ class LztError(Exception):
 
 def classify(e: LztError) -> str:
     text = str(e).lower()
+    if "daily check limit" in text or "check limit" in text or "limit exceed" in text:
+        return "check_limit"
     if "daily limit" in text or "limit of checks" in text:
         return "check_limit"
     if "is sold" in text or "sold." in text:
@@ -51,6 +55,8 @@ def classify(e: LztError) -> str:
         return "deleted"
     if "blacklist" in text:
         return "blacklist"
+    if "price changed" in text or "wrong price" in text or "price is different" in text:
+        return "price_changed"
     if "enough money" in text or "enough balance" in text:
         return "no_balance"
     if "country" in text:
@@ -58,6 +64,22 @@ def classify(e: LztError) -> str:
     if "session is invalid" in text or "logged out" in text or "blocked" in text:
         return "dead"
     return "check_failed"
+
+
+def item_id_of(item) -> int:
+    if not isinstance(item, dict):
+        return 0
+    for key in ID_KEYS:
+        raw = item.get(key)
+        if raw in (None, ""):
+            continue
+        try:
+            number = int(str(raw).strip())
+        except (TypeError, ValueError):
+            continue
+        if number > 0:
+            return number
+    return 0
 
 
 def _message(payload) -> str:
@@ -199,7 +221,7 @@ class LztClient:
             timeout=HTTP_TIMEOUT,
             headers={"Authorization": f"Bearer {token}",
                      "Accept": "application/json",
-                     "User-Agent": "AccStore/3.4"},
+                     "User-Agent": "AccStore/3.5"},
         )
 
     async def close(self):
@@ -284,9 +306,10 @@ class LztClient:
 
     async def _buy_call(self, path: str, payload: dict | None) -> dict:
         last: LztError | None = None
+        body = {} if payload is None else payload
         for attempt in range(RETRY_ATTEMPTS):
             try:
-                return await self._request("POST", path, json=payload)
+                return await self._request("POST", path, json=body)
             except LztError as e:
                 last = e
                 if e.status == 403 and "retry_request" in str(e).lower():
@@ -341,7 +364,7 @@ class LztClient:
 
     @staticmethod
     def _enum(value: str) -> str:
-        return "nomatter" if value == "any" else value
+        return "nomatter" if value in ("any", "", None) else value
 
     def country_mode(self, s: dict) -> tuple[str, list[str], list[str], list[str]]:
         allow, bad_allow = iso3.parse(s.get("countries"))
@@ -362,6 +385,8 @@ class LztClient:
             "email": self._enum(s.get("mail_mode", "any")),
             "password": self._enum(s.get("password_mode", "any")),
         }
+        if params["pmax"] < params["pmin"]:
+            params["pmax"] = params["pmin"]
         if s.get("nsb_only") == "1":
             params["nsb"] = "true"
         if s.get("spam_mode") == "no":
@@ -378,6 +403,22 @@ class LztClient:
         params.update(search_query(s))
         return {k: v for k, v in params.items() if v not in (None, "", [])}
 
+    @staticmethod
+    def _items(data: dict) -> list[dict]:
+        rows = data.get("items")
+        if not isinstance(rows, list):
+            rows = data.get("accounts")
+        if not isinstance(rows, list):
+            return []
+        out = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if not item_id_of(row):
+                continue
+            out.append(row)
+        return out
+
     async def search(self, s: dict) -> list[dict]:
         params = self._search_params(s)
         try:
@@ -388,7 +429,9 @@ class LztClient:
             trimmed = {k: v for k, v in params.items() if k not in COUNTRY_KEYS}
             log.warning(f"search 400 ({e}), retrying without country filter")
             data = await self._get("/telegram", trimmed)
-        return data.get("items") or []
+        items = self._items(data)
+        log.info(f"search: {len(items)} item(s) params={params}")
+        return items
 
     async def item(self, item_id: int, use_cache: bool = False) -> dict:
         key = f"item:{int(item_id)}"
@@ -398,8 +441,10 @@ class LztClient:
                 return dict(hit)
         data = await self._get(f"/{int(item_id)}")
         item = data.get("item") or data
-        self._store(key, item)
-        return item
+        if isinstance(item, dict):
+            self._store(key, item)
+            return item
+        return {}
 
     async def check_account(self, item_id: int) -> dict:
         data = await self._buy_call(CHECK_PATH.format(int(item_id)), None)
@@ -410,12 +455,13 @@ class LztClient:
 
     async def fast_buy(self, item_id: int, price: float,
                        balance_id: int | None = None) -> dict:
-        payload: dict = {"price": float(price)}
+        payload: dict = {"price": round(float(price), 4)}
         if balance_id:
             payload["balance_id"] = int(balance_id)
         data = await self._buy_call(BUY_PATH.format(int(item_id)), payload)
         self.invalidate("item:")
         self.invalidate("balances")
+        self.invalidate("me")
         return data
 
     async def reset_authorizations(self, item_id: int) -> dict:
