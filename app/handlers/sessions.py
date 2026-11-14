@@ -2,12 +2,12 @@ from aiogram import F, Router
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
-from app import db, keyboards as kb, seller
+from app import db, keyboards as kb, seller, session_export
 from app.handlers.menu import show
 from app.session_manager import check_session
 from app.utils import tg
-from app.utils.texts import (session_bundle, session_detail, session_file,
-                             session_list_text, session_stats_text)
+from app.utils.texts import (session_detail, session_file, session_list_text,
+                             session_stats_text)
 from app.utils.timeutil import fmt_dt, now
 
 router = Router()
@@ -43,17 +43,26 @@ async def _panel(bot, chat_id: int, tg_id: int, edit=None):
         await tg.send(bot, chat_id, text, markup)
 
 
-async def _send_file(bot, chat_id: int, tg_id: int, page: str) -> int:
+async def _send_zip(bot, chat_id: int, tg_id: int, page: str) -> int:
     rows = await _rows(tg_id, page)
     if not rows:
         return 0
     label = PAGES.get(page, page)
-    body = session_bundle(rows, label)
-    if not body.strip():
+    blob = session_export.zip_of(rows)
+    if not blob:
         return -1
-    await tg.send_document(bot, chat_id, body.encode(),
-                           f"{label.replace('+', 'p')}_{now()}.session")
+    await tg.send_document(bot, chat_id, blob,
+                           f"{label.replace('+', 'p')}_{now()}.zip")
     return len(rows)
+
+
+async def _send_single(bot, chat_id: int, p: dict) -> bool:
+    try:
+        blob = session_export.sqlite_bytes(p.get("session_string") or "")
+    except Exception:
+        return False
+    name = (p.get("phone") or str(p.get("item_id"))).lstrip("+") or "session"
+    return await tg.send_document(bot, chat_id, blob, f"{name}.session")
 
 
 @router.message(Command("session"))
@@ -82,14 +91,14 @@ async def cb_page(cq: CallbackQuery):
         await show(cq, session_stats_text(st, sold), kb.back("m:sessions"))
         return await cq.answer()
     label = PAGES.get(page, page)
-    count = await _send_file(cq.bot, cq.from_user.id, cq.from_user.id, page)
+    count = await _send_zip(cq.bot, cq.from_user.id, cq.from_user.id, page)
     if count == 0:
         await show(cq, f"<b>{label}</b>\nempty", kb.back("m:sessions"))
         return await cq.answer("empty", show_alert=True)
     if count == -1:
         await show(cq, f"<b>{label}</b>\nno session stored", kb.back("m:sessions"))
         return await cq.answer("no session", show_alert=True)
-    await show(cq, f"<b>{label}</b> · {count} session(s) sent as <code>.session</code>",
+    await show(cq, f"<b>{label}</b> · {count} session(s) sent as <code>.session</code> zip",
                kb.session_file_bar(page))
     await cq.answer(f"{count} sent")
 
@@ -143,7 +152,19 @@ async def cb_file(cq: CallbackQuery):
         return await cq.answer("gone", show_alert=True)
     if not p.get("session_string"):
         return await cq.answer("no session stored", show_alert=True)
-    name = (p.get("phone") or str(p["item_id"])).lstrip("+") or "session"
+    if not await _send_single(cq.bot, cq.from_user.id, p):
+        return await cq.answer("export failed", show_alert=True)
+    await cq.answer("sent")
+
+
+@router.callback_query(F.data.startswith("g:"))
+async def cb_script(cq: CallbackQuery):
+    p = await db.get_purchase(cq.data.split(":", 1)[1])
+    if not p or p["tg_id"] != cq.from_user.id:
+        return await cq.answer("gone", show_alert=True)
+    if not p.get("session_string"):
+        return await cq.answer("no session stored", show_alert=True)
+    name = (p.get("phone") or str(p.get("item_id"))).lstrip("+") or "session"
     await tg.send_document(cq.bot, cq.from_user.id, session_file(p).encode(), f"{name}.py")
     await cq.answer("sent")
 
