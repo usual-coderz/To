@@ -63,9 +63,12 @@ async def cmd_probe(m: Message):
     receiver = await db.get_receiver_by_key(m.from_user.id, key)
     if not receiver:
         return await m.answer("❌ receiver not registered, add it first")
-    await m.answer("🔎 probing…")
-    out = await pricing.probe(receiver)
+    if not receiver_hub.running():
+        await receiver_hub.start()
+    await m.answer("🔎 warming + probing…")
+    out = await pricing.record(receiver, True)
     head = (f"@{tg.esc(key)} · kind {receiver.get('kind')}"
+            f" · warm {'yes' if out['warm'] else 'cached'}"
             f" · replies {out['replies']} · cap {out['cap']}"
             f" · parsed {len(out['offers'])}")
     body = extracted_text(out["offers"], key)
@@ -80,6 +83,16 @@ async def cmd_warm(m: Message):
         return
     done = await receivers.warm(m.from_user.id)
     await m.answer(f"✅ /start sent to {done} receiver(s)")
+
+
+@router.message(Command("sweep"))
+async def cmd_sweep(m: Message):
+    if not _owner(m):
+        return
+    await m.answer("🔥 warm + fetch sweep…")
+    out = await receivers.capacity_sweep(m.from_user.id)
+    await m.answer(f"bots {out['total']} · answered {out['ok']}"
+                   f" · missing {out['missing']} · prices {out['prices']}")
 
 
 @router.message(Command("addowner"))
