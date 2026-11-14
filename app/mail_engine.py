@@ -32,8 +32,6 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
 PLUS_DOMAINS = ["fexbox.org", "fexpost.com", "mailbox.in.ua", "chitthi.in",
                 "rover.info", "mailto.plus", "fextemp.com", "anyalias.com"]
 
-# domains Telegram answers EMAIL_NOT_ALLOWED for. guerrillamailblock.com is what
-# Guerrilla hands out by default, so it is dead on arrival and seeded as such.
 SEED_BLOCKED = {
     "guerrillamailblock.com", "grr.la", "sharklasers.com", "spam4.me",
     "pokemail.net", "guerrillamail.biz", "guerrillamail.net",
@@ -51,6 +49,8 @@ RETRY_TRIES = 4
 DOWN_COOLDOWN = 240.0
 PROVIDERS = tuple(p.strip() for p in MAIL_PROVIDERS.split(",") if p.strip()) or (
     "guerrilla", "dropmail", "mailtm", "mailgw", "plus")
+
+API_BASE = {"mailtm": MAILTM, "mailgw": MAILGW}
 
 _DOWN: dict[str, float] = {}
 
@@ -160,6 +160,7 @@ class TempMailClient:
         self._url_token = ""
         self._base = ""
         self._provider = ""
+        self._password = ""
         self._seen: set[str] = set()
         self._blocked: set[str] = blocked_domains()
         self._index = random.randrange(max(1, len(proxies.POOL) or 1))
@@ -175,6 +176,17 @@ class TempMailClient:
             return
         self._blocked.add(domain)
         block_domain(domain)
+
+    def export(self) -> dict:
+        return {
+            "mail": self._email,
+            "mail_password": self._password,
+            "mail_provider": self._provider,
+            "mail_token": self._token,
+            "mail_sid": self._sid,
+            "mail_url_token": self._url_token,
+            "mail_base": self._base,
+        }
 
     def _http(self, proxy: str) -> httpx.AsyncClient:
         client = self._clients.get(proxy)
@@ -275,6 +287,7 @@ class TempMailClient:
                 if not token:
                     continue
                 self._token, self._base, self._provider = token, base, name
+                self._password = pwd
                 self._remember(address, pwd, name)
                 return address
         return ""
@@ -382,6 +395,7 @@ class TempMailClient:
         address = self._rand("tg_", 12) + "@" + pool[0]
         self._email, self._token, self._sid = address, "", ""
         self._base, self._url_token, self._provider = "", "", "plus"
+        self._password = ""
         self._remember(address, "", "plus")
         log.info(f"mailbox {address} via plus")
         return address
@@ -408,8 +422,6 @@ class TempMailClient:
         raise TimeoutError(f"no code in {timeout}s for {target}")
 
     async def _check_inbox(self, target: str, expected_length=None):
-        # exactly one provider is queried per poll; no cross-provider fallthrough,
-        # so a guerrilla mailbox never gets looked up on tempmail.plus.
         want = expected_length or CODE_LEN
         if self._provider == "guerrilla" and self._sid:
             return await self._check_guerrilla(want)
@@ -417,8 +429,13 @@ class TempMailClient:
             return await self._check_dropmail(want)
         if self._provider == "plus":
             return await self._check_plus(target, want)
-        if self._token and self._base and not _is_down(self._provider):
-            return await self._check_api(self._base, self._provider, want)
+        if self._provider in API_BASE and not self._base:
+            self._base = API_BASE[self._provider]
+        if self._base and not _is_down(self._provider):
+            if not self._token:
+                self._token = await self._token_for(self._base, target, self._password)
+            if self._token:
+                return await self._check_api(self._base, self._provider, want)
         return None
 
     async def _check_guerrilla(self, expected_length=None):
@@ -487,7 +504,7 @@ class TempMailClient:
             _down(name)
             return None
         if r.status_code == 401:
-            self._token = await self._token_for(base, self._email, "")
+            self._token = await self._token_for(base, self._email, self._password)
             return None
         if r.status_code != 200:
             _down(name)
@@ -539,6 +556,22 @@ class TempMailClient:
         return None
 
 
+def client_from(data: dict):
+    provider = str(data.get("mail_provider") or "").strip()
+    address = str(data.get("mail") or "").strip()
+    if not provider or "@" not in address:
+        return None
+    mc = TempMailClient()
+    mc._provider = provider
+    mc._email = address
+    mc._password = str(data.get("mail_password") or "")
+    mc._token = str(data.get("mail_token") or "")
+    mc._sid = str(data.get("mail_sid") or "")
+    mc._url_token = str(data.get("mail_url_token") or "")
+    mc._base = str(data.get("mail_base") or "") or API_BASE.get(provider, "")
+    return mc
+
+
 HOSTS = {"gmail.com": "imap.gmail.com", "googlemail.com": "imap.gmail.com",
          "outlook.com": "outlook.office365.com", "hotmail.com": "outlook.office365.com",
          "live.com": "outlook.office365.com", "msn.com": "outlook.office365.com",
@@ -563,6 +596,17 @@ class IMAPMailClient:
     @property
     def current_email(self) -> str:
         return self.addr
+
+    def block_domain(self, value: str):
+        block_domain(value)
+
+    def export(self) -> dict:
+        return {"mail": self.addr, "mail_password": self.password,
+                "mail_provider": "native", "mail_token": "", "mail_sid": "",
+                "mail_url_token": "", "mail_base": self.host or ""}
+
+    async def close(self):
+        return None
 
     def _blocking(self, timeout: int, expected_length=None):
         m = imaplib.IMAP4_SSL(self.host, self.port)
