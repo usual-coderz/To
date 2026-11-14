@@ -21,6 +21,7 @@ _RUNNING: set[str] = set()
 MAX_CODE_SENDS = 3
 MAX_STEPS = 8
 SERVICE_ID = 777000
+SERVICE_NAMES = ("777000", "Telegram")
 
 
 def _sem() -> asyncio.Semaphore:
@@ -81,29 +82,48 @@ async def _precheck(session_string: str, proxy: str) -> tuple[bool, int]:
             pass
 
 
-async def _poll_tg(conn, timeout: float) -> str:
+async def _service_entity(conn):
+    for target in (SERVICE_ID,) + SERVICE_NAMES:
+        try:
+            entity = await conn.get_entity(target)
+            if entity is not None:
+                return entity
+        except Exception as e:
+            log.info(f"service entity {target}: {e}")
+    return SERVICE_ID
+
+
+async def _poll_tg(conn, entity, timeout: float) -> str:
     seen = 0
     try:
-        msgs = await conn.get_messages(SERVICE_ID, limit=1)
+        msgs = await conn.get_messages(entity, limit=1)
         if msgs:
             seen = int(msgs[0].id or 0)
-    except Exception:
-        pass
+    except Exception as e:
+        log.info(f"otp baseline: {e}")
+
     end = time.monotonic() + timeout
+    warned = False
     while time.monotonic() < end:
         try:
-            msgs = await conn.get_messages(SERVICE_ID, limit=10, min_id=seen)
-        except Exception:
+            msgs = await conn.get_messages(entity, limit=10, min_id=seen)
+        except Exception as e:
+            if not warned:
+                log.info(f"otp tg read: {e}")
+                warned = True
             await asyncio.sleep(3.0)
             continue
+        warned = False
         fresh = list(msgs or [])
-        for msg in fresh:
-            seen = max(seen, int(msg.id or 0))
+        if fresh:
+            for msg in fresh:
+                seen = max(seen, int(msg.id or 0))
+            log.info(f"otp tg: {len(fresh)} new service message(s)")
         for msg in fresh:
             code = sellparse.otp_of(msg.raw_text or "")
             if code:
                 return code
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(2.0)
     return ""
 
 
@@ -149,9 +169,13 @@ async def _race(coros, timeout: float) -> str:
 
 
 async def _wait_otp(conn, p: dict, timeout: int) -> str:
-    code = await _race([_poll_tg(conn, timeout), _poll_mail(p, timeout)], timeout + 5)
+    entity = await _service_entity(conn)
+    code = await _race([_poll_tg(conn, entity, timeout), _poll_mail(p, timeout)],
+                       timeout + 5)
     if code:
         log.info(f"otp {p.get('phone')}: {code}")
+    else:
+        log.info(f"otp {p.get('phone')}: nothing in {timeout}s")
     return code
 
 
