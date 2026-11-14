@@ -3,7 +3,7 @@ import logging
 import random
 import time
 
-from telethon import functions
+from telethon import events, functions
 from telethon.sessions import StringSession
 
 from app.config import API_HASH, API_ID, USERBOT_PROXY, USERBOT_SESSION
@@ -15,13 +15,47 @@ _client = None
 _lock = asyncio.Lock()
 _LAST: dict[str, int] = {}
 
+_BUF: dict[int, list[tuple[int, str]]] = {}
+_EV: dict[int, asyncio.Event] = {}
+_STAMP: dict[int, int] = {}
+_ID: dict[str, int] = {}
+
 IDLE_GAP = 3.0
 MAX_WAIT = 25.0
 MAX_MSGS = 60
+BUF_MAX = 200
+WAIT_SLICE = 5.0
+CATCH_UP_AFTER = 12.0
 
 
 def running() -> bool:
     return _client is not None
+
+
+def _ev(peer: int) -> asyncio.Event:
+    ev = _EV.get(peer)
+    if ev is None:
+        ev = asyncio.Event()
+        _EV[peer] = ev
+    return ev
+
+
+async def _on_new(event):
+    try:
+        peer = int(event.sender_id or 0)
+    except Exception:
+        return
+    if not peer:
+        return
+    mid = int(event.id or 0)
+    text = (event.raw_text or "").strip()
+    buf = _BUF.setdefault(peer, [])
+    buf.append((mid, text))
+    if len(buf) > BUF_MAX:
+        del buf[:-BUF_MAX]
+    if mid > _STAMP.get(peer, 0):
+        _STAMP[peer] = mid
+    _ev(peer).set()
 
 
 async def start():
@@ -36,13 +70,14 @@ async def start():
         client = TelegramClient(
             StringSession(USERBOT_SESSION), API_ID, API_HASH,
             proxy=_proxy(USERBOT_PROXY), connection_retries=3, retry_delay=2,
-            request_retries=3, timeout=30, flood_sleep_threshold=90,
+            request_retries=3, timeout=30, flood_sleep_threshold=120,
             device_model="AccStore", system_version="2.1", app_version="2.1")
         await client.connect()
         if not await client.is_user_authorized():
             log.error("userbot session not authorized")
             await client.disconnect()
             return None
+        client.add_event_handler(_on_new, events.NewMessage(incoming=True))
         _client = client
         log.info("receiver hub online")
         return client
@@ -54,10 +89,18 @@ async def stop():
         if _client is None:
             return
         try:
+            _client.remove_event_handler(_on_new)
+        except Exception:
+            pass
+        try:
             await _client.disconnect()
         except Exception:
             pass
         _client = None
+        _BUF.clear()
+        _EV.clear()
+        _STAMP.clear()
+        _ID.clear()
 
 
 def _stamp(key: str) -> int:
@@ -79,6 +122,20 @@ async def _resolve(username: str):
         return None
 
 
+async def peer_id(username: str) -> int:
+    key = str(username or "").lstrip("@").lower()
+    hit = _ID.get(key)
+    if hit:
+        return hit
+    entity = await _resolve(username)
+    if entity is None:
+        return 0
+    peer = int(entity.id or 0)
+    if peer:
+        _ID[key] = peer
+    return peer
+
+
 async def send(username: str, text: str) -> bool:
     client = _client
     if client is None:
@@ -94,74 +151,81 @@ async def send(username: str, text: str) -> bool:
         return False
 
 
-async def drain(username: str) -> int:
-    client = _client
-    if client is None:
-        return 0
-    entity = await _resolve(username)
-    if entity is None:
-        return 0
-    try:
-        msgs = await client.get_messages(entity, limit=1)
-    except Exception:
-        return _stamp(username)
-    if msgs:
-        _mark(username)
-    return _stamp(username)
-
-
 async def tail_id(username: str) -> int:
+    peer = await peer_id(username)
+    if not peer:
+        return 0
+    return _STAMP.get(peer, 0)
+
+
+async def _catch_up(peer: int, cursor: int):
     client = _client
     if client is None:
-        return 0
-    entity = await _resolve(username)
-    if entity is None:
-        return 0
+        return
     try:
-        msgs = await client.get_messages(entity, limit=1)
+        entity = await client.get_entity(peer)
     except Exception:
-        return 0
-    return int(msgs[0].id or 0) if msgs else 0
+        return
+    try:
+        msgs = await client.get_messages(entity, limit=15, min_id=cursor)
+    except Exception as e:
+        log.info(f"catch_up {peer}: {e}")
+        return
+    buf = _BUF.setdefault(peer, [])
+    for m in sorted(msgs or [], key=lambda x: int(x.id or 0)):
+        mid = int(m.id or 0)
+        if getattr(m, "out", False):
+            continue
+        buf.append((mid, (m.raw_text or "").strip()))
+        if mid > _STAMP.get(peer, 0):
+            _STAMP[peer] = mid
+    if msgs:
+        _ev(peer).set()
 
 
-async def wait_new(username: str, since: int, timeout: float,
-                   idle: float = IDLE_GAP) -> tuple[str, int]:
-    client = _client
-    if client is None:
+async def wait_new(username: str, since: int, timeout: float) -> tuple[str, int]:
+    if _client is None:
         return "", since
-    entity = await _resolve(username)
-    if entity is None:
+    peer = await peer_id(username)
+    if not peer:
         return "", since
 
+    cursor = int(since or _STAMP.get(peer, 0) or 0)
     end = time.monotonic() + timeout
-    quiet = time.monotonic() + idle
-    cursor = int(since or 0)
+    caught = False
     parts: list[str] = []
+    ev = _ev(peer)
 
     while time.monotonic() < end:
-        try:
-            msgs = await client.get_messages(entity, limit=20, min_id=cursor)
-        except Exception as e:
-            log.info(f"wait_new {username}: {e}")
-            await asyncio.sleep(1.5)
-            continue
-        fresh = sorted(msgs or [], key=lambda x: int(x.id or 0))
-        for m in fresh:
-            mid = int(m.id or 0)
+        for mid, text in list(_BUF.get(peer, [])):
             if mid > cursor:
                 cursor = mid
-            if getattr(m, "out", False):
-                continue
-            text = (m.raw_text or "").strip()
-            if text:
-                parts.append(text)
+                if text:
+                    parts.append(text)
         if parts:
-            quiet = time.monotonic() + idle
-            if time.monotonic() >= quiet:
-                break
-        await asyncio.sleep(1.0)
+            return "\n".join(parts), cursor
 
-    return "\n".join(parts), cursor
+        left = end - time.monotonic()
+        if not caught and left <= timeout - CATCH_UP_AFTER:
+            caught = True
+            await _catch_up(peer, cursor)
+            continue
+
+        ev.clear()
+        try:
+            await asyncio.wait_for(ev.wait(), min(left, WAIT_SLICE))
+        except asyncio.TimeoutError:
+            pass
+
+    return "", cursor
+
+
+async def drain(username: str) -> int:
+    peer = await peer_id(username)
+    if not peer:
+        return 0
+    _BUF.pop(peer, None)
+    return _STAMP.get(peer, 0)
 
 
 async def collect(username: str, since: int | None = None, idle: float = IDLE_GAP,
@@ -172,6 +236,7 @@ async def collect(username: str, since: int | None = None, idle: float = IDLE_GA
     entity = await _resolve(username)
     if entity is None:
         return ""
+    peer = int(entity.id or 0)
     floor = _stamp(username) if since is None else since
     parts: list[str] = []
     seen: set[int] = set()
@@ -192,40 +257,27 @@ async def collect(username: str, since: int | None = None, idle: float = IDLE_GA
     quiet = time.monotonic() + idle
 
     while time.monotonic() < end:
-        try:
-            msgs = await client.get_messages(entity, limit=25)
-        except Exception as e:
-            log.info(f"collect {username}: {e}")
-            await asyncio.sleep(1.5)
-            continue
-        fresh = False
-        for m in sorted(msgs or [], key=lambda x: int(x.id or 0)):
-            mid = int(m.id or 0)
-            if mid <= floor or mid in seen:
-                continue
-            if getattr(m, "out", False):
-                seen.add(mid)
-                continue
-            text = (m.raw_text or "").strip()
-            if not text:
+        for mid, text in list(_BUF.get(peer, [])):
+            if mid in seen or not text:
                 continue
             seen.add(mid)
             parts.append(text)
-            fresh = True
-            if len(parts) >= max_msgs:
-                break
-        if fresh:
-            quiet = time.monotonic() + idle
-            _mark(username)
-        elif parts and time.monotonic() >= quiet:
+        if len(parts) >= max_msgs:
             break
-        await asyncio.sleep(1.2)
+        if parts and time.monotonic() >= quiet:
+            break
+        try:
+            await asyncio.wait_for(_ev(peer).wait(), 2.0)
+        except asyncio.TimeoutError:
+            pass
 
+    _mark(username)
     return "\n".join(parts)
 
 
 async def wait_reply(username: str, timeout: float, since: int | None = None) -> str:
-    return await collect(username, since, IDLE_GAP, timeout)
+    text, _cursor = await wait_new(username, int(since or 0), timeout)
+    return text
 
 
 async def start_bot(username: str, param: str = "") -> bool:
@@ -260,44 +312,42 @@ async def start_bot(username: str, param: str = "") -> bool:
 async def command(username: str, cmd: str, timeout: float = MAX_WAIT) -> str:
     if _client is None:
         return ""
-    since = await drain(username)
+    peer = await peer_id(username)
+    cursor = _STAMP.get(peer, 0)
     if not await send(username, cmd):
         return ""
-    return await collect(username, since, IDLE_GAP, timeout)
+    text, _cursor = await wait_new(username, cursor, timeout)
+    return text
 
 
 async def start_and_read(username: str, param: str, timeout: float = MAX_WAIT) -> str:
     if _client is None:
         return ""
-    since = await drain(username)
+    peer = await peer_id(username)
+    cursor = _STAMP.get(peer, 0)
     if not await start_bot(username, param):
         return ""
-    return await collect(username, since, IDLE_GAP, timeout)
+    text, _cursor = await wait_new(username, cursor, timeout)
+    return text
 
 
 async def send_and_wait(username: str, text: str, timeout: float) -> str:
     if _client is None:
         return ""
-    since = await drain(username)
+    peer = await peer_id(username)
+    cursor = _STAMP.get(peer, 0)
     if not await send(username, text):
         return ""
-    return await collect(username, since, IDLE_GAP, timeout)
+    reply, _cursor = await wait_new(username, cursor, timeout)
+    return reply
 
 
 async def read_last(username: str) -> str:
-    client = _client
-    if client is None:
+    peer = await peer_id(username)
+    if not peer:
         return ""
-    entity = await _resolve(username)
-    if entity is None:
-        return ""
-    try:
-        msgs = await client.get_messages(entity, limit=6)
-    except Exception:
-        return ""
-    parts = [(m.raw_text or "").strip() for m in reversed(msgs or [])
-             if m.raw_text and not getattr(m, "out", False)]
-    return "\n".join(parts)
+    texts = [t for _mid, t in _BUF.get(peer, [])[-6:] if t]
+    return "\n".join(texts)
 
 
 async def wait_code(username: str, timeout: float) -> str:
