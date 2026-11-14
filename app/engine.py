@@ -6,19 +6,20 @@ from collections import Counter
 from app import db, receivers, seller, session_export
 from app.config import (CYCLE_INTERVAL, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
                         LOGIN_CONCURRENCY, LOGIN_RETRY_DELAY, LOGIN_TRIES, MAX_SCAN,
-                        SESSION_RETRY, TARGET_HOURS, TICK)
+                        SESSION_RETRY, SESSION_WATCH_BATCH, SESSION_WATCH_CONCURRENCY,
+                        SESSION_WATCH_INTERVAL, TARGET_HOURS, TICK)
 from app.lzt import (LztError, classify, extract_auth_key, extract_dc_id,
                      item_id_of)
 from app.mail_engine import IMAPMailClient, TempMailClient
 from app.session_manager import (change_email, check_session, clean_client, device_list,
                                  login_with_auth_key, normalize_phone, owned_counts,
-                                 remove_2fa, reset_others, set_2fa, spambot_status)
+                                 reset_others, set_2fa, spambot_status)
 from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import (account_created_ts, age_for_queue, country_of, passes,
                                phone_of, spam_state)
 from app.utils.money import fmt_money, pick_for_buy
-from app.utils.texts import audit_text, bought_line, failed_line, session_file
+from app.utils.texts import audit_text, bought_line, failed_line, session_dead_line
 
 log = logging.getLogger("engine")
 
@@ -30,6 +31,8 @@ LIMIT_COOLDOWN = 3600.0
 _BG: set[asyncio.Task] = set()
 _NEXT_RUN: dict[int, float] = {}
 _SEM: asyncio.Semaphore | None = None
+_WATCH_SEM: asyncio.Semaphore | None = None
+_PROBING: set[str] = set()
 
 PHONE_KEYS = ("login", "telegram_login", "phone", "telegram_phone")
 
@@ -47,6 +50,13 @@ def _sem() -> asyncio.Semaphore:
     return _SEM
 
 
+def _watch_sem() -> asyncio.Semaphore:
+    global _WATCH_SEM
+    if _WATCH_SEM is None:
+        _WATCH_SEM = asyncio.Semaphore(SESSION_WATCH_CONCURRENCY)
+    return _WATCH_SEM
+
+
 def _spawn(coro) -> asyncio.Task:
     task = asyncio.create_task(coro)
     _BG.add(task)
@@ -60,7 +70,7 @@ async def drain_bg(timeout: float = 8.0):
     try:
         await asyncio.wait_for(asyncio.gather(*list(_BG), return_exceptions=True), timeout)
     except asyncio.TimeoutError:
-        log.info(f"shutdown: {len(_BG)} login task(s) still running")
+        log.info(f"shutdown: {len(_BG)} task(s) still running")
 
 
 async def _notify(bot, tg_id, text):
@@ -477,6 +487,39 @@ async def clean_purchase(bot, lzt, p: dict):
         seller.schedule(bot, lzt, fresh)
 
 
+async def _probe_session(bot, p: dict):
+    pid = str(p["_id"])
+    if pid in _PROBING:
+        return
+    _PROBING.add(pid)
+    try:
+        async with _watch_sem():
+            s = await db.get_settings(p["tg_id"])
+            alive, me = await check_session(p["session_string"], s.get("proxy", ""))
+            if alive:
+                await db.set_purchase(p["_id"], session_state="live", checked_at=db._now())
+                return
+            await db.mark_dead(p["_id"], "session revoked")
+            log.info(f"session dead {p.get('phone')}")
+            await _notify(bot, p["tg_id"],
+                          session_dead_line(p.get("country"), p.get("phone") or ""))
+    except Exception as e:
+        log.info(f"probe {p.get('phone')}: {e}")
+        await db.set_purchase(p["_id"], checked_at=db._now())
+    finally:
+        _PROBING.discard(pid)
+
+
+async def session_watch_loop(bot):
+    while True:
+        try:
+            for p in await db.session_probe_batch(SESSION_WATCH_BATCH):
+                _spawn(_probe_session(bot, p))
+        except Exception as e:
+            log.exception(f"session_watch: {e}")
+        await asyncio.sleep(SESSION_WATCH_INTERVAL)
+
+
 async def _cycle(bot, lzt, tg_id: int, s: dict):
     if s.get("auto_buy") != "1":
         await db.save_report(tg_id, note="auto-buy off")
@@ -617,4 +660,4 @@ async def price_loop():
                 await receivers.refresh_stale(owner["_id"])
         except Exception as e:
             log.exception(f"price_loop: {e}")
-        await asyncio.sleep(300)
+        await asyncio.sleep(900)
