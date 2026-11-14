@@ -97,17 +97,22 @@ PRICE_TTL: float = _float(os.getenv("PRICE_TTL"), 900.0)
 PRICE_REFRESH: float = _float(os.getenv("PRICE_REFRESH"), 240.0)
 CAP_REFRESH: float = _float(os.getenv("CAP_REFRESH"), 120.0)
 PROBE_TIMEOUT: float = _float(os.getenv("PROBE_TIMEOUT"), 25.0)
+PROBE_TRIES: int = _int(os.getenv("PROBE_TRIES"), 3)
+PROBE_GAP: float = _float(os.getenv("PROBE_GAP"), 3.0)
+WARM_SLEEP: float = _float(os.getenv("WARM_SLEEP"), 3.0)
+WARM_TTL: float = _float(os.getenv("WARM_TTL"), 11.0)
 
 CAP_COMMAND: str = "/cap"
 CAP_ALT_COMMAND: str = "/capacity"
 
 SCHEDULE_TZ: str = os.getenv("SCHEDULE_TZ", "Asia/Kolkata").strip()
 SCHEDULE_HOURS: tuple[int, ...] = tuple(
-    sorted({_int(x, 0) for x in os.getenv("SCHEDULE_HOURS", "12,16").split(",")
+    sorted({_int(x, 0) for x in os.getenv("SCHEDULE_HOURS", "12").split(",")
             if x.strip().isdigit() and 0 <= _int(x, 0) <= 23}))
-CAP_HOURS: tuple[int, ...] = tuple(
-    sorted({_int(x, 0) for x in os.getenv("CAP_HOURS", "0").split(",")
+WARM_HOURS: tuple[int, ...] = tuple(
+    sorted({_int(x, 0) for x in os.getenv("WARM_HOURS", "0,16").split(",")
             if x.strip().isdigit() and 0 <= _int(x, 0) <= 23}))
+CAP_HOURS: tuple[int, ...] = WARM_HOURS
 INR_RATE: float = _float(os.getenv("INR_RATE"), 83.0)
 CHART_TTL: float = _float(os.getenv("CHART_TTL"), 86400.0)
 
