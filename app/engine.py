@@ -12,7 +12,7 @@ from app.lzt import (LztError, classify, extract_auth_key, extract_dc_id,
 from app.mail_engine import IMAPMailClient, TempMailClient
 from app.session_manager import (change_email, check_session, clean_client, device_list,
                                  login_with_auth_key, normalize_phone, owned_counts,
-                                 reset_others, set_2fa, spambot_status)
+                                 remove_2fa, reset_others, set_2fa, spambot_status)
 from app.utils import tg
 from app.utils import wallet as wallet_view
 from app.utils.filters import (account_created_ts, age_for_queue, country_of, passes,
@@ -372,6 +372,8 @@ async def clean_purchase(bot, lzt, p: dict):
         if not await conn.is_user_authorized():
             raise SessionDead("session dead")
 
+        await remove_2fa(conn, p.get("password"), s.get("twofa_password"), db.DEFAULT_2FA)
+
         if s.get("change_mail_on_expire") == "1":
             mc, addr = await _mail_client_for(p, s)
             try:
@@ -381,6 +383,10 @@ async def clean_purchase(bot, lzt, p: dict):
                         data["mail_ok"] = True
                         data["mail"] = final
                         note.append("mail changed")
+                        try:
+                            await db.set_purchase(pid, **mc.export())
+                        except Exception as e:
+                            log.info(f"mail state save: {e}")
                     else:
                         note.append("mail fail")
                 else:
@@ -396,6 +402,7 @@ async def clean_purchase(bot, lzt, p: dict):
             data["twofa_ok"] = True
             data["password"] = password
             note.append("2fa set")
+            await db.set_purchase(pid, password=password)
         except Exception as e:
             note.append(f"2fa fail: {e}")
             log.info(f"2fa {p.get('phone')}: {e}")
