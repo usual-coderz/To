@@ -15,7 +15,7 @@ _client = None
 _lock = asyncio.Lock()
 _LAST: dict[str, int] = {}
 
-IDLE_GAP = 2.5
+IDLE_GAP = 3.0
 MAX_WAIT = 25.0
 MAX_MSGS = 60
 
@@ -108,6 +108,60 @@ async def drain(username: str) -> int:
     if msgs:
         _mark(username)
     return _stamp(username)
+
+
+async def tail_id(username: str) -> int:
+    client = _client
+    if client is None:
+        return 0
+    entity = await _resolve(username)
+    if entity is None:
+        return 0
+    try:
+        msgs = await client.get_messages(entity, limit=1)
+    except Exception:
+        return 0
+    return int(msgs[0].id or 0) if msgs else 0
+
+
+async def wait_new(username: str, since: int, timeout: float,
+                   idle: float = IDLE_GAP) -> tuple[str, int]:
+    client = _client
+    if client is None:
+        return "", since
+    entity = await _resolve(username)
+    if entity is None:
+        return "", since
+
+    end = time.monotonic() + timeout
+    quiet = time.monotonic() + idle
+    cursor = int(since or 0)
+    parts: list[str] = []
+
+    while time.monotonic() < end:
+        try:
+            msgs = await client.get_messages(entity, limit=20, min_id=cursor)
+        except Exception as e:
+            log.info(f"wait_new {username}: {e}")
+            await asyncio.sleep(1.5)
+            continue
+        fresh = sorted(msgs or [], key=lambda x: int(x.id or 0))
+        for m in fresh:
+            mid = int(m.id or 0)
+            if mid > cursor:
+                cursor = mid
+            if getattr(m, "out", False):
+                continue
+            text = (m.raw_text or "").strip()
+            if text:
+                parts.append(text)
+        if parts:
+            quiet = time.monotonic() + idle
+            if time.monotonic() >= quiet:
+                break
+        await asyncio.sleep(1.0)
+
+    return "\n".join(parts), cursor
 
 
 async def collect(username: str, since: int | None = None, idle: float = IDLE_GAP,
