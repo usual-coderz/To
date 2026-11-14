@@ -6,8 +6,8 @@ from app import db, keyboards as kb, pricing, receivers
 from app.handlers import state
 from app.handlers.menu import show
 from app.utils import tg
-from app.utils.texts import (caps_text, extracted_text, prices_text,
-                             receiver_detail_text, receivers_text)
+from app.utils.texts import (extracted_text, prices_text, receiver_detail_text,
+                             receivers_text)
 from app.utils.timeutil import fmt_dt
 
 router = Router()
