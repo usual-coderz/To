@@ -82,15 +82,18 @@ async def cmd_searchtest(m: Message):
         return
     s = await db.get_settings(m.from_user.id)
     params = lzt._search_params(s)
-    allow, bad = iso3.parse(s.get("countries"))
-    deny, bad_deny = iso3.parse(s.get("deny_countries"))
-    lines = [f"GET /telegram", str(params)]
-    if allow:
-        lines.append(f"iso3 allow {','.join(allow)}")
-    if deny:
-        lines.append(f"iso3 deny {','.join(deny)}")
-    if bad or bad_deny:
-        lines.append(f"dropped {','.join(bad + bad_deny)}")
+    key, allow, deny, dropped = lzt.country_mode(s)
+    lines = ["GET /telegram", str(params)]
+    if key == "country[]":
+        lines.append(f"country[] = {','.join(allow)}")
+        if deny:
+            lines.append(f"not_country[] local only = {','.join(deny)}")
+    elif key == "not_country[]":
+        lines.append(f"not_country[] = {','.join(deny)}")
+    else:
+        lines.append("no country filter sent")
+    if dropped:
+        lines.append(f"dropped = {','.join(dropped)}")
     await m.answer(tg.pre("\n".join(lines), 1800))
     try:
         items = await lzt.search(s)
@@ -284,8 +287,7 @@ async def cmd_diag(m: Message):
     spent = await db.spent_today(m.from_user.id)
     queued = await db.queue_count(m.from_user.id)
     kinds = ", ".join(f"{b['kind']}:{b['amount']:g}" for b in snap["entries"]) or "none"
-    allow, bad = iso3.parse(s.get("countries"))
-    deny, bad_deny = iso3.parse(s.get("deny_countries"))
+    key, allow, deny, dropped = lzt.country_mode(s)
     lines = [
         f"auto_buy {s['auto_buy']} · auto_sell {s['auto_sell']}",
         f"cap ${s['daily_spend_cap']} · spent {spent:.2f}",
@@ -297,8 +299,9 @@ async def cmd_diag(m: Message):
         f"total {fmt_money(snap['total'], s['currency'])}"
         f" · spendable {fmt_money(snap['spendable'], s['currency'])}",
         f"entries {kinds}",
-        f"iso3 allow {','.join(allow) or '—'} · deny {','.join(deny) or '—'}",
-        f"dropped {','.join(bad + bad_deny) or '—'}",
+        f"filter {key or 'none'} · allow {','.join(allow) or '—'}"
+        f" · deny {','.join(deny) or '—'}",
+        f"dropped {','.join(dropped) or '—'}",
         f"note {snap['note'] or '—'}",
         f"error {snap['error'] or '—'}",
     ]
