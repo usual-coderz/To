@@ -29,7 +29,6 @@ RETRY_ATTEMPTS = 40
 RETRY_DELAY = 0.4
 MAX_DEPTH = 5
 
-GEO_KEY = "allow_geo_spamblock"
 COUNTRY_KEYS = ("country[]", "not_country[]")
 
 ID_KEYS = ("item_id", "id", "itemId")
@@ -221,7 +220,7 @@ class LztClient:
             timeout=HTTP_TIMEOUT,
             headers={"Authorization": f"Bearer {token}",
                      "Accept": "application/json",
-                     "User-Agent": "AccStore/3.5"},
+                     "User-Agent": "AccStore/3.6"},
         )
 
     async def close(self):
@@ -389,8 +388,6 @@ class LztClient:
             params["pmax"] = params["pmin"]
         if s.get("nsb_only") == "1":
             params["nsb"] = "true"
-        if s.get("spam_mode") == "no":
-            params[GEO_KEY] = "true"
 
         key, allow, deny, dropped = self.country_mode(s)
         if key == "country[]":
