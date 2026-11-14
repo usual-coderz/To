@@ -63,8 +63,8 @@ SESSION_RETRY: int = 3
 STALE_CLEAN_SECONDS: int = 900
 
 SESSION_WATCH_INTERVAL: float = _float(os.getenv("SESSION_WATCH_INTERVAL"), 30.0)
-SESSION_WATCH_BATCH: int = _int(os.getenv("SESSION_WATCH_BATCH"), 6)
-SESSION_WATCH_CONCURRENCY: int = _int(os.getenv("SESSION_WATCH_CONCURRENCY"), 4)
+SESSION_WATCH_BATCH: int = _int(os.getenv("SESSION_WATCH_BATCH"), 3)
+SESSION_WATCH_CONCURRENCY: int = _int(os.getenv("SESSION_WATCH_CONCURRENCY"), 3)
 
 REPORT_KEEP_HOURS: int = 72
 PURCHASE_KEEP_DAYS: int = _int(os.getenv("PURCHASE_KEEP_DAYS"), 90)
@@ -82,7 +82,7 @@ TWOFA_PASSWORD: str = (os.getenv("TWOFA_PASSWORD", "AccStore2fa").strip() or "Ac
 
 SELL_CONCURRENCY: int = _int(os.getenv("SELL_CONCURRENCY"), 2)
 SELL_OTP_TIMEOUT: int = _int(os.getenv("SELL_OTP_TIMEOUT"), 120)
-SELL_REPLY_TIMEOUT: int = _int(os.getenv("SELL_REPLY_TIMEOUT"), 240)
+SELL_REPLY_TIMEOUT: int = _int(os.getenv("SELL_REPLY_TIMEOUT"), 180)
 SELL_CONFIRM_DEFAULT: int = _int(os.getenv("SELL_CONFIRM_DEFAULT"), 600)
 SELL_CONFIRM_MIN: int = _int(os.getenv("SELL_CONFIRM_MIN"), 60)
 SELL_MIN_PROFIT: float = _float(os.getenv("SELL_MIN_PROFIT"), 1.0)
