@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from app import db, pricing, receiver_hub, receivers
-from app.config import CAP_HOURS, CHART_TTL, SCHEDULE_HOURS, SCHEDULE_TZ
+from app.config import CHART_TTL, SCHEDULE_HOURS, SCHEDULE_TZ, WARM_HOURS
 from app.utils import tg
 from app.utils.texts import caps_text, chart_csv, chart_text
 
@@ -26,59 +26,46 @@ def _next_slot(now: datetime, hours: tuple[int, ...]) -> tuple[str, datetime] | 
     return best
 
 
-async def _matrix(tg_id: int) -> tuple[list[dict], dict]:
-    if not receiver_hub.running():
-        await receiver_hub.start()
-    out = await pricing.refresh_all(tg_id)
-    rows = await pricing.price_matrix(tg_id, CHART_TTL)
-    if rows:
-        return rows, out
-    await asyncio.sleep(5.0)
-    out = await pricing.refresh_all(tg_id)
-    return await pricing.price_matrix(tg_id, CHART_TTL), out
-
-
-async def _build(bot, tg_id: int):
-    rows, diag = await _matrix(tg_id)
-    if not rows:
-        hint = "\n".join(diag.get("empty") or []) or "no receivers enabled"
-        body = ("<b>Price chart</b>\nno data\n\n"
-                f"receivers {diag.get('receivers', 0)} · prices {diag.get('prices', 0)}"
-                f" · errors {diag.get('errors', 0)}\n{hint}\n\n"
-                "check /hub, then /receivers → Warm all, phir Refresh")
-        await tg.send(bot, tg_id, body)
-        return
-    await db.save_chart(tg_id, [
-        {"country": r["country"], "name": r["name"], "dial": r.get("dial", ""),
-         "price": (r.get("best") or {}).get("price", 0.0),
-         "receiver": (r.get("best") or {}).get("receiver", "")} for r in rows])
-    s = await db.get_settings(tg_id)
-    await tg.send(bot, tg_id, chart_text(rows, pricing.profit_mult(s)))
-    await tg.send_document(bot, tg_id, chart_csv(rows).encode(),
-                           f"prices_{datetime.now(_TZ).strftime('%Y%m%d_%H%M')}.csv")
-
-
-async def run_now(bot, tg_id: int):
+async def _chart(bot, tg_id: int):
     try:
-        await _build(bot, tg_id)
+        rows = await pricing.price_matrix(tg_id, CHART_TTL)
+        if not rows:
+            await tg.send(bot, tg_id,
+                          "<b>Price chart</b>\nno cached prices yet\n"
+                          "warm sweep chalta hai 00:00 aur 16:00 pe")
+            return
+        s = await db.get_settings(tg_id)
+        await db.save_chart(tg_id, [
+            {"country": r["country"], "name": r["name"], "dial": r.get("dial", ""),
+             "price": (r.get("best") or {}).get("price", 0.0),
+             "receiver": (r.get("best") or {}).get("receiver", "")} for r in rows])
+        await tg.send(bot, tg_id, chart_text(rows, pricing.profit_mult(s)))
+        await tg.send_document(bot, tg_id, chart_csv(rows).encode(),
+                               f"prices_{datetime.now(_TZ).strftime('%Y%m%d_%H%M')}.csv")
     except Exception as e:
         log.exception(f"chart {tg_id}: {e}")
         await tg.send(bot, tg_id, f"⚠️ chart failed: {tg.esc(str(e)[:150])}")
 
 
-async def _capacity(bot, tg_id: int):
+async def run_now(bot, tg_id: int):
+    await _chart(bot, tg_id)
+
+
+async def _warm_fetch(bot, tg_id: int):
     try:
         out = await receivers.capacity_sweep(tg_id)
-        rows = await db.last_caps(tg_id, 7200)
-        text = (f"🕛 <b>00:00 capacity sweep</b>\n"
-                f"bots {out['total']} · answered {out['ok']} · missing {out['missing']}\n\n"
+        rows = await db.last_caps(tg_id, 3600)
+        text = (f"🔥 <b>warm sweep</b> · {datetime.now(_TZ).strftime('%H:%M')}\n"
+                f"bots {out['total']} · answered {out['ok']}"
+                f" · missing {out['missing']} · prices {out['prices']}\n\n"
                 + caps_text(rows))
         if out["empty"]:
             text += "\n\n" + "\n".join(tg.esc(e) for e in out["empty"])
         await tg.send(bot, tg_id, text)
+        await _chart(bot, tg_id)
     except Exception as e:
-        log.exception(f"cap sweep {tg_id}: {e}")
-        await tg.send(bot, tg_id, f"⚠️ capacity sweep failed: {tg.esc(str(e)[:150])}")
+        log.exception(f"warm sweep {tg_id}: {e}")
+        await tg.send(bot, tg_id, f"⚠️ warm sweep failed: {tg.esc(str(e)[:150])}")
 
 
 async def loop(bot):
@@ -88,8 +75,8 @@ async def loop(bot):
             day = now.strftime("%Y-%m-%d")
             for owner in await db.all_owners():
                 tg_id = owner["_id"]
-                jobs = [("chart", _next_slot(now, SCHEDULE_HOURS), run_now),
-                        ("cap", _next_slot(now, CAP_HOURS), _capacity)]
+                jobs = [("chart", _next_slot(now, SCHEDULE_HOURS), _chart),
+                        ("warm", _next_slot(now, WARM_HOURS), _warm_fetch)]
                 for kind, slot, fn in jobs:
                     if not slot:
                         continue
