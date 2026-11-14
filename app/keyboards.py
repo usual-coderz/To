@@ -61,7 +61,6 @@ def filters(s: dict) -> InlineKeyboardMarkup:
         [(f"Terminate {s['terminate_on_expire']}", "t:terminate_on_expire"),
          (f"Mail chg {s['change_mail_on_expire']}", "t:change_mail_on_expire")],
         [(f"Mail src {s['mail_provider']}", "m:mailprov"), ("2FA pwd", "in:twofa_password")],
-        [(f"Spam free {s['spam_free']}", "t:spam_free")],
         [("‹ Back", BACK_MAIN)],
     ])
 
@@ -156,8 +155,7 @@ def ready(s: dict, count: int) -> InlineKeyboardMarkup:
 def ready_list(rows: list[dict]) -> InlineKeyboardMarkup:
     out = []
     for p in rows:
-        state = p.get("sell_state") or "idle"
-        label = f"{p.get('phone') or p['item_id']} · {state}"
+        label = f"{p.get('phone') or p['item_id']} · {p.get('sell_state') or 'idle'}"
         out.append([(label[:38], f"rd:{p['_id']}")])
     out.append([("↻ Refresh", BACK_READY)])
     out.append([("‹ Back", BACK_MAIN)])
@@ -179,7 +177,7 @@ def receivers(rows: list[dict]) -> InlineKeyboardMarkup:
         mark = "🟢" if r.get("enabled") else "⚪"
         cap = r.get("cap")
         cap_text = "?" if cap is None or cap < 0 else str(cap)
-        out.append([(f"{mark} @{r['username']} · {cap_text}", f"rv:{r['_id']}")])
+        out.append([(f"{mark} @{r['username']} · {cap_text}", f"rcv:{r['_id']}")])
     out.append([("Add", "r:add"), ("↻ Sync", "r:sync")])
     out.append([("Warm all", "r:warm"), ("‹ Back", BACK_MAIN)])
     return kb(out)
@@ -187,12 +185,12 @@ def receivers(rows: list[dict]) -> InlineKeyboardMarkup:
 
 def receiver_detail(r: dict) -> InlineKeyboardMarkup:
     rid = r["_id"]
-    probe = [("Prices (link)", f"rp:{rid}")] if r.get("kind") == "lion" else [
-        ("/cap", f"rc:{rid}"), ("Prices", f"rp:{rid}")]
+    probe = [("Prices (link)", f"rcpr:{rid}")] if r.get("kind") == "lion" else [
+        ("/cap", f"rcp:{rid}"), ("Prices", f"rcpr:{rid}")]
     return kb([
         probe,
-        [("Warm", f"rw:{rid}"), ("History", f"rh:{rid}")],
-        [("🟢 On" if r.get("enabled") else "⚪ Off", f"rt:{rid}"), ("Delete", f"rd:{rid}")],
+        [("Warm", f"rcw:{rid}"), ("History", f"rch:{rid}")],
+        [("🟢 On" if r.get("enabled") else "⚪ Off", f"rct:{rid}"), ("Delete", f"rcd:{rid}")],
         [("‹ Back", BACK_RECEIVERS)],
     ])
 
