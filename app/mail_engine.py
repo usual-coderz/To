@@ -622,10 +622,15 @@ class TempMailClient:
 
 
 def client_from(data: dict):
-    provider = str(data.get("mail_provider") or "").strip()
     address = str(data.get("mail") or "").strip()
-    if not provider or "@" not in address:
+    provider = str(data.get("mail_provider") or "").strip()
+    if "@" not in address:
         return None
+    if not provider:
+        if _norm_domain(address) in PLUS_DOMAINS:
+            provider = "plus"
+        else:
+            return None
     mc = TempMailClient()
     mc._provider = provider
     mc._email = address
