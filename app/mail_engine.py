@@ -365,6 +365,19 @@ class TempMailClient:
         self._remember(address, "", "dropmail")
         return address
 
+    async def _open_plus(self, address: str) -> str:
+        try:
+            r = await self._request("POST", f"{PLUS}/emails",
+                                    data={"email": address, "epin": ""})
+        except MailError as e:
+            log.info(f"plus open {address}: {e}")
+            return ""
+        if r.status_code != 200:
+            log.info(f"plus open {address}: HTTP {r.status_code}")
+            return ""
+        data = r.json() or {}
+        return str(data.get("epin") or "")
+
     async def create_temp_email(self, exclude_domains: list = None) -> str:
         exclude = {d.lower().strip() for d in (exclude_domains or []) if d}
         exclude |= blocked_domains()
@@ -396,6 +409,7 @@ class TempMailClient:
         self._email, self._token, self._sid = address, "", ""
         self._base, self._url_token, self._provider = "", "", "plus"
         self._password = ""
+        self._sid = await self._open_plus(address)
         self._remember(address, "", "plus")
         log.info(f"mailbox {address} via plus")
         return address
@@ -428,6 +442,8 @@ class TempMailClient:
         if self._provider == "dropmail" and self._sid:
             return await self._check_dropmail(want)
         if self._provider == "plus":
+            if not self._sid:
+                self._sid = await self._open_plus(target)
             return await self._check_plus(target, want)
         if self._provider in API_BASE and not self._base:
             self._base = API_BASE[self._provider]
@@ -528,8 +544,11 @@ class TempMailClient:
         return None
 
     async def _check_plus(self, target: str, expected_length=None):
+        params = f"email={target}&limit=15"
+        if self._sid:
+            params += f"&epin={self._sid}"
         try:
-            r = await self._request("GET", f"{PLUS}/mails?email={target}&epin=&limit=15")
+            r = await self._request("GET", f"{PLUS}/mails?{params}")
         except MailError as e:
             log.info(f"plus list: {e}")
             _down("plus")
@@ -537,20 +556,27 @@ class TempMailClient:
         if r.status_code != 200:
             _down("plus")
             return None
-        for m in (r.json() or {}).get("mail_list", []) or []:
+        rows = (r.json() or {}).get("mail_list", []) or []
+        if rows:
+            log.info(f"plus {target}: {len(rows)} mail(s)")
+        for m in rows:
             mid = m.get("id")
             if mid is None or str(mid) in self._seen:
                 continue
             self._seen.add(str(mid))
+            detail = f"{PLUS}/mails/{mid}?email={target}"
+            if self._sid:
+                detail += f"&epin={self._sid}"
             try:
-                full = await self._request("GET", f"{PLUS}/mails/{mid}?email={target}&epin=")
+                full = await self._request("GET", detail)
             except MailError:
                 continue
             if full.status_code != 200:
                 continue
             data = full.json() or {}
-            code = extract_telegram_code(
-                f"{data.get('subject', '')} {data.get('text', '')}", expected_length)
+            text = f"{data.get('subject', '')} {data.get('text', '')}"
+            log.info(f"mail {mid} via plus: {text[:160]!r}")
+            code = extract_telegram_code(text, expected_length)
             if code:
                 return code
         return None
