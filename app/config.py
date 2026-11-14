@@ -62,6 +62,10 @@ EXPIRY_RETRY_DELAY: int = 300
 SESSION_RETRY: int = 3
 STALE_CLEAN_SECONDS: int = 900
 
+SESSION_WATCH_INTERVAL: float = _float(os.getenv("SESSION_WATCH_INTERVAL"), 30.0)
+SESSION_WATCH_BATCH: int = _int(os.getenv("SESSION_WATCH_BATCH"), 6)
+SESSION_WATCH_CONCURRENCY: int = _int(os.getenv("SESSION_WATCH_CONCURRENCY"), 4)
+
 REPORT_KEEP_HOURS: int = 72
 PURCHASE_KEEP_DAYS: int = _int(os.getenv("PURCHASE_KEEP_DAYS"), 90)
 
@@ -77,7 +81,7 @@ MAIL_PROVIDERS: str = os.getenv(
 TWOFA_PASSWORD: str = (os.getenv("TWOFA_PASSWORD", "AccStore2fa").strip() or "AccStore2fa")
 
 SELL_CONCURRENCY: int = _int(os.getenv("SELL_CONCURRENCY"), 2)
-SELL_OTP_TIMEOUT: int = _int(os.getenv("SELL_OTP_TIMEOUT"), 180)
+SELL_OTP_TIMEOUT: int = _int(os.getenv("SELL_OTP_TIMEOUT"), 120)
 SELL_REPLY_TIMEOUT: int = _int(os.getenv("SELL_REPLY_TIMEOUT"), 240)
 SELL_CONFIRM_DEFAULT: int = _int(os.getenv("SELL_CONFIRM_DEFAULT"), 600)
 SELL_CONFIRM_MIN: int = _int(os.getenv("SELL_CONFIRM_MIN"), 60)
@@ -87,7 +91,7 @@ SELL_VERDICT_WAIT: int = _int(os.getenv("SELL_VERDICT_WAIT"), 180)
 SELL_QUEUE_TICK: float = _float(os.getenv("SELL_QUEUE_TICK"), 15.0)
 SELL_QUEUE_BATCH: int = _int(os.getenv("SELL_QUEUE_BATCH"), 5)
 SELL_RETRY_DELAY: int = _int(os.getenv("SELL_RETRY_DELAY"), 900)
-SELL_MAX_TRIES: int = _int(os.getenv("SELL_MAX_TRIES"), 5)
+SELL_MAX_TRIES: int = _int(os.getenv("SELL_MAX_TRIES"), 1)
 
 PROFIT_MIN: float = _float(os.getenv("PROFIT_MIN"), 1.0)
 PROFIT_MAX: float = _float(os.getenv("PROFIT_MAX"), 10.0)
@@ -107,10 +111,10 @@ CAP_ALT_COMMAND: str = "/capacity"
 
 SCHEDULE_TZ: str = os.getenv("SCHEDULE_TZ", "Asia/Kolkata").strip()
 SCHEDULE_HOURS: tuple[int, ...] = tuple(
-    sorted({_int(x, 0) for x in os.getenv("SCHEDULE_HOURS", "12").split(",")
+    sorted({_int(x, 0) for x in os.getenv("SCHEDULE_HOURS", "12,16").split(",")
             if x.strip().isdigit() and 0 <= _int(x, 0) <= 23}))
 WARM_HOURS: tuple[int, ...] = tuple(
-    sorted({_int(x, 0) for x in os.getenv("WARM_HOURS", "0,16").split(",")
+    sorted({_int(x, 0) for x in os.getenv("WARM_HOURS", "12,16").split(",")
             if x.strip().isdigit() and 0 <= _int(x, 0) <= 23}))
 CAP_HOURS: tuple[int, ...] = WARM_HOURS
 INR_RATE: float = _float(os.getenv("INR_RATE"), 83.0)
