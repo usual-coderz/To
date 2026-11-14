@@ -129,14 +129,15 @@ def session_list(rows: list[dict], page: str) -> InlineKeyboardMarkup:
     for p in rows:
         label = f"{p.get('phone') or p['item_id']} · {p.get('status')}"
         out.append([(label[:38], f"v:{p['_id']}")])
-    out.append([(f"⤓ {page}.session", f"q:{page}"), ("↻", f"ql:{page}")])
+    out.append([(f"⤓ {page}.zip", f"q:{page}"), ("↻", f"ql:{page}")])
     out.append([("‹ Back", BACK_SESSIONS)])
     return kb(out)
 
 
 def session_detail(p: dict) -> InlineKeyboardMarkup:
     pid = p["_id"]
-    rows = [[("Session file", f"f:{pid}"), ("Check", f"c:{pid}")]]
+    rows = [[(".session", f"f:{pid}"), ("Check", f"c:{pid}")]]
+    rows.append([(".py script", f"g:{pid}")])
     if p.get("status") == "ready":
         rows.append([("Sell now", f"sl:{pid}")])
     rows.append([("‹ Back", BACK_SESSIONS)])
@@ -166,7 +167,7 @@ def ready_detail(p: dict) -> InlineKeyboardMarkup:
     pid = p["_id"]
     return kb([
         [("Sell now", f"sl:{pid}")],
-        [("Session file", f"f:{pid}"), ("Check", f"c:{pid}")],
+        [(".session", f"f:{pid}"), ("Check", f"c:{pid}")],
         [("‹ Back", BACK_READY)],
     ])
 
