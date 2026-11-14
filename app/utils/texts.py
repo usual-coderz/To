@@ -30,6 +30,13 @@ def sell_fail_line(country: str, reason: str = "") -> str:
     return body
 
 
+def session_dead_line(country: str, phone: str = "") -> str:
+    body = f"🔌 <b>{esc(country or '??')}</b> session revoked"
+    if phone:
+        body += f"\n<code>{esc(phone)}</code>"
+    return body + "\n<i>ready se hata diya</i>"
+
+
 def _config_block(s: dict, queued: int = 0, ready: int = 0) -> str:
     lines = [
         _row("buying", "🟢 on" if s["auto_buy"] == "1" else "🔴 off"),
@@ -103,6 +110,7 @@ def ready_text(s: dict, count: int, stats: dict | None = None) -> str:
         _row("min sell", f"${s['sell_min_price']}"),
         _row("profit", f"x{s['profit_mult']}"),
         _row("tie break", "TG GET first"),
+        _row("retry", "1 try then fail"),
     ]
     body = f"<b>Ready to sell</b>\n{BAR}\n{pre(chr(10).join(lines), 800)}"
     if stats:
