@@ -17,7 +17,7 @@ DEFAULT_2FA = "AccStore2fa"
 LOGIN_STALE = 900
 
 ACTIVE = ("login", "queued", "cleaning", "ready")
-SELLABLE = ("", "queued", "failed", "no_offer", "no_profit", "no_country")
+SELLABLE = ("", "queued")
 
 DEFAULTS = {
     "price_min": "0.05", "price_max": "1.00",
@@ -414,9 +414,32 @@ async def sell_queue(tg_id: int, limit: int = 5) -> list[dict]:
     now = _now()
     return await _db.purchases.find({
         "tg_id": tg_id, "status": "ready", "session_string": {"$ne": ""},
+        "session_state": {"$ne": "dead"},
         "sell_state": {"$in": list(SELLABLE)},
         "sell_next": {"$lte": now},
     }).sort("closed_at", ASCENDING).limit(limit).to_list(None)
+
+
+async def session_probe_batch(limit: int = 6) -> list[dict]:
+    return await _db.purchases.find(
+        {"status": "ready", "session_string": {"$ne": ""},
+         "session_state": {"$ne": "dead"}}
+    ).sort("checked_at", ASCENDING).limit(limit).to_list(None)
+
+
+async def mark_dead(pid, reason: str = ""):
+    oid = _oid(pid)
+    if not oid:
+        return
+    now = _now()
+    await _db.purchases.update_one(
+        {"_id": oid},
+        {"$set": {"status": "dead", "session_state": "dead", "sell_state": "dead",
+                  "sell_reason": (reason or "session revoked")[:200],
+                  "closed_at": now, "checked_at": now, "expires_at": 0}})
+    await _db.ledger.update_one(
+        {"purchase_id": oid},
+        {"$set": {"status": "dead", "closed_at": now, "extra": reason[:200]}})
 
 
 async def set_sell(pid, state: str, delay: int = 0, reason: str = ""):
@@ -459,13 +482,16 @@ async def session_stats(tg_id: int) -> dict:
     out = {"total": 0, "queue": 0, "over": 0, "ready": 0, "sold": 0, "live": 0,
            "dead": 0, "queued_sell": 0, "sell_failed": 0}
     cursor = _db.purchases.find(
-        {"tg_id": tg_id, "status": {"$in": list(ACTIVE) + ["sold"]}},
+        {"tg_id": tg_id, "status": {"$in": list(ACTIVE) + ["sold", "dead"]}},
         {"status": 1, "account_created_ts": 1, "started_at": 1, "age_at_buy_hours": 1,
          "session_state": 1, "sell_state": 1})
     async for p in cursor:
         state = p.get("status")
         if state == "sold":
             out["sold"] += 1
+            continue
+        if state == "dead":
+            out["dead"] += 1
             continue
         out["total"] += 1
         if state in ("login", "queued", "cleaning"):
@@ -605,7 +631,7 @@ async def prune_purchases(days: int):
     if days <= 0:
         return
     await _db.purchases.delete_many(
-        {"status": {"$in": ["sold", "failed", "ready"]},
+        {"status": {"$in": ["sold", "failed", "ready", "dead"]},
          "closed_at": {"$gt": 0, "$lt": _now() - days * 86_400}})
 
 
