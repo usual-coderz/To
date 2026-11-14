@@ -12,7 +12,7 @@ from app.lzt import extract_auth_key, extract_dc_id
 from app.session_manager import dc_addr, login_with_auth_key
 from app.utils import tg
 from app.utils import wallet as wallet_view
-from app.utils.filters import geo_spam_state, mail_state, pass_state, spam_state
+from app.utils.filters import mail_state, pass_state, spam_state
 from app.utils.money import fmt_money
 from app.utils.texts import extracted_text
 from app.utils.timeutil import fmt_left
@@ -322,8 +322,8 @@ async def cmd_peek(m: Message):
     item = chk.get("item") or {}
     key = extract_auth_key(item)
     dc = extract_dc_id(item)
-    keep = ("price", "telegram_spam_block", "spam_block", "telegram_spam_geo", "spam_geo",
-            "telegram_email", "email_type", "telegram_password", "country", "created_at",
+    keep = ("price", "telegram_spam_block", "spam_block", "telegram_email",
+            "email_type", "telegram_password", "country", "created_at",
             "registration_date", "telegram_session_age", "session_age",
             "session_age_period", "nsb")
     lines = [f"{k} = {item.get(k)!r}" for k in keep if k in item]
@@ -331,7 +331,6 @@ async def cmd_peek(m: Message):
     lines.append(f"auth_key = {'present len ' + str(len(key)) if key else 'MISSING'}")
     lines.append(f"dc_id = {dc or 'MISSING'} -> {_dc_hint(dc)}")
     lines.append(f"spam_state = {spam_state(item)!r}")
-    lines.append(f"geo_spam_state = {geo_spam_state(item)!r}")
     lines.append(f"email_state = {mail_state(item)!r}")
     lines.append(f"pass_state = {pass_state(item)!r}")
     lines.append("—")
