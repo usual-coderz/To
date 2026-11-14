@@ -8,6 +8,7 @@ import httpx
 
 from app.config import (AUTH_KEY_LEN, CACHE_TTL, HTTP_BACKOFF, HTTP_RETRIES, HTTP_TIMEOUT,
                         LZT_BASE, LZT_TOKEN)
+from app.utils import iso3
 from app.utils.filters import search_query
 from app.utils.money import parse_balances, parse_user, same_currency
 
@@ -27,6 +28,8 @@ BUY_PATH = "/{}/fast-buy"
 RETRY_ATTEMPTS = 40
 RETRY_DELAY = 0.4
 MAX_DEPTH = 5
+
+GEO_KEY = "allow_geo_spamblock"
 
 
 class LztError(Exception):
@@ -49,6 +52,8 @@ def classify(e: LztError) -> str:
         return "blacklist"
     if "enough money" in text or "enough balance" in text:
         return "no_balance"
+    if "country" in text:
+        return "bad_filter"
     if "session is invalid" in text or "logged out" in text or "blocked" in text:
         return "dead"
     return "check_failed"
@@ -177,6 +182,13 @@ def extract_dc_id(item) -> int:
     return _walk_dc(item) if isinstance(item, dict) else 0
 
 
+def _float(value, default: float = 0.0) -> float:
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return default
+
+
 class LztClient:
     def __init__(self, token: str = LZT_TOKEN):
         self._token = token
@@ -186,7 +198,7 @@ class LztClient:
             timeout=HTTP_TIMEOUT,
             headers={"Authorization": f"Bearer {token}",
                      "Accept": "application/json",
-                     "User-Agent": "AccStore/3.2"},
+                     "User-Agent": "AccStore/3.3"},
         )
 
     async def close(self):
@@ -249,12 +261,14 @@ class LztClient:
                 continue
 
             if r.status_code >= 400:
-                raise LztError(_message(payload) or f"HTTP {r.status_code}", r.status_code)
+                message = _message(payload) or f"HTTP {r.status_code}"
+                log.warning(f"{path}: HTTP {r.status_code} {message[:200]}")
+                raise LztError(message, r.status_code)
 
             if isinstance(payload, dict) and payload.get("errors"):
-                raise LztError(
-                    _message(payload) or f"errors: {payload.get('errors')!r}"[:300],
-                    r.status_code)
+                message = _message(payload) or repr(payload.get("errors"))[:300]
+                log.warning(f"{path}: errors {message[:200]}")
+                raise LztError(message, r.status_code)
 
             return payload if isinstance(payload, dict) else {}
 
@@ -330,8 +344,8 @@ class LztClient:
 
     def _search_params(self, s: dict) -> dict:
         params: dict = {
-            "pmin": s.get("price_min"),
-            "pmax": s.get("price_max"),
+            "pmin": _float(s.get("price_min")),
+            "pmax": _float(s.get("price_max")),
             "currency": s.get("currency", "usd"),
             "order_by": "price_to_up",
             "spam": self._enum(s.get("spam_mode", "no")),
@@ -340,19 +354,33 @@ class LztClient:
         }
         if s.get("nsb_only") == "1":
             params["nsb"] = "true"
+        if s.get("spam_mode") == "no":
+            params[GEO_KEY] = "true"
 
-        allow = [c for c in (s.get("countries") or "").split(",") if c]
-        deny = [c for c in (s.get("deny_countries") or "").split(",") if c]
+        allow, bad_allow = iso3.parse(s.get("countries"))
+        deny, bad_deny = iso3.parse(s.get("deny_countries"))
         if allow:
             params["country[]"] = allow
         if deny:
             params["not_country[]"] = deny
+        dropped = bad_allow + bad_deny
+        if dropped:
+            log.warning(f"search: unsupported country codes dropped {dropped}")
 
         params.update(search_query(s))
         return {k: v for k, v in params.items() if v not in (None, "", [])}
 
     async def search(self, s: dict) -> list[dict]:
-        data = await self._get("/telegram", self._search_params(s))
+        params = self._search_params(s)
+        try:
+            data = await self._get("/telegram", params)
+        except LztError as e:
+            if e.status != 400:
+                raise
+            log.warning(f"search 400 ({e}), retrying without country/order filters")
+            trimmed = {k: v for k, v in params.items()
+                       if k not in ("country[]", "not_country[]", "order_by", GEO_KEY)}
+            data = await self._get("/telegram", trimmed)
         return data.get("items") or []
 
     async def item(self, item_id: int, use_cache: bool = False) -> dict:
