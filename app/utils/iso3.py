@@ -54,7 +54,10 @@ PHL POL PRI PRT PRY PSE PYF QAT REU ROU RUS SAU SDN SEN SGP SLV SRB SUR SVK SVN 
 TGO THA TKM TLS TTO TUN TUR TWN UKR UMI URY USA VEN VIR VNM YEM ZAF ZMB ZWE
 """.split())
 
+BACK = {iso3: iso2 for iso2, iso3 in MAP.items()}
+
 NAMES2 = frozenset(MAP)
+SUPPORTED2 = frozenset(code for code, iso3 in MAP.items() if iso3 in SUPPORTED)
 
 
 def to_iso3(value: str) -> str:
@@ -66,8 +69,17 @@ def to_iso3(value: str) -> str:
     return MAP.get(code, "")
 
 
+def to_iso2(value: str) -> str:
+    code = str(value or "").strip().upper()
+    if not code:
+        return ""
+    if len(code) == 2:
+        return code if code in SUPPORTED2 else ""
+    return BACK.get(code, "") if code in SUPPORTED else ""
+
+
 def supported(code: str) -> bool:
-    return to_iso3(code) in SUPPORTED
+    return to_iso2(code) in SUPPORTED2
 
 
 def parse(raw) -> tuple[list[str], list[str]]:
@@ -77,7 +89,7 @@ def parse(raw) -> tuple[list[str], list[str]]:
         token = token.strip().upper()
         if not token:
             continue
-        code = to_iso3(token)
+        code = to_iso2(token)
         if code and code not in ok:
             ok.append(code)
         elif not code:
