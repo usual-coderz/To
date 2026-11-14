@@ -2,7 +2,6 @@ import asyncio
 import logging
 import re
 import signal
-import sys
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -55,9 +54,9 @@ async def _supervise(name: str, factory, *args):
 
 async def main():
     if not BOT_TOKEN:
-        sys.exit("BOT_TOKEN is not set")
+        raise SystemExit("BOT_TOKEN is not set")
     if not OWNER_IDS:
-        sys.exit("OWNER_IDS is not set")
+        log.warning("OWNER_IDS empty — every user is allowed")
     log.info(f"mongo: {_mask(MONGO_URI)} db={MONGO_DB}")
 
     await db.init_db()
@@ -75,7 +74,6 @@ async def main():
         update = getattr(event, "update", None)
         uid = getattr(update, "update_id", "?")
         log.error(f"update {uid}: {event.exception!r}")
-        log.debug("traceback", exc_info=event.exception)
         return True
 
     for r in ROUTERS:
@@ -99,7 +97,8 @@ async def main():
 
     log.info("bot up")
     polling = asyncio.create_task(
-        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types()))
+        dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types(),
+                         drop_pending_updates=True))
     waiter = asyncio.create_task(stop.wait())
     try:
         await asyncio.wait({polling, waiter}, return_when=asyncio.FIRST_COMPLETED)
