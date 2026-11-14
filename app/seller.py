@@ -21,10 +21,11 @@ MAX_CODE_SENDS = 3
 MAX_STEPS = 8
 SERVICE_ID = 777000
 SERVICE_NAMES = ("777000", "Telegram")
-NUDGE_AFTER = 40
+NUDGE_AFTER = 35
 NUDGE_WORDS = ("resend",)
 FIRST_WAIT = 60
 HISTORY_GAP = 3.5
+UB_POLL = 8.0
 
 
 def _sem() -> asyncio.Semaphore:
@@ -101,7 +102,7 @@ async def _poll_tg(conn, entity, timeout: float, since: int, skip: set[str]) -> 
     warned = False
     while time.monotonic() < end:
         try:
-            msgs = await conn.get_messages(entity, limit=5, min_id=since)
+            msgs = await conn.get_messages(entity, limit=6, min_id=since)
         except Exception as e:
             if not warned:
                 log.info(f"otp tg read: {e}")
@@ -145,7 +146,7 @@ async def _poll_mail(p: dict, timeout: float, skip: set[str]) -> str:
 
 
 async def _nudge(receiver: str, timeout: float):
-    await asyncio.sleep(min(NUDGE_AFTER, max(15, timeout // 3)))
+    await asyncio.sleep(min(NUDGE_AFTER, max(12, timeout // 3)))
     for word in NUDGE_WORDS:
         log.info(f"otp nudge {receiver}: {word}")
         if await receiver_hub.send(receiver, word):
@@ -177,11 +178,15 @@ async def _race(coros, timeout: float) -> str:
 
 
 async def _wait_otp(conn, p: dict, receiver: str, timeout: int,
-                    since: int, skip: set[str]) -> str:
+                    otp_since: int, skip: set[str]) -> str:
     entity = await _service_entity(conn)
+    if not otp_since:
+        otp_since = await _baseline(conn, entity)
+    log.info(f"otp wait {p.get('phone')} from id {otp_since} "
+             f"mail={p.get('mail') or '-'} provider={p.get('mail_provider') or '-'}")
     nudge = asyncio.create_task(_nudge(receiver, timeout))
     try:
-        code = await _race([_poll_tg(conn, entity, timeout, since, skip),
+        code = await _race([_poll_tg(conn, entity, timeout, otp_since, skip),
                             _poll_mail(p, timeout, skip)], timeout + 5)
     finally:
         nudge.cancel()
@@ -216,13 +221,21 @@ async def sell(bot, lzt, purchase: dict, offer: dict, settings: dict) -> bool:
         return await _run(bot, lzt, purchase, offer, settings)
 
 
-async def _handshake(bot, p: dict, conn, receiver: str, s: dict, since: int,
-                     sell_price: float) -> tuple[bool, str, str]:
+async def _reply_wait(receiver: str, since: int, timeout: float) -> tuple[str, int]:
+    text, cursor = await receiver_hub.wait_new(receiver, since, timeout)
+    if not text:
+        return "", cursor
+    log.info(f"reply {receiver}: {text[:90]!r}")
+    return text, cursor
+
+
+async def _handshake(bot, p: dict, conn, receiver: str, s: dict, ub_since: int,
+                     otp_since: int, sell_price: float) -> tuple[bool, str, str]:
     password = (p.get("password") or s.get("twofa_password") or db.DEFAULT_2FA)
 
-    reply, since = await receiver_hub.wait_new(receiver, since, FIRST_WAIT)
+    reply, ub_since = await _reply_wait(receiver, ub_since, FIRST_WAIT)
     if not reply:
-        reply, since = await receiver_hub.wait_new(receiver, since, SELL_REPLY_TIMEOUT)
+        reply, ub_since = await _reply_wait(receiver, ub_since, SELL_REPLY_TIMEOUT)
     if not reply:
         return False, "no receiver reply", "handover"
 
@@ -237,7 +250,7 @@ async def _handshake(bot, p: dict, conn, receiver: str, s: dict, since: int,
         if needs_code:
             if len(sent) >= MAX_CODE_SENDS:
                 return False, reply, "otp"
-            code = await _wait_otp(conn, p, receiver, SELL_OTP_TIMEOUT, since, sent)
+            code = await _wait_otp(conn, p, receiver, SELL_OTP_TIMEOUT, otp_since, sent)
             if not code:
                 return False, "no otp received", "otp"
             sent.add(code)
@@ -250,7 +263,7 @@ async def _handshake(bot, p: dict, conn, receiver: str, s: dict, since: int,
         elif sellparse.rejected(reply):
             return False, reply, stage
 
-        reply, since = await receiver_hub.wait_new(receiver, since, SELL_REPLY_TIMEOUT)
+        reply, ub_since = await _reply_wait(receiver, ub_since, SELL_REPLY_TIMEOUT)
         if not reply:
             return False, "no reply after handover", stage
 
@@ -305,7 +318,7 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
                 await db.set_purchase(pid, password="")
 
             entity = await _service_entity(conn)
-            since = await _baseline(conn, entity)
+            otp_since = await _baseline(conn, entity)
 
             if not await receiver_hub.tail_id(receiver):
                 await receiver_hub.start_bot(receiver)
@@ -314,17 +327,17 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
             sid = await db.add_sale(tg_id, pid, country, offer.get("receiver_id"),
                                     receiver, buy_price, sell_price, 0)
 
-            since = await receiver_hub.tail_id(receiver)
+            ub_since = await receiver_hub.tail_id(receiver)
             if not await receiver_hub.send(receiver, phone):
                 await receiver_hub.start_bot(receiver)
                 await asyncio.sleep(2.5)
-                since = await receiver_hub.tail_id(receiver)
+                ub_since = await receiver_hub.tail_id(receiver)
                 if not await receiver_hub.send(receiver, phone):
                     return await _fail(bot, p, sid, receiver, "receiver dm failed",
                                        "handover", sell_price)
 
-            ok, reply, stage = await _handshake(bot, p, conn, receiver, s, since,
-                                                sell_price)
+            ok, reply, stage = await _handshake(bot, p, conn, receiver, s, ub_since,
+                                                otp_since, sell_price)
             if not ok:
                 return await _fail(bot, p, sid, receiver, reply, stage, sell_price)
 
@@ -340,7 +353,7 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
                 confirm = SELL_CONFIRM_MIN
             await db.set_sale_confirm(sid, confirm)
 
-            verdict, since = await receiver_hub.wait_new(receiver, since, SELL_LOGOUT_DELAY)
+            verdict, ub_since = await _reply_wait(receiver, ub_since, SELL_LOGOUT_DELAY)
             if verdict and sellparse.rejected(verdict) and not sellparse.accepted(verdict):
                 return await _fail(bot, p, sid, receiver, verdict, "verification",
                                    sell_price)
@@ -355,7 +368,7 @@ async def _run(bot, lzt, p: dict, offer: dict, s: dict) -> bool:
             await db.set_purchase(pid, session_state="dead")
             await db.close_purchase(pid, "ready", "sold to " + receiver)
 
-            tail, _since = await receiver_hub.wait_new(receiver, since, SELL_VERDICT_WAIT)
+            tail, _since = await _reply_wait(receiver, ub_since, SELL_VERDICT_WAIT)
             if tail and sellparse.rejected(tail) and not sellparse.accepted(tail):
                 return await _fail(bot, p, sid, receiver, tail, "payout", sell_price)
 
