@@ -1,9 +1,11 @@
 import asyncio
 import logging
 import re
+import time
 
 from app import db, receiver_hub
-from app.config import CAP_ALT_COMMAND, CAP_COMMAND, LION_START, PRICE_TTL, PROBE_TIMEOUT
+from app.config import (CAP_ALT_COMMAND, CAP_COMMAND, LION_START, PRICE_TTL, PROBE_GAP,
+                        PROBE_TIMEOUT, PROBE_TRIES, WARM_SLEEP, WARM_TTL)
 from app.utils import countries
 
 log = logging.getLogger("pricing")
@@ -129,29 +131,39 @@ def _absorb(out: dict, reply: str):
         out["confirm"] = confirm
 
 
-async def probe(receiver: dict) -> dict:
+def warm_needed(receiver: dict, force: bool = False) -> bool:
+    if force:
+        return True
+    last = int(receiver.get("warm_at") or 0)
+    return (time.time() - last) > WARM_TTL * 3600
+
+
+async def _ensure_warm(receiver: dict, force: bool = False) -> bool:
+    if not warm_needed(receiver, force):
+        return False
     username = receiver.get("username") or ""
-    kind = receiver.get("kind") or kind_of(username)
-    out = _blank()
-
-    if kind == LION:
-        param = (LION_START or "Prices").strip()
-        _absorb(out, await receiver_hub.start_and_read(username, param, PROBE_TIMEOUT))
-        return out
-
-    _absorb(out, await receiver_hub.command(username, CAP_COMMAND, PROBE_TIMEOUT))
-    if out["replies"]:
-        return out
-
-    out["warm"] = await receiver_hub.start_bot(username)
-    if not out["warm"]:
-        return out
-    await asyncio.sleep(2.5)
-    _absorb(out, await receiver_hub.command(username, CAP_COMMAND, PROBE_TIMEOUT))
-    return out
+    if not await receiver_hub.start_bot(username):
+        return False
+    await db.mark_warm(receiver["_id"])
+    await asyncio.sleep(WARM_SLEEP)
+    return True
 
 
-async def probe_capacity(receiver: dict) -> dict:
+async def _ask(username: str) -> str:
+    parts: list[str] = []
+    for cmd in (CAP_COMMAND, CAP_ALT_COMMAND):
+        for _ in range(max(1, PROBE_TRIES)):
+            reply = await receiver_hub.command(username, cmd, PROBE_TIMEOUT)
+            if reply:
+                parts.append(reply)
+                if parse_cap(reply) >= 0 or parse_offers(reply):
+                    return "\n".join(parts)
+                break
+            await asyncio.sleep(PROBE_GAP)
+    return "\n".join(parts)
+
+
+async def probe(receiver: dict, force: bool = False) -> dict:
     username = receiver.get("username") or ""
     kind = receiver.get("kind") or kind_of(username)
     out = _blank()
@@ -159,25 +171,34 @@ async def probe_capacity(receiver: dict) -> dict:
     if kind == LION:
         _absorb(out, await receiver_hub.start_and_read(
             username, (LION_START or "Prices").strip(), PROBE_TIMEOUT))
+        if not out["offers"]:
+            _absorb(out, await receiver_hub.read_last(username))
+        return out
 
-    for cmd in (CAP_COMMAND, CAP_ALT_COMMAND):
-        _absorb(out, await receiver_hub.command(username, cmd, PROBE_TIMEOUT))
-        if out["cap"] >= 0:
-            break
+    out["warm"] = await _ensure_warm(receiver, force)
+    _absorb(out, await _ask(username))
 
-    if out["cap"] < 0:
-        out["warm"] = await receiver_hub.start_bot(username)
-        if out["warm"]:
-            await asyncio.sleep(2.5)
-            for cmd in (CAP_COMMAND, CAP_ALT_COMMAND):
-                _absorb(out, await receiver_hub.command(username, cmd, PROBE_TIMEOUT))
-                if out["cap"] >= 0:
-                    break
+    if not out["offers"] and out["cap"] < 0:
+        _absorb(out, await receiver_hub.read_last(username))
+
+    if not out["offers"] and out["cap"] < 0:
+        if await receiver_hub.start_bot(username):
+            out["warm"] = True
+            await db.mark_warm(receiver["_id"])
+            await asyncio.sleep(WARM_SLEEP)
+            _absorb(out, await _ask(username))
+            if not out["offers"] and out["cap"] < 0:
+                _absorb(out, await receiver_hub.read_last(username))
+
     return out
 
 
-async def record_capacity(receiver: dict) -> int:
-    out = await probe_capacity(receiver)
+async def probe_capacity(receiver: dict) -> dict:
+    return await probe(receiver)
+
+
+async def record(receiver: dict, force: bool = False) -> dict:
+    out = await probe(receiver, force)
     if out["cap"] >= 0:
         await db.bump_receiver(receiver["_id"], out["cap"], out["confirm"] or None)
         await db.add_cap(receiver["tg_id"], receiver["_id"], receiver["username"], out["cap"])
@@ -186,22 +207,19 @@ async def record_capacity(receiver: dict) -> int:
     if out["offers"]:
         await db.save_prices(receiver["tg_id"], receiver["_id"], out["offers"])
         await db.set_receiver(receiver["_id"], price_at=db._now())
+    return out
+
+
+async def record_capacity(receiver: dict) -> int:
+    out = await record(receiver, True)
     return out["cap"]
 
 
 async def refresh_receiver(receiver: dict) -> dict:
-    out = await probe(receiver)
-    if out["offers"]:
-        await db.save_prices(receiver["tg_id"], receiver["_id"], out["offers"])
-        await db.set_receiver(receiver["_id"], price_at=db._now())
-    if out["cap"] < 0:
-        await db.fail_receiver(receiver["_id"])
-    else:
-        await db.bump_receiver(receiver["_id"], out["cap"], out["confirm"] or None)
-    return out
+    return await record(receiver)
 
 
-async def refresh_all(tg_id: int) -> dict:
+async def refresh_all(tg_id: int, force: bool = False) -> dict:
     if not receiver_hub.running():
         await receiver_hub.start()
     rows = await db.list_receivers(tg_id, enabled_only=True)
@@ -211,7 +229,7 @@ async def refresh_all(tg_id: int) -> dict:
     async def one(receiver):
         async with sem:
             try:
-                result = await refresh_receiver(receiver)
+                result = await record(receiver, force)
             except Exception as e:
                 log.info(f"refresh {receiver.get('username')}: {e}")
                 out["errors"] += 1
@@ -223,7 +241,7 @@ async def refresh_all(tg_id: int) -> dict:
             if not result["offers"]:
                 reason = "no offers parsed"
                 if not result["replies"]:
-                    reason = "warm sent, still no reply" if result.get("warm") else "no reply"
+                    reason = "no reply"
                 out["empty"].append(f"@{receiver.get('username')} {reason}")
 
     await asyncio.gather(*[one(r) for r in rows], return_exceptions=True)
