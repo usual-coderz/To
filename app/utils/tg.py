@@ -1,14 +1,16 @@
+import asyncio
 import html
 import logging
 import re
 
-from aiogram.types import LinkPreviewOptions
+from aiogram.types import BufferedInputFile, LinkPreviewOptions
 
 log = logging.getLogger("tg")
 
 _TAG_RE = re.compile(r"<[^>]+>")
 LP = LinkPreviewOptions(is_disabled=True)
 LIMIT = 4000
+SEND_TIMEOUT = 20.0
 
 
 def esc(value) -> str:
@@ -20,19 +22,27 @@ def strip_tags(text: str) -> str:
 
 
 def clip(text: str, limit: int = LIMIT) -> str:
+    text = text or ""
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def pre(text: str, limit: int = LIMIT) -> str:
+    return "<pre>" + esc(clip(text, limit)) + "</pre>"
 
 
 async def send(bot, chat_id, text, markup=None) -> bool:
     text = clip(text)
     try:
-        await bot.send_message(chat_id, text, reply_markup=markup, link_preview_options=LP)
+        await asyncio.wait_for(
+            bot.send_message(chat_id, text, reply_markup=markup,
+                             link_preview_options=LP), SEND_TIMEOUT)
         return True
     except Exception as e:
         log.info(f"send html failed chat={chat_id}: {e}")
     try:
-        await bot.send_message(chat_id, clip(strip_tags(text)), reply_markup=markup,
-                               parse_mode=None)
+        await asyncio.wait_for(
+            bot.send_message(chat_id, clip(strip_tags(text)), reply_markup=markup,
+                             parse_mode=None), SEND_TIMEOUT)
         return True
     except Exception as e:
         log.warning(f"send failed chat={chat_id}: {e}")
@@ -40,9 +50,10 @@ async def send(bot, chat_id, text, markup=None) -> bool:
 
 
 async def send_document(bot, chat_id, payload: bytes, filename: str) -> bool:
-    from aiogram.types import BufferedInputFile
     try:
-        await bot.send_document(chat_id, BufferedInputFile(payload, filename=filename))
+        await asyncio.wait_for(
+            bot.send_document(chat_id, BufferedInputFile(payload, filename=filename)),
+            SEND_TIMEOUT * 2)
         return True
     except Exception as e:
         log.warning(f"send_document failed chat={chat_id}: {e}")
