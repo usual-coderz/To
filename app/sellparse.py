@@ -2,13 +2,18 @@ import re
 
 CODE_REQUEST = re.compile(
     r"(code\s+(?:has\s+been\s+|was\s+|is\s+)?sent|sent\s+(?:the\s+)?(?:code|otp)"
-    r"|enter\s+(?:the\s+)?(?:code|otp)|/cancel|verification\s+code)", re.I)
+    r"|enter\s+(?:the\s+)?(?:code|otp)|verification\s+code|send\s+(?:me\s+)?(?:the\s+)?code"
+    r"|отправ\w*\s+код|введите\s+код)", re.I)
+PASSWORD_REQUEST = re.compile(
+    r"(cloud\s+password|2fa|two[\s-]?step|password|пароль)", re.I)
 ACCEPT = re.compile(
     r"(account\s+received|received\s+successfully|account\s+accepted"
-    r"|account\s+will\s+be\s+(?:automatically\s+)?(?:verified|confirmed))", re.I)
+    r"|account\s+will\s+be\s+(?:automatically\s+)?(?:verified|confirmed)"
+    r"|successfully\s+(?:logged|added)|code\s+accepted)", re.I)
 REJECT = re.compile(
-    r"(fail|error|invalid|wrong|expired|denied|not\s+received|already\s+(?:sold|added)"
-    r"|blocked|try\s+again|cannot|can't|no\s+capacity|limit)", re.I)
+    r"(fail|error|invalid|wrong|incorrect|expired|denied|not\s+received"
+    r"|already\s+(?:sold|added)|blocked|try\s+again|cannot|can't|no\s+capacity|limit)", re.I)
+CODE_WRONG = re.compile(r"(code|otp|пароль|код)", re.I)
 PRICE = re.compile(r"price[^\d$]{0,12}\$?\s*(\d{1,6}(?:[.,]\d{1,3})?)", re.I)
 SECONDS = re.compile(r"(\d{1,7})\s*(?:s\b|secs?\b|seconds?\b)", re.I)
 MINUTES = re.compile(r"(\d{1,5})\s*(?:mins?\b|minutes?\b)", re.I)
@@ -16,7 +21,7 @@ OTP = re.compile(r"\b(\d{4,6})\b")
 PHONE = re.compile(r"(\+\d{7,16})")
 COUNTRY = re.compile(r"([A-Z]{2})")
 
-SKIP_CC = {"OK", "TG", "ID", "PR", "OTP", "US", "AM", "PM", "NA"}
+SKIP_CC = {"OK", "TG", "ID", "PR", "OTP", "US", "AM", "PM", "NA", "BD"}
 
 
 def price_of(text: str) -> float:
@@ -48,12 +53,20 @@ def wants_code(text: str) -> bool:
     return bool(CODE_REQUEST.search(text or ""))
 
 
+def wants_password(text: str) -> bool:
+    return bool(PASSWORD_REQUEST.search(text or ""))
+
+
 def accepted(text: str) -> bool:
     return bool(ACCEPT.search(text or ""))
 
 
 def rejected(text: str) -> bool:
     return bool(REJECT.search(text or "")) and not accepted(text)
+
+
+def code_wrong(text: str) -> bool:
+    return rejected(text) and bool(CODE_WRONG.search(text or ""))
 
 
 def phone_of(text: str) -> str:
