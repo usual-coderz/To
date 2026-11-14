@@ -30,6 +30,7 @@ RETRY_DELAY = 0.4
 MAX_DEPTH = 5
 
 GEO_KEY = "allow_geo_spamblock"
+COUNTRY_KEYS = ("country[]", "not_country[]")
 
 
 class LztError(Exception):
@@ -198,7 +199,7 @@ class LztClient:
             timeout=HTTP_TIMEOUT,
             headers={"Authorization": f"Bearer {token}",
                      "Accept": "application/json",
-                     "User-Agent": "AccStore/3.3"},
+                     "User-Agent": "AccStore/3.4"},
         )
 
     async def close(self):
@@ -342,6 +343,15 @@ class LztClient:
     def _enum(value: str) -> str:
         return "nomatter" if value == "any" else value
 
+    def country_mode(self, s: dict) -> tuple[str, list[str], list[str], list[str]]:
+        allow, bad_allow = iso3.parse(s.get("countries"))
+        deny, bad_deny = iso3.parse(s.get("deny_countries"))
+        if allow:
+            return "country[]", allow, deny, bad_allow + bad_deny
+        if deny:
+            return "not_country[]", allow, deny, bad_allow + bad_deny
+        return "", allow, deny, bad_allow + bad_deny
+
     def _search_params(self, s: dict) -> dict:
         params: dict = {
             "pmin": _float(s.get("price_min")),
@@ -357,13 +367,11 @@ class LztClient:
         if s.get("spam_mode") == "no":
             params[GEO_KEY] = "true"
 
-        allow, bad_allow = iso3.parse(s.get("countries"))
-        deny, bad_deny = iso3.parse(s.get("deny_countries"))
-        if allow:
-            params["country[]"] = allow
-        if deny:
-            params["not_country[]"] = deny
-        dropped = bad_allow + bad_deny
+        key, allow, deny, dropped = self.country_mode(s)
+        if key == "country[]":
+            params[key] = allow
+        elif key == "not_country[]":
+            params[key] = deny
         if dropped:
             log.warning(f"search: unsupported country codes dropped {dropped}")
 
@@ -377,9 +385,8 @@ class LztClient:
         except LztError as e:
             if e.status != 400:
                 raise
-            log.warning(f"search 400 ({e}), retrying without country/order filters")
-            trimmed = {k: v for k, v in params.items()
-                       if k not in ("country[]", "not_country[]", "order_by", GEO_KEY)}
+            trimmed = {k: v for k, v in params.items() if k not in COUNTRY_KEYS}
+            log.warning(f"search 400 ({e}), retrying without country filter")
             data = await self._get("/telegram", trimmed)
         return data.get("items") or []
 
