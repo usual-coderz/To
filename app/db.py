@@ -176,6 +176,7 @@ _INDEXES = (
     ("reports", [("tg_id", ASCENDING), ("ts", DESCENDING)], {}),
     ("receivers", [("tg_id", ASCENDING), ("key", ASCENDING)], {"unique": True}),
     ("receivers", [("tg_id", ASCENDING), ("enabled", ASCENDING)], {}),
+    ("receivers", [("tg_id", ASCENDING), ("warm_at", ASCENDING)], {}),
     ("prices", [("tg_id", ASCENDING), ("country", ASCENDING), ("ts", DESCENDING)], {}),
     ("prices", [("tg_id", ASCENDING), ("ts", DESCENDING)], {}),
     ("prices", [("receiver_id", ASCENDING), ("ts", DESCENDING)], {}),
@@ -629,7 +630,8 @@ async def add_receiver(tg_id: int, username: str, kind: str = "", title: str = "
     rid = (await _db.receivers.insert_one({
         "tg_id": tg_id, "key": key, "username": key, "kind": kind or "cm",
         "title": title or key, "enabled": True, "cap": -1, "cap_at": 0,
-        "price_at": 0, "confirm_seconds": 0, "fails": 0, "created_at": now,
+        "price_at": 0, "confirm_seconds": 0, "fails": 0, "warm_at": 0,
+        "created_at": now,
     })).inserted_id
     return str(rid)
 
@@ -654,6 +656,12 @@ async def set_receiver(rid, **fields):
     oid = _oid(rid)
     if oid and fields:
         await _db.receivers.update_one({"_id": oid}, {"$set": fields})
+
+
+async def mark_warm(rid):
+    oid = _oid(rid)
+    if oid:
+        await _db.receivers.update_one({"_id": oid}, {"$set": {"warm_at": _now()}})
 
 
 async def drop_receiver(rid) -> bool:
