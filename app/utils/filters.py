@@ -24,9 +24,6 @@ _AGE_NUM_KEYS = ("telegram_session_age", "session_age", "session_age_hours",
 _PERIOD_KEYS = ("session_age_period", "telegram_session_age_period")
 
 _SPAM_KEYS = ("telegram_spam_block", "spam_block", "is_spam_blocked", "spam")
-_GEO_SPAM_KEYS = ("telegram_spam_geo", "spam_geo", "telegram_geo_spam",
-                  "is_geo_spam", "geo_spam", "telegram_geo_block",
-                  "telegram_restriction_geo")
 
 _PERIOD_HOURS = {
     "hour": 1.0, "hours": 1.0, "h": 1.0, "hr": 1.0, "hrs": 1.0,
@@ -243,15 +240,6 @@ def spam_state(item: dict) -> bool | None:
     return None
 
 
-def geo_spam_state(item: dict) -> bool | None:
-    for key in _GEO_SPAM_KEYS:
-        if key in item:
-            state = _flag(item[key])
-            if state is not None:
-                return state
-    return None
-
-
 def mail_state(item: dict) -> bool | None:
     for key in ("telegram_email", "email", "has_email"):
         if key not in item:
@@ -321,28 +309,9 @@ def passes(item: dict, s: dict, authoritative: bool = False) -> tuple[bool, str]
     unknown = False
 
     spam = spam_state(item)
-    geo = geo_spam_state(item)
     mode = s.get("spam_mode", "no")
-    strict = s.get("spam_free", "1") == "1"
-    if mode == "any":
-        if spam is True and s.get("verify_spam", "1") == "1":
-            return False, "spam"
-        if spam is None:
-            unknown = True
-    elif mode == "yes":
-        if spam is False:
-            return False, "spam_missing"
-        if spam is None:
-            unknown = True
-    else:
-        if spam is True:
-            return False, "spam"
-        if geo is True:
-            return False, "geo_spam"
-        if spam is None:
-            unknown = True
-        elif strict and geo is None:
-            unknown = True
+    if mode == "yes" and spam is False:
+        return False, "spam_missing"
 
     mail = mail_state(item)
     mode = s.get("mail_mode", "any")
