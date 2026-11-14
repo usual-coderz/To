@@ -22,6 +22,8 @@ MAX_CODE_SENDS = 3
 MAX_STEPS = 8
 SERVICE_ID = 777000
 SERVICE_NAMES = ("777000", "Telegram")
+NUDGE_AFTER = 45
+NUDGE_WORDS = ("resend", "again")
 
 
 def _sem() -> asyncio.Semaphore:
@@ -122,6 +124,7 @@ async def _poll_tg(conn, entity, timeout: float) -> str:
         for msg in fresh:
             code = sellparse.otp_of(msg.raw_text or "")
             if code:
+                log.info(f"otp tg hit: {code}")
                 return code
         await asyncio.sleep(2.0)
     return ""
@@ -132,8 +135,11 @@ async def _poll_mail(p: dict, timeout: float) -> str:
     if client is None:
         return ""
     try:
-        return await client.fetch_verification_code(
+        code = await client.fetch_verification_code(
             p.get("mail"), timeout=timeout, poll_interval=3.0, expected_length=None)
+        if code:
+            log.info(f"otp mail hit: {code}")
+        return code
     except Exception as e:
         log.info(f"mail otp {p.get('phone')}: {e}")
         return ""
@@ -142,6 +148,14 @@ async def _poll_mail(p: dict, timeout: float) -> str:
             await client.close()
         except Exception:
             pass
+
+
+async def _nudge(receiver: str, timeout: float):
+    await asyncio.sleep(min(NUDGE_AFTER, max(20, timeout // 3)))
+    for word in NUDGE_WORDS:
+        log.info(f"otp nudge {receiver}: {word}")
+        if await receiver_hub.send(receiver, word):
+            await asyncio.sleep(2.0)
 
 
 async def _race(coros, timeout: float) -> str:
@@ -168,10 +182,14 @@ async def _race(coros, timeout: float) -> str:
             task.cancel()
 
 
-async def _wait_otp(conn, p: dict, timeout: int) -> str:
+async def _wait_otp(conn, p: dict, receiver: str, timeout: int) -> str:
     entity = await _service_entity(conn)
-    code = await _race([_poll_tg(conn, entity, timeout), _poll_mail(p, timeout)],
-                       timeout + 5)
+    nudge = asyncio.create_task(_nudge(receiver, timeout))
+    try:
+        code = await _race([_poll_tg(conn, entity, timeout), _poll_mail(p, timeout)],
+                           timeout + 5)
+    finally:
+        nudge.cancel()
     if code:
         log.info(f"otp {p.get('phone')}: {code}")
     else:
@@ -235,7 +253,7 @@ async def _handshake(bot, p: dict, conn, receiver: str, s: dict,
                                              and codes_sent < MAX_CODE_SENDS):
             if codes_sent >= MAX_CODE_SENDS:
                 return False, reply, "otp"
-            code = await _wait_otp(conn, p, SELL_OTP_TIMEOUT)
+            code = await _wait_otp(conn, p, receiver, SELL_OTP_TIMEOUT)
             if not code:
                 return False, "no otp received", "otp"
             if not await receiver_hub.send(receiver, code):
