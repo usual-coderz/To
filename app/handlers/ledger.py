@@ -6,6 +6,7 @@ from aiogram.filters import Command
 from aiogram.types import BufferedInputFile, CallbackQuery, Message
 
 from app import db, keyboards as kb
+from app.handlers import state
 from app.handlers.menu import show
 from app.utils.texts import ledger_text, report_text, stats_text
 
@@ -26,8 +27,9 @@ async def cb_report(cq: CallbackQuery):
 
 @router.callback_query(F.data == "m:stats")
 async def cb_stats(cq: CallbackQuery):
-    s = await db.get_settings(cq.from_user.id)
-    await show(cq, stats_text(await db.ledger_stats(cq.from_user.id), s["currency"]),
+    s = await db.get_settings(cq.from_user.id, 1)
+    fid = state.fid(cq.from_user.id)
+    await show(cq, stats_text(await db.ledger_stats(cq.from_user.id, fid), s["currency"], fid),
                kb.back())
     await cq.answer()
 
@@ -44,12 +46,12 @@ async def cb_csv(cq: CallbackQuery):
     if not rows:
         return await cq.answer("ledger empty", show_alert=True)
     buf = io.StringIO()
-    buf.write("purchase_id,item_id,buy,sell,status,created,closed,note\n")
+    buf.write("purchase_id,item_id,fid,buy,sell,status,created,closed,note\n")
     for r in rows:
         note = (r.get("extra") or "").replace('"', "'")[:60]
-        buf.write(f"{r['purchase_id']},{r['item_id']},{r['buy_price']},"
-                  f"{r['sell_price']},{r['status']},{r['created_at']},{r['closed_at']},"
-                  f"\"{note}\"\n")
+        buf.write(f"{r['purchase_id']},{r['item_id']},{r.get('fid') or 1},"
+                  f"{r['buy_price']},{r['sell_price']},{r['status']},"
+                  f"{r['created_at']},{r['closed_at']},\"{note}\"\n")
     await cq.message.answer_document(
         BufferedInputFile(buf.getvalue().encode(), filename=f"ledger_{int(time.time())}.csv"))
     await cq.answer("sent")
