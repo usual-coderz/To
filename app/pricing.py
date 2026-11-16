@@ -291,6 +291,18 @@ async def best_offer(tg_id: int, country: str, floor: float = 0.0) -> dict | Non
     return None
 
 
+async def best_chain(tg_id: int, country: str, floor: float = 0.0,
+                     limit: int = 3) -> list[dict]:
+    out = []
+    for offer in await offers_for(tg_id, country):
+        if offer["price"] < floor or offer.get("cap") == 0:
+            continue
+        out.append(offer)
+        if len(out) >= limit:
+            break
+    return out
+
+
 async def best_table(tg_id: int, max_age: float = PRICE_TTL) -> list[dict]:
     data = await offers_map(tg_id, max_age)
     rows = []
