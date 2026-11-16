@@ -32,6 +32,8 @@ DEFAULTS = {
     "profit_mult": f"{PROFIT_DEFAULT:g}",
 }
 
+DEFAULTS2 = {**DEFAULTS, "auto_buy": "0", "profit_mult": "1", "price_max": "0.50"}
+
 _TRUE = {"1", "true", "yes", "on", "y"}
 _FALSE = {"0", "false", "no", "off", "n", ""}
 
@@ -143,10 +145,11 @@ def normalize_setting(key: str, value) -> str | None:
     return None if fn is None else fn(value)
 
 
-def normalize_settings(raw) -> tuple[dict, dict]:
+def normalize_settings(raw, defaults: dict | None = None) -> tuple[dict, dict]:
+    base = defaults or DEFAULTS
     source = raw if isinstance(raw, dict) else {}
     clean, fixes = {}, {}
-    for key, default in DEFAULTS.items():
+    for key, default in base.items():
         norm = NORMALIZERS[key](source.get(key, default))
         if key in source and norm != str(source.get(key)):
             fixes[key] = norm
@@ -166,6 +169,7 @@ _INDEXES = (
     ("purchases", [("status", ASCENDING), ("checked_at", ASCENDING)], {}),
     ("purchases", [("status", ASCENDING), ("started_at", ASCENDING)], {}),
     ("purchases", [("tg_id", ASCENDING)], {}),
+    ("purchases", [("tg_id", ASCENDING), ("fid", ASCENDING), ("status", ASCENDING)], {}),
     ("purchases", [("tg_id", ASCENDING), ("phone", ASCENDING)], {}),
     ("purchases", [("started_at", ASCENDING)], {}),
     ("purchases", [("tg_id", ASCENDING), ("status", ASCENDING), ("sell_state", ASCENDING)], {}),
@@ -237,10 +241,17 @@ async def close_db():
             _client, _db = None, None
 
 
+def _path(key: str, fid: int) -> str:
+    return key if fid == 1 else f"f2.{key}"
+
+
 async def _seed_settings(tg_id: int):
     clean, _ = normalize_settings({})
+    second, _ = normalize_settings({}, DEFAULTS2)
     await _db.settings.update_one(
-        {"tg_id": tg_id}, {"$setOnInsert": {**clean, "tg_id": tg_id}}, upsert=True)
+        {"tg_id": tg_id},
+        {"$setOnInsert": {**clean, "f2": second, "tg_id": tg_id}},
+        upsert=True)
 
 
 async def ensure_user(tg_id: int, username: str = ""):
@@ -257,12 +268,25 @@ async def get_username(tg_id: int) -> str:
     return (doc or {}).get("username") or ""
 
 
-async def get_settings(tg_id: int) -> dict:
+async def get_settings(tg_id: int, fid: int = 1) -> dict:
     doc = await _db.settings.find_one({"tg_id": tg_id})
     if not doc:
         await _seed_settings(tg_id)
-        clean, _ = normalize_settings({})
+        clean, _ = normalize_settings({}, DEFAULTS2 if fid == 2 else DEFAULTS)
         return clean
+
+    if fid == 2:
+        raw = doc.get("f2")
+        if not isinstance(raw, dict):
+            second, _ = normalize_settings({}, DEFAULTS2)
+            await _db.settings.update_one({"tg_id": tg_id}, {"$set": {"f2": second}})
+            return second
+        clean, fixes = normalize_settings(raw, DEFAULTS2)
+        if fixes:
+            await _db.settings.update_one(
+                {"tg_id": tg_id}, {"$set": {f"f2.{k}": v for k, v in fixes.items()}})
+        return clean
+
     clean, fixes = normalize_settings(doc)
     if fixes:
         await _db.settings.update_one({"tg_id": tg_id}, {"$set": fixes})
@@ -270,12 +294,13 @@ async def get_settings(tg_id: int) -> dict:
     return clean
 
 
-async def set_setting(tg_id: int, key: str, value) -> str | None:
+async def set_setting(tg_id: int, key: str, value, fid: int = 1) -> str | None:
     norm = normalize_setting(key, value)
     if norm is None:
         return None
     await _db.settings.update_one(
-        {"tg_id": tg_id}, {"$set": {key: norm}, "$setOnInsert": {"tg_id": tg_id}},
+        {"tg_id": tg_id},
+        {"$set": {_path(key, fid): norm}, "$setOnInsert": {"tg_id": tg_id}},
         upsert=True)
     return norm
 
@@ -289,10 +314,10 @@ def _day_start() -> int:
     return now - (now % 86_400)
 
 
-async def spent_today(tg_id: int) -> float:
+async def spent_today(tg_id: int, fid: int = 1) -> float:
     total = 0.0
     cursor = _db.purchases.find(
-        {"tg_id": tg_id, "started_at": {"$gte": _day_start()}}, {"price": 1})
+        {"tg_id": tg_id, "fid": fid, "started_at": {"$gte": _day_start()}}, {"price": 1})
     async for doc in cursor:
         total += float(doc.get("price") or 0.0)
     return total
@@ -320,24 +345,24 @@ def current_age(p: dict, at: int | None = None) -> float:
 async def add_purchase(tg_id, item_id, phone, country, price, password="", mail="",
                        mail_password="", session_string="", expires_at=0,
                        age_at_buy_hours=0.0, account_created_ts=0, auth_key="",
-                       auth_dc=0, spam_flag=False, status="login", note="") -> str:
+                       auth_dc=0, spam_flag=False, status="login", note="",
+                       fid=1) -> str:
     now = _now()
     pid = (await _db.purchases.insert_one({
-        "tg_id": tg_id, "item_id": item_id, "phone": phone or "", "country": country or "",
-        "price": float(price), "password": password or "", "mail": mail or "",
-        "mail_password": mail_password or "", "session_string": session_string,
-        "auth_key": auth_key or "", "auth_dc": int(auth_dc or 0),
-        "status": status, "started_at": now, "expires_at": int(expires_at),
-        "target_age_hours": TARGET_HOURS,
+        "tg_id": tg_id, "fid": int(fid), "item_id": item_id, "phone": phone or "",
+        "country": country or "", "price": float(price), "password": password or "",
+        "mail": mail or "", "mail_password": mail_password or "",
+        "session_string": session_string, "auth_key": auth_key or "",
+        "auth_dc": int(auth_dc or 0), "status": status, "started_at": now,
+        "expires_at": int(expires_at), "target_age_hours": TARGET_HOURS,
         "age_at_buy_hours": float(age_at_buy_hours),
         "account_created_ts": int(account_created_ts or 0),
-        "spam_flag": bool(spam_flag),
-        "expiry_tries": 0, "session_state": "pending", "checked_at": 0,
-        "closed_at": 0, "note": note, "sell_state": "", "sell_reason": "",
-        "sell_try": 0, "sell_next": 0,
+        "spam_flag": bool(spam_flag), "expiry_tries": 0, "session_state": "pending",
+        "checked_at": 0, "closed_at": 0, "note": note, "sell_state": "",
+        "sell_reason": "", "sell_try": 0, "sell_next": 0,
     })).inserted_id
     await _db.ledger.insert_one({
-        "tg_id": tg_id, "purchase_id": pid, "item_id": item_id,
+        "tg_id": tg_id, "fid": int(fid), "purchase_id": pid, "item_id": item_id,
         "buy_price": float(price), "sell_price": 0.0, "status": "open",
         "created_at": now, "closed_at": 0, "extra": note,
     })
@@ -388,32 +413,33 @@ async def release_purchase(pid, seconds: int, inc_tries: bool = False):
     await _db.purchases.update_one({"_id": oid}, upd)
 
 
-async def active_purchases(tg_id: int, limit: int = 30) -> list[dict]:
+async def active_purchases(tg_id: int, fid: int = 1, limit: int = 30) -> list[dict]:
     return await _db.purchases.find(
-        {"tg_id": tg_id, "status": {"$in": list(ACTIVE)}}
+        {"tg_id": tg_id, "fid": fid, "status": {"$in": list(ACTIVE)}}
     ).sort("started_at", DESCENDING).limit(limit).to_list(None)
 
 
-async def queue_purchases(tg_id: int, limit: int = 100) -> list[dict]:
+async def queue_purchases(tg_id: int, fid: int = 1, limit: int = 100) -> list[dict]:
     return await _db.purchases.find(
-        {"tg_id": tg_id, "status": {"$in": ["login", "queued", "cleaning"]}}
+        {"tg_id": tg_id, "fid": fid, "status": {"$in": ["login", "queued", "cleaning"]}}
     ).sort("expires_at", ASCENDING).limit(limit).to_list(None)
 
 
-async def ready_purchases(tg_id: int, limit: int = 100) -> list[dict]:
+async def ready_purchases(tg_id: int, fid: int = 1, limit: int = 100) -> list[dict]:
     return await _db.purchases.find(
-        {"tg_id": tg_id, "status": "ready"}
+        {"tg_id": tg_id, "fid": fid, "status": "ready"}
     ).sort("closed_at", DESCENDING).limit(limit).to_list(None)
 
 
-async def ready_count(tg_id: int) -> int:
-    return await _db.purchases.count_documents({"tg_id": tg_id, "status": "ready"})
+async def ready_count(tg_id: int, fid: int = 1) -> int:
+    return await _db.purchases.count_documents(
+        {"tg_id": tg_id, "fid": fid, "status": "ready"})
 
 
-async def sell_queue(tg_id: int, limit: int = 5) -> list[dict]:
+async def sell_queue(tg_id: int, fid: int = 1, limit: int = 5) -> list[dict]:
     now = _now()
     return await _db.purchases.find({
-        "tg_id": tg_id, "status": "ready", "session_string": {"$ne": ""},
+        "tg_id": tg_id, "fid": fid, "status": "ready", "session_string": {"$ne": ""},
         "session_state": {"$ne": "dead"},
         "sell_state": {"$in": list(SELLABLE)},
         "sell_next": {"$lte": now},
@@ -461,28 +487,29 @@ async def bump_sell_try(pid, delay: int, reason: str = ""):
         await _db.purchases.update_one({"_id": oid}, {"$inc": {"sell_try": 1}, **upd})
 
 
-async def over_age(tg_id: int, hours: float = TARGET_HOURS, limit: int = 500) -> list[dict]:
+async def over_age(tg_id: int, fid: int = 1, hours: float = TARGET_HOURS,
+                   limit: int = 500) -> list[dict]:
     now = _now()
     cutoff = now - int(hours * 3600)
     rows = await _db.purchases.find(
-        {"tg_id": tg_id, "status": {"$in": list(ACTIVE)},
+        {"tg_id": tg_id, "fid": fid, "status": {"$in": list(ACTIVE)},
          "$or": [{"account_created_ts": {"$gt": 0, "$lte": cutoff}},
                  {"account_created_ts": 0, "started_at": {"$lte": cutoff}}]}
     ).sort("started_at", ASCENDING).limit(limit).to_list(None)
     return [p for p in rows if current_age(p, now) >= hours]
 
 
-async def queue_count(tg_id: int) -> int:
+async def queue_count(tg_id: int, fid: int = 1) -> int:
     return await _db.purchases.count_documents(
-        {"tg_id": tg_id, "status": {"$in": ["login", "queued"]}})
+        {"tg_id": tg_id, "fid": fid, "status": {"$in": ["login", "queued"]}})
 
 
-async def session_stats(tg_id: int) -> dict:
+async def session_stats(tg_id: int, fid: int = 1) -> dict:
     now = _now()
     out = {"total": 0, "queue": 0, "over": 0, "ready": 0, "sold": 0, "live": 0,
            "dead": 0, "queued_sell": 0, "sell_failed": 0}
     cursor = _db.purchases.find(
-        {"tg_id": tg_id, "status": {"$in": list(ACTIVE) + ["sold", "dead"]}},
+        {"tg_id": tg_id, "fid": fid, "status": {"$in": list(ACTIVE) + ["sold", "dead"]}},
         {"status": 1, "account_created_ts": 1, "started_at": 1, "age_at_buy_hours": 1,
          "session_state": 1, "sell_state": 1})
     async for p in cursor:
@@ -546,9 +573,9 @@ async def bump_expiry(pid, seconds: int, inc_tries: bool = False):
     await _db.purchases.update_one({"_id": oid}, {"$inc": inc})
 
 
-async def reschedule(tg_id: int):
+async def reschedule(tg_id: int, fid: int = 1):
     now = _now()
-    cursor = _db.purchases.find({"tg_id": tg_id, "status": "queued"})
+    cursor = _db.purchases.find({"tg_id": tg_id, "fid": fid, "status": "queued"})
     async for p in cursor:
         await _db.purchases.update_one(
             {"_id": p["_id"]},
@@ -594,11 +621,13 @@ async def ledger_rows(tg_id: int) -> list[dict]:
     return await _db.ledger.find({"tg_id": tg_id}).sort("_id", -1).limit(500).to_list(None)
 
 
-async def ledger_stats(tg_id: int) -> dict:
+async def ledger_stats(tg_id: int, fid: int = 0) -> dict:
+    query = {"tg_id": tg_id}
+    if fid:
+        query["fid"] = fid
     total = done = 0
     spent = revenue = 0.0
-    cursor = _db.ledger.find({"tg_id": tg_id},
-                             {"buy_price": 1, "sell_price": 1, "status": 1})
+    cursor = _db.ledger.find(query, {"buy_price": 1, "sell_price": 1, "status": 1})
     async for row in cursor:
         total += 1
         spent += float(row.get("buy_price") or 0.0)
@@ -611,12 +640,13 @@ async def ledger_stats(tg_id: int) -> dict:
 
 
 async def save_report(tg_id: int, *, scanned: int = 0, bought: int = 0,
-                      reasons: dict | None = None, note: str = "", error: str = ""):
+                      reasons: dict | None = None, note: str = "", error: str = "",
+                      fid: int = 1):
     now = _now()
     await _db.reports.insert_one({
-        "tg_id": tg_id, "ts": now, "scanned": int(scanned), "bought": int(bought),
-        "skipped": int(sum((reasons or {}).values())), "reasons": reasons or {},
-        "note": (note or "")[:200], "error": (error or "")[:300],
+        "tg_id": tg_id, "fid": int(fid), "ts": now, "scanned": int(scanned),
+        "bought": int(bought), "skipped": int(sum((reasons or {}).values())),
+        "reasons": reasons or {}, "note": (note or "")[:200], "error": (error or "")[:300],
     })
     await _db.reports.delete_many(
         {"tg_id": tg_id, "ts": {"$lt": now - REPORT_KEEP_HOURS * 3600}})
@@ -816,11 +846,15 @@ async def close_sale(sid, status: str, note: str = ""):
         {"$set": {"status": status, "closed_at": _now(), "note": note[:300]}})
 
 
-async def sell_totals(tg_id: int) -> dict:
+async def sell_totals(tg_id: int, fid: int = 0) -> dict:
+    query = {"tg_id": tg_id, "status": "sold"}
+    if fid:
+        purchase_ids = [p["_id"] async for p in
+                        _db.purchases.find({"tg_id": tg_id, "fid": fid}, {"_id": 1})]
+        query["purchase_id"] = {"$in": purchase_ids}
     investment = sold = 0.0
     count = 0
-    cursor = _db.sales.find({"tg_id": tg_id, "status": "sold"},
-                            {"buy_price": 1, "sell_price": 1})
+    cursor = _db.sales.find(query, {"buy_price": 1, "sell_price": 1})
     async for row in cursor:
         count += 1
         investment += float(row.get("buy_price") or 0.0)
@@ -830,10 +864,13 @@ async def sell_totals(tg_id: int) -> dict:
             "roi": (profit / investment * 100) if investment else 0.0}
 
 
-async def sale_stats(tg_id: int) -> dict:
+async def sale_stats(tg_id: int, fid: int = 1) -> dict:
     out = {"total": 0, "sold": 0, "failed": 0}
-    cursor = _db.sales.find({"tg_id": tg_id}, {"status": 1})
+    cursor = _db.sales.find({"tg_id": tg_id}, {"status": 1, "purchase_id": 1})
     async for row in cursor:
+        p = await get_purchase(row.get("purchase_id"))
+        if fid and (not p or p.get("fid") != fid):
+            continue
         out["total"] += 1
         if row.get("status") == "sold":
             out["sold"] += 1
