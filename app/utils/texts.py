@@ -12,8 +12,16 @@ def _row(label: str, value: str) -> str:
     return f"{label:<8}{value}"
 
 
-def bought_line(country: str) -> str:
-    return f"✅ <b>{esc(country or '??')}</b> bought"
+def _tree(label: str, value: str) -> str:
+    return f" ├ {label}: {value}"
+
+
+def filter_name(fid: int) -> str:
+    return f"Filter {int(fid)}"
+
+
+def bought_line(country: str, fid: int = 1) -> str:
+    return f"✅ <b>{esc(country or '??')}</b> bought · {filter_name(fid)}"
 
 
 def failed_line(country: str, reason: str = "") -> str:
@@ -56,7 +64,8 @@ def _config_block(s: dict, queued: int = 0, ready: int = 0) -> str:
 
 
 def menu_text(s: dict, profile: dict, total: float, spendable: float,
-              queued: int, ready: int, note: str = "") -> str:
+              queued: int, ready: int, note: str = "",
+              f1: str = "off", f2: str = "off", q2: int = 0, r2: int = 0) -> str:
     body = (
         "<b>AccStore</b>\n"
         f"{BAR}\n"
@@ -66,13 +75,28 @@ def menu_text(s: dict, profile: dict, total: float, spendable: float,
     if spendable + 1e-9 < total:
         body += f" · {fmt_money(spendable, s['currency'])} spendable"
     body += f"\n{BAR}\n{_config_block(s, queued, ready)}"
+    body += f"\n{BAR}\nfilters · 1 {f1} · 2 {f2}  (q2 {q2} r2 {r2})"
     if note:
         body += f"\n⚠️ {esc(note)}"
     return body
 
 
-def filters_text(s: dict) -> str:
+def filter_pick_text(s1: dict, s2: dict) -> str:
     lines = [
+        f"1 · buying {'on' if s1['auto_buy'] == '1' else 'off'}"
+        f" · price {s1['price_min']}-{s1['price_max']}"
+        f" · profit x{s1['profit_mult']}",
+        f"2 · buying {'on' if s2['auto_buy'] == '1' else 'off'}"
+        f" · price {s2['price_min']}-{s2['price_max']}"
+        f" · flat (no margin)",
+    ]
+    return (f"<b>Filters</b>\n{BAR}\n{pre(chr(10).join(lines), 700)}\n{BAR}\n"
+            "filter 1 margin follow karta hai, filter 2 nahi")
+
+
+def filters_text(s: dict, fid: int = 1) -> str:
+    lines = [
+        _row("filter", filter_name(fid)),
         _row("price", f"{s['price_min']} – {s['price_max']}"),
         _row("spam", s["spam_mode"]),
         _row("mail", s["mail_mode"]),
@@ -87,6 +111,8 @@ def filters_text(s: dict) -> str:
         _row("mail src", s["mail_provider"]),
         _row("2fa pwd", s["twofa_password"]),
     ]
+    if fid == 1:
+        lines.append(_row("margin", f"x{s['profit_mult']} (buy gate)"))
     return (f"<b>Filters</b>\n{BAR}\n{pre(chr(10).join(lines), 1200)}\n{BAR}\n"
             f"age ≥ {TARGET_HOURS:g}h → audit, warna queued")
 
@@ -95,22 +121,23 @@ def profit_text(s: dict) -> str:
     mult = float(s.get("profit_mult") or 1)
     body = "\n".join([
         _row("current", f"x{mult:g}"),
-        _row("max buy", f"sell ÷ {mult:g}"),
+        _row("gate", f"sell ≥ buy × {mult:g}"),
         "",
-        "buy  $0.25  →  pay $0.50  →  sold at x1",
-        "no fixed floor, margin decides",
+        "buy $10 → only if bid ≥ $15 → sell at bid",
+        "buy $20 with x2 → needs bid ≥ $40",
+        "margin buying pe lagta hai, selling pe nahi",
     ])
     return f"<b>Profit multiplier</b>\n{BAR}\n{pre(body, 800)}"
 
 
-def ready_text(s: dict, count: int, stats: dict | None = None) -> str:
+def ready_text(s: dict, count: int, stats: dict | None = None, fid: int = 1) -> str:
     lines = [
+        _row("filter", filter_name(fid)),
         _row("auto sell", "🟢 on" if s["auto_sell"] == "1" else "🔴 off"),
         _row("queued", str(count)),
-        _row("min sell", f"${s['sell_min_price']}"),
-        _row("profit", f"x{s['profit_mult']}"),
-        _row("tie break", "TG GET first"),
-        _row("retry", "1 try then fail"),
+        _row("min sell", "margin" if fid == 1 else "flat"),
+        _row("profit", f"x{s['profit_mult']}" if fid == 1 else "off"),
+        _row("retry", "1 try then next"),
     ]
     body = f"<b>Ready to sell</b>\n{BAR}\n{pre(chr(10).join(lines), 800)}"
     if stats:
@@ -124,14 +151,15 @@ def ready_row(p: dict) -> str:
             f" · {esc(p.get('sell_state') or 'idle')} · try {p.get('sell_try', 0)}")
 
 
-def ready_list_text(rows: list[dict]) -> str:
+def ready_list_text(rows: list[dict], fid: int = 1) -> str:
     lines = []
     for p in rows:
         lines.append(ready_row(p))
         reason = p.get("sell_reason") or ""
         if reason:
             lines.append(f"   ↳ {str(reason)[:60]}")
-    return f"<b>Ready</b> · {len(rows)}\n{BAR}\n{pre(chr(10).join(lines), 3200)}"
+    return (f"<b>Ready</b> · {filter_name(fid)} · {len(rows)}\n{BAR}\n"
+            f"{pre(chr(10).join(lines), 3200)}")
 
 
 def ready_detail_text(p: dict) -> str:
@@ -194,21 +222,25 @@ def audit_text(p: dict, d: dict, supervisor: str = "") -> str:
                          f"{gr} group(s)" if gr else "",
                          f"{bt} bot(s)" if bt else "") if x]
     head = "\n".join([
-        _row("phone", p.get("phone") or str(p.get("item_id"))),
-        _row("country", p.get("country") or "??"),
-        _row("age", fmt_year(created)),
-        _row("spam", _spam_line(d.get("spam") or "")),
-        _row("2fa", "ON" if d.get("twofa_ok") else "FAILED"),
-        _row("mail", f"added {d.get('mail')}" if d.get("mail_ok") else "not changed"),
-        _row("devices", str(len(devices))),
-        _row("owned", ", ".join(owned) or "None"),
+        _tree("📅 Age", fmt_year(created)),
+        _tree("🚦 Spam", _spam_line(d.get("spam") or "")),
+        _tree("🔐 2FA", "ON" if d.get("twofa_ok") else "FAILED"),
+        _tree("📧 Mail", f"Recovery Added ({d.get('mail')})" if d.get("mail_ok")
+              else "not changed"),
+        _tree("📱 Devices", f"{len(devices)} active"),
+    ])
+    tail = "\n".join([
         _row("2fa pwd", d.get("password") or "—"),
+        _row("item", str(p.get("item_id"))),
     ])
     return (
-        f"🌟 <b>Audit Report</b>\n{BAR}\n{pre(head, 1500)}\n{BAR}\n"
-        f"🤖 <b>SpamBot</b>\n{pre(d.get('spam') or 'no reply', 800)}\n"
-        f"💻 <b>Devices</b>\n{pre(chr(10).join(devices) or '—', 1200)}\n"
-        f"{BAR}\n👑 @{esc(supervisor or '—')}\n🎉 bought successfully"
+        f"🌟 <b>Audit Report</b> | {esc(p.get('phone') or p.get('item_id'))}\n"
+        f"{BAR}\n{head}\n{BAR}\n"
+        f"🤖 <b>SpamBot Reply:</b>\n{esc(d.get('spam') or 'no reply')}\n\n"
+        f"💻 <b>Device List:</b>\n{pre(chr(10).join(devices) or '—', 1200)}\n\n"
+        f"🏛️ <b>Owned Channels / Groups / Bots:</b> {esc(', '.join(owned) or 'None')}\n\n"
+        f"👑 <b>Supervisor:</b> @{esc(supervisor or '—')}\n"
+        f"{pre(tail, 400)}"
     )
 
 
@@ -232,39 +264,45 @@ def sell_audit_text(p: dict, reason: str, stage: str, receiver: str,
     )
 
 
-def trade_text(p: dict, offer: dict, supervisor: str, sessions: int,
-               confirm: int, sale_id: str, sold_price: float, totals: dict) -> str:
+def sold_audit_text(p: dict, offer: dict, supervisor: str, devices: int,
+                    confirm: int, sale_id: str, sold_price: float, totals: dict) -> str:
     cc = (p.get("country") or "").upper()
-    phone = (p.get("phone") or "").lstrip("+")
-    masked = f"{phone[:4]}{'*' * max(0, len(phone) - 7)}{phone[-3:]}" if len(phone) > 7 else phone
+    phone = p.get("phone") or ""
     buy = float(p.get("price") or 0.0)
     sold = float(sold_price or 0.0)
+    margin = (sold / buy) if buy else 0.0
     profit = sold - buy
-    roi = (profit / buy * 100) if buy else 0.0
-    sign = "+" if profit >= 0 else "-"
     head = "\n".join([
-        _row("sale", sale_id[:14]),
-        _row("item", str(p.get("item_id"))),
-        _row("phone", masked),
-        _row("country", cc or "??"),
-        _row("buy", f"${buy:.2f} (₹{buy * INR_RATE:.0f})"),
-        _row("sold", f"${sold:.2f}"),
-        _row("roi", f"{sign}{abs(roi):.1f}%"),
-        _row("profit", f"{sign}${abs(profit):.2f}"),
-        _row("sessions", str(sessions)),
-        _row("payout", f"{confirm}s"),
+        _tree("📅 Age", fmt_year(p.get("account_created_ts") or 0)),
+        _tree("🚦 Spam", "Good ✅"),
+        _tree("🔐 2FA", "ON" if p.get("password") else "OFF"),
+        _tree("📧 Mail", f"Recovery Added ({p.get('mail')})" if p.get("mail")
+              else "not changed"),
+        _tree("📱 Devices", f"{devices} active"),
     ])
     tail = "\n".join([
-        _row("invested", f"${totals['investment']:.2f}"),
-        _row("sold", f"${totals['sold']:.2f}"),
-        _row("profit", f"${totals['profit']:.2f} ({totals['roi']:.1f}%)"),
-        _row("trades", str(totals["count"])),
+        _row("best", f"@{offer.get('receiver') or '—'} (Paying: ${sold:.2f})"),
+        _row("buy", f"${buy:.2f}"),
+        _row("margin", f"{margin:.1f}x"),
+        _row("profit", f"+${profit:.2f}"),
+        _row("2fa pwd", p.get("password") or "—"),
+        _row("sale", sale_id[:14]),
+        _row("payout", f"{confirm}s"),
     ])
+    totals_line = (f"invested ${totals['investment']:.2f} · sold ${totals['sold']:.2f}"
+                   f" · net ${totals['profit']:.2f} ({totals['roi']:.1f}%)")
     return (
-        f"🎉 <b>TRADE COMPLETED</b>\n{BAR}\n"
-        f"👑 @{esc(supervisor or '—')} → @{esc(offer.get('receiver') or '—')}\n"
-        f"{pre(head, 1200)}\n{BAR}\n{pre(tail, 600)}"
+        f"🌟 <b>Audit Report</b> | {esc(phone)}\n{BAR}\n{head}\n{BAR}\n"
+        f"🏛️ <b>Owned Channels / Groups / Bots:</b> None\n\n"
+        f"👑 <b>Supervisor:</b> @{esc(supervisor or '—')}\n"
+        f"{pre(tail, 800)}\n{BAR}\n<i>{esc(totals_line)}</i>"
     )
+
+
+def trade_text(p: dict, offer: dict, supervisor: str, sessions: int,
+               confirm: int, sale_id: str, sold_price: float, totals: dict) -> str:
+    return sold_audit_text(p, offer, supervisor, sessions, confirm, sale_id,
+                           sold_price, totals)
 
 
 def session_block(p: dict) -> str:
@@ -278,6 +316,7 @@ def session_detail(p: dict, checked: str = "") -> str:
     created = p.get("account_created_ts") or 0
     state = p.get("status") or "queued"
     lines = [
+        _row("filter", filter_name(p.get("fid") or 1)),
         _row("phone", p.get("phone") or "—"),
         _row("item", str(p.get("item_id"))),
         _row("country", p.get("country") or "??"),
@@ -361,8 +400,9 @@ def session_stats_text(st: dict, sold: dict | None = None) -> str:
     return body
 
 
-def stats_text(st: dict, currency: str = "usd") -> str:
+def stats_text(st: dict, currency: str = "usd", fid: int = 1) -> str:
     lines = [
+        _row("filter", filter_name(fid) if fid else "all"),
         _row("trades", str(st["total"])),
         _row("closed", str(st["done"])),
         _row("spent", fmt_money(st["spent"], currency)),
@@ -389,15 +429,16 @@ def report_text(rows: list[dict]) -> str:
     lines = []
     for r in rows:
         stamp = fmt_dt(r.get("ts"))
+        tag = f"f{r.get('fid') or 1}"
         if r.get("error"):
-            lines.append(f"{stamp} · ⚠️ {str(r['error'])[:80]}")
+            lines.append(f"{stamp} [{tag}] · ⚠️ {str(r['error'])[:80]}")
             continue
         if r.get("note"):
-            lines.append(f"{stamp} · {str(r['note'])[:60]}")
+            lines.append(f"{stamp} [{tag}] · {str(r['note'])[:60]}")
             continue
         top = ", ".join(f"{k}×{v}" for k, v in
                         sorted((r.get("reasons") or {}).items(), key=lambda x: -x[1])[:3])
-        lines.append(f"{stamp} · scan {r.get('scanned', 0)}"
+        lines.append(f"{stamp} [{tag}] · scan {r.get('scanned', 0)}"
                      f" · buy {r.get('bought', 0)} · skip {r.get('skipped', 0)}"
                      + (f" · {top}" if top else ""))
     return f"<b>Report</b> · last cycles\n{BAR}\n{pre(chr(10).join(lines), 3200)}"
