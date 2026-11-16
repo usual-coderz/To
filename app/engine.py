@@ -3,7 +3,7 @@ import logging
 import time
 from collections import Counter
 
-from app import db, receivers, seller, session_export
+from app import db, logs, pricing, receivers, seller, session_export
 from app.config import (CYCLE_INTERVAL, EXPIRY_RETRY, EXPIRY_RETRY_DELAY,
                         LOGIN_CONCURRENCY, LOGIN_RETRY_DELAY, LOGIN_TRIES, MAX_SCAN,
                         SESSION_RETRY, SESSION_WATCH_BATCH, SESSION_WATCH_CONCURRENCY,
@@ -19,17 +19,17 @@ from app.utils import wallet as wallet_view
 from app.utils.filters import (account_created_ts, age_for_queue, country_of, passes,
                                phone_of, spam_state)
 from app.utils.money import fmt_money, pick_for_buy
-from app.utils.texts import audit_text, bought_line, failed_line, session_dead_line
+from app.utils.texts import bought_line, failed_line, session_dead_line
 
 log = logging.getLogger("engine")
 
-_BAL_WARNED: dict[int, float] = {}
-_LIMIT_WARNED: dict[int, float] = {}
+_BAL_WARNED: dict[tuple, float] = {}
+_LIMIT_WARNED: dict[tuple, float] = {}
 WARN_COOLDOWN = 900.0
 LIMIT_COOLDOWN = 3600.0
 
 _BG: set[asyncio.Task] = set()
-_NEXT_RUN: dict[int, float] = {}
+_NEXT_RUN: dict[tuple, float] = {}
 _SEM: asyncio.Semaphore | None = None
 _WATCH_SEM: asyncio.Semaphore | None = None
 _PROBING: set[str] = set()
@@ -77,17 +77,17 @@ async def _notify(bot, tg_id, text):
     await tg.send(bot, tg_id, text)
 
 
-async def _balance_warn(bot, tg_id, text):
-    if time.time() - _BAL_WARNED.get(tg_id, 0.0) < WARN_COOLDOWN:
+async def _balance_warn(bot, tg_id, fid, text):
+    if time.time() - _BAL_WARNED.get((tg_id, fid), 0.0) < WARN_COOLDOWN:
         return
-    _BAL_WARNED[tg_id] = time.time()
+    _BAL_WARNED[(tg_id, fid)] = time.time()
     await _notify(bot, tg_id, text)
 
 
-async def _limit_warn(bot, tg_id):
-    if time.time() - _LIMIT_WARNED.get(tg_id, 0.0) < LIMIT_COOLDOWN:
+async def _limit_warn(bot, tg_id, fid):
+    if time.time() - _LIMIT_WARNED.get((tg_id, fid), 0.0) < LIMIT_COOLDOWN:
         return
-    _LIMIT_WARNED[tg_id] = time.time()
+    _LIMIT_WARNED[(tg_id, fid)] = time.time()
     await _notify(bot, tg_id,
                   "🚫 <b>daily check limit</b> reached\n"
                   "<i>buying paused — buy any account to reset it, or wait for the reset</i>")
@@ -155,7 +155,8 @@ async def _fast_buy(lzt, item_id: int, price: float, balance_id: int):
     return await lzt.fast_buy(item_id, price)
 
 
-async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tuple[bool, str]:
+async def buy_one(bot, lzt, tg_id: int, fid: int, item: dict, s: dict,
+                  snap: dict) -> tuple[bool, str]:
     item_id = item_id_of(item)
     if not item_id:
         return False, "no_id"
@@ -163,6 +164,7 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
     search_price = db.num(item.get("price"))
     currency = s["currency"]
     floor_age = db.num(s.get("session_min_hours"))
+    mult = pricing.profit_mult(s) if fid == 1 else 0.0
 
     checked = {}
     try:
@@ -185,6 +187,16 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         log.info(f"skip {item_id}: {why} price={price:g}")
         return False, why
 
+    cc = country_of(fresh)
+    if fid == 1:
+        if not cc:
+            return False, "no_country"
+        need = price * mult
+        offer = await pricing.best_offer(tg_id, cc, need)
+        if offer is None:
+            log.info(f"skip {item_id}: no_profit {cc} need ${need:.2f} (x{mult:g})")
+            return False, "no_profit"
+
     soft = ""
     if spam_state(fresh) is True:
         soft = "spam_flag"
@@ -197,7 +209,7 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
         snap.update(await wallet_view.snapshot(lzt, currency))
         wallet = pick_for_buy(snap["entries"], currency, price)
     if wallet is None:
-        await _balance_warn(bot, tg_id,
+        await _balance_warn(bot, tg_id, fid,
                             f"💳 low balance {fmt_money(snap['total'], currency)}")
         return False, "no_balance"
 
@@ -235,7 +247,6 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
     phone, password, merged = await _resolve_login(lzt, item_id, fresh, res)
     auth_key = extract_auth_key(merged)
     auth_dc = extract_dc_id(merged)
-    country = country_of(fresh)
     age = age_for_queue(fresh, floor_age)
     created = account_created_ts(fresh) or 0
     due = db.due_from(age)
@@ -245,23 +256,23 @@ async def buy_one(bot, lzt, tg_id: int, item: dict, s: dict, snap: dict) -> tupl
                  f"{','.join(sorted(str(k) for k in merged)[:40])}")
 
     pid = await db.add_purchase(
-        tg_id, item_id, phone, country, price, password=password,
+        tg_id, item_id, phone, cc, price, password=password,
         expires_at=due, age_at_buy_hours=age, account_created_ts=created,
         auth_key=auth_key, auth_dc=auth_dc, spam_flag=(soft == "spam_flag"),
-        note="bought")
+        note="bought", fid=fid)
 
-    await _notify(bot, tg_id, bought_line(country))
+    await _notify(bot, tg_id, bought_line(cc, fid))
 
     if not phone:
         log.info(f"buy {item_id}: no phone on item")
         await db.close_purchase(pid, "login_failed", "no phone number on item")
-        await _notify(bot, tg_id, failed_line(country, "no phone on item"))
+        await _notify(bot, tg_id, failed_line(cc, "no phone on item"))
         return True, "no_phone"
 
-    log.info(f"bought {item_id} pid={pid} price={price:g} age={age:.2f}h "
+    log.info(f"bought {item_id} pid={pid} fid={fid} price={price:g} age={age:.2f}h "
              f"key={'yes' if auth_key else 'no'} dc={auth_dc or '?'} "
              f"mature={age >= TARGET_HOURS}")
-    _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, country, s,
+    _spawn(_login_task(bot, lzt, tg_id, pid, item_id, phone, password, cc, s,
                        merged, auth_key, auth_dc))
     return True, (soft or "bought")
 
@@ -347,14 +358,8 @@ async def _change_mail(conn, mc, addr: str, phone: str) -> tuple[bool, str]:
 
 async def _send_audit(bot, tg_id, p, data):
     sup = await db.get_username(tg_id)
-    await tg.send(bot, tg_id, audit_text(p, data, sup))
-    name = (p.get("phone") or str(p["item_id"])).lstrip("+") or "session"
-    try:
-        blob = session_export.sqlite_bytes(p.get("session_string") or "")
-    except Exception as e:
-        log.info(f"session export {name}: {e}")
-        return
-    await tg.send_document(bot, tg_id, blob, f"{name}.session")
+    await _notify(bot, tg_id, f"🌟 queued · {p.get('phone') or p.get('item_id')}")
+    await logs.queued(bot, p, data, sup)
 
 
 async def _fail(bot, p, note: list[str]):
@@ -368,7 +373,7 @@ async def clean_purchase(bot, lzt, p: dict):
     if not await db.claim_purchase(pid):
         return
 
-    s = await db.get_settings(p["tg_id"])
+    s = await db.get_settings(p["tg_id"], p.get("fid") or 1)
     tries = int(p.get("expiry_tries") or 0)
 
     if not p.get("session_string"):
@@ -404,7 +409,6 @@ async def clean_purchase(bot, lzt, p: dict):
                         note.append("mail fail")
                 else:
                     note.append("mail fail: no mailbox")
-                    log.info(f"mail change {p.get('phone')}: no mailbox")
             finally:
                 if mc is not None and hasattr(mc, "close"):
                     await mc.close()
@@ -494,7 +498,7 @@ async def _probe_session(bot, p: dict):
     _PROBING.add(pid)
     try:
         async with _watch_sem():
-            s = await db.get_settings(p["tg_id"])
+            s = await db.get_settings(p["tg_id"], p.get("fid") or 1)
             alive, me = await check_session(p["session_string"], s.get("proxy", ""))
             if alive:
                 await db.set_purchase(p["_id"], session_state="live", checked_at=db._now())
@@ -520,16 +524,16 @@ async def session_watch_loop(bot):
         await asyncio.sleep(SESSION_WATCH_INTERVAL)
 
 
-async def _cycle(bot, lzt, tg_id: int, s: dict):
+async def _cycle(bot, lzt, tg_id: int, fid: int, s: dict):
     if s.get("auto_buy") != "1":
-        await db.save_report(tg_id, note="auto-buy off")
+        await db.save_report(tg_id, note="auto-buy off", fid=fid)
         return
 
     cap = db.num(s.get("daily_spend_cap"))
     if cap > 0:
-        spent = await db.spent_today(tg_id)
+        spent = await db.spent_today(tg_id, fid)
         if spent >= cap:
-            await db.save_report(tg_id, note=f"daily cap hit {spent:.2f}/{cap:.2f}")
+            await db.save_report(tg_id, note=f"daily cap hit {spent:.2f}/{cap:.2f}", fid=fid)
             return
 
     currency = s["currency"]
@@ -537,21 +541,21 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
 
     snap = await wallet_view.snapshot(lzt, currency)
     if snap["spendable"] < floor_price:
-        await _balance_warn(bot, tg_id,
+        await _balance_warn(bot, tg_id, fid,
                             f"💳 low balance {fmt_money(snap['total'], currency)}")
         note = f"low spendable {snap['spendable']:.2f}/{floor_price:.2f}"
         if snap["error"]:
             note += f" · {snap['error'][:80]}"
-        await db.save_report(tg_id, note=note)
+        await db.save_report(tg_id, note=note, fid=fid)
         return
 
     try:
         items = await lzt.search(s)
     except LztError as e:
-        await db.save_report(tg_id, error=f"search: {e}")
+        await db.save_report(tg_id, error=f"search: {e}", fid=fid)
         return
     if not items:
-        await db.save_report(tg_id, note="search returned nothing")
+        await db.save_report(tg_id, note="search returned nothing", fid=fid)
         return
 
     reasons: Counter = Counter()
@@ -561,7 +565,7 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
 
     for it in items[:MAX_SCAN]:
         try:
-            live = await db.get_settings(tg_id)
+            live = await db.get_settings(tg_id, fid)
         except Exception:
             live = s
         s = live
@@ -577,12 +581,11 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
 
         ok, why = passes(it, s)
         if not ok:
-            log.info(f"pre {item_id}: {why}")
             reasons[why] += 1
             continue
 
         try:
-            done, why = await buy_one(bot, lzt, tg_id, it, s, snap)
+            done, why = await buy_one(bot, lzt, tg_id, fid, it, s, snap)
         except Exception as e:
             log.exception(f"buy_one {item_id}: {e}")
             reasons["error"] += 1
@@ -593,16 +596,17 @@ async def _cycle(bot, lzt, tg_id: int, s: dict):
         if why == "no_balance":
             break
         if why == "check_limit":
-            await _limit_warn(bot, tg_id)
-            await db.save_report(tg_id, note="daily check limit reached — buying paused")
+            await _limit_warn(bot, tg_id, fid)
+            await db.save_report(tg_id, note="daily check limit reached", fid=fid)
             break
-        if cap > 0 and await db.spent_today(tg_id) >= cap:
+        if cap > 0 and await db.spent_today(tg_id, fid) >= cap:
             reasons["cap_hit"] += 1
             break
 
-    log.info(f"[{tg_id}] scanned={len(items)} bought={bought} stopped={stopped} "
-             f"rejects={dict(reasons.most_common(6))}")
-    await db.save_report(tg_id, scanned=len(items), bought=bought, reasons=dict(reasons))
+    log.info(f"[{tg_id}/f{fid}] scanned={len(items)} bought={bought} "
+             f"stopped={stopped} rejects={dict(reasons.most_common(6))}")
+    await db.save_report(tg_id, scanned=len(items), bought=bought,
+                         reasons=dict(reasons), fid=fid)
 
 
 async def buy_loop(bot, lzt):
@@ -610,31 +614,31 @@ async def buy_loop(bot, lzt):
         try:
             now = time.time()
             owners = await db.all_owners()
-            live_ids = {u["_id"] for u in owners}
-            for stale in [k for k in _NEXT_RUN if k not in live_ids]:
+            live = {(u["_id"], fid) for u in owners for fid in (1, 2)}
+            for stale in [k for k in _NEXT_RUN if k not in live]:
                 _NEXT_RUN.pop(stale, None)
-            for stale in [k for k in _BAL_WARNED if k not in live_ids]:
+            for stale in [k for k in _BAL_WARNED if k not in live]:
                 _BAL_WARNED.pop(stale, None)
-            for stale in [k for k in _LIMIT_WARNED if k not in live_ids]:
+            for stale in [k for k in _LIMIT_WARNED if k not in live]:
                 _LIMIT_WARNED.pop(stale, None)
-            for tg_id in live_ids:
-                if _NEXT_RUN.get(tg_id, 0.0) > now:
+            for tg_id, fid in live:
+                if _NEXT_RUN.get((tg_id, fid), 0.0) > now:
                     continue
                 try:
-                    s = await db.get_settings(tg_id)
+                    s = await db.get_settings(tg_id, fid)
                 except Exception as e:
-                    log.warning(f"settings {tg_id}: {e}")
-                    _NEXT_RUN[tg_id] = now + TICK
+                    log.warning(f"settings {tg_id}/{fid}: {e}")
+                    _NEXT_RUN[(tg_id, fid)] = now + TICK
                     continue
                 if s["auto_buy"] != "1":
-                    _NEXT_RUN[tg_id] = now + TICK
+                    _NEXT_RUN[(tg_id, fid)] = now + TICK
                     continue
-                _NEXT_RUN[tg_id] = now + CYCLE_INTERVAL
+                _NEXT_RUN[(tg_id, fid)] = now + CYCLE_INTERVAL
                 try:
-                    await _cycle(bot, lzt, tg_id, s)
+                    await _cycle(bot, lzt, tg_id, fid, s)
                 except Exception as e:
-                    log.exception(f"cycle {tg_id}: {e}")
-                    await db.save_report(tg_id, error=f"cycle: {e}")
+                    log.exception(f"cycle {tg_id}/{fid}: {e}")
+                    await db.save_report(tg_id, error=f"cycle: {e}", fid=fid)
         except Exception as e:
             log.exception(f"buy_loop: {e}")
         await asyncio.sleep(TICK)
