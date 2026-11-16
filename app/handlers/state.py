@@ -2,6 +2,7 @@ import time
 
 TTL = 300.0
 PENDING: dict[int, dict] = {}
+_FID: dict[int, int] = {}
 
 
 def _prune():
@@ -39,3 +40,11 @@ def clear(uid: int):
 def kind(uid: int) -> str:
     hit = get(uid)
     return hit["kind"] if hit else ""
+
+
+def set_fid(uid: int, fid: int):
+    _FID[uid] = 2 if int(fid) == 2 else 1
+
+
+def fid(uid: int) -> int:
+    return _FID.get(uid, 1)
