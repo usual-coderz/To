@@ -35,22 +35,38 @@ def back(to: str = BACK_MAIN) -> InlineKeyboardMarkup:
 
 
 def _onoff(flag: str) -> str:
-    return "🟢 on" if flag == "1" else "🔴 off"
+    return "🟢" if flag == "1" else "🔴"
 
 
-def main(s: dict, ready: int) -> InlineKeyboardMarkup:
+def main(s: dict, ready: int, s2: dict | None = None, ready2: int = 0) -> InlineKeyboardMarkup:
+    s2 = s2 or s
     return kb([
         [("⏸ Stop buying" if s["auto_buy"] == "1" else "▶️ Start buying", "t:auto_buy")],
-        [("Sessions", BACK_SESSIONS), (f"Ready {ready}", BACK_READY)],
+        [(f"{_onoff(s['auto_buy'])} F1 buy", "af:1"), (f"{_onoff(s2['auto_buy'])} F2 buy", "af:2")],
+        [("Sessions ▸", BACK_SESSIONS), (f"Ready F1 {ready} · F2 {ready2}", BACK_READY)],
         [("📊 Prices", BACK_CHART), (f"Profit x{s['profit_mult']}", BACK_PROFIT)],
         [("Receivers", BACK_RECEIVERS), ("Wallet", BACK_WALLET)],
         [("Stats", "m:stats"), ("Report", "m:report")],
-        [("Filters", BACK_FILTERS)],
+        [("Filters ▸", BACK_FILTERS)],
     ])
 
 
-def filters(s: dict) -> InlineKeyboardMarkup:
+def filter_pick() -> InlineKeyboardMarkup:
     return kb([
+        [("Filter 1", "fs:1"), ("Filter 2", "fs:2")],
+        [("‹ Back", BACK_MAIN)],
+    ])
+
+
+def session_pick() -> InlineKeyboardMarkup:
+    return kb([
+        [("Filter 1", "ss:1"), ("Filter 2", "ss:2")],
+        [("‹ Back", BACK_MAIN)],
+    ])
+
+
+def filters(s: dict, fid: int = 1) -> InlineKeyboardMarkup:
+    rows = [
         [(f"Price {s['price_min']}–{s['price_max']}", "m:price")],
         [(f"Spam {s['spam_mode']}", "m:spam"), (f"Mail {s['mail_mode']}", "m:mail")],
         [(f"2FA {s['password_mode']}", "m:pass")],
@@ -61,8 +77,11 @@ def filters(s: dict) -> InlineKeyboardMarkup:
         [(f"Terminate {s['terminate_on_expire']}", "t:terminate_on_expire"),
          (f"Mail chg {s['change_mail_on_expire']}", "t:change_mail_on_expire")],
         [(f"Mail src {s['mail_provider']}", "m:mailprov"), ("2FA pwd", "in:twofa_password")],
-        [("‹ Back", BACK_MAIN)],
-    ])
+    ]
+    if fid == 1:
+        rows.append([(f"Margin x{s['profit_mult']}", BACK_PROFIT)])
+    rows.append([("Switch ▸", BACK_FILTERS)])
+    return kb(rows)
 
 
 def price() -> InlineKeyboardMarkup:
@@ -76,8 +95,8 @@ def price() -> InlineKeyboardMarkup:
 
 def profit(s: dict) -> InlineKeyboardMarkup:
     return kb([
-        [(f"x{v}", f"s:profit_mult:{v}") for v in ("1", "1.1", "1.2")],
-        [(f"x{v}", f"s:profit_mult:{v}") for v in ("1.5", "2", "3")],
+        [(f"x{v}", f"s:profit_mult:{v}") for v in ("1", "1.5", "2")],
+        [(f"x{v}", f"s:profit_mult:{v}") for v in ("2.5", "3", "4")],
         [("custom", "in:profit_mult")],
         [("‹ Back", BACK_MAIN)],
     ])
@@ -109,11 +128,11 @@ def pick(prefix: str, values: list[str], back_to: str = BACK_FILTERS) -> InlineK
     return kb(rows)
 
 
-def sessions(stats: dict) -> InlineKeyboardMarkup:
+def sessions(stats: dict, fid: int = 1) -> InlineKeyboardMarkup:
     return kb([
         [(f"Queue {stats['queue']}", "q:list"), (f"24h+ {stats['over']}", "q:over")],
         [(f"Ready {stats['ready']}", "q:ready"), ("Stats", "q:stats")],
-        [("‹ Back", BACK_MAIN)],
+        [("Switch ▸", BACK_SESSIONS)],
     ])
 
 
@@ -144,11 +163,12 @@ def session_detail(p: dict) -> InlineKeyboardMarkup:
     return kb(rows)
 
 
-def ready(s: dict, count: int) -> InlineKeyboardMarkup:
+def ready(s: dict, count: int, fid: int = 1) -> InlineKeyboardMarkup:
     return kb([
         [(f"Auto sell {_onoff(s['auto_sell'])}", "t:auto_sell")],
         [(f"Sell all ({count})", "rd:all")],
         [("Prices", "rd:prices"), ("List", "rd:list")],
+        [("F1", "rs:1"), ("F2", "rs:2")],
         [("‹ Back", BACK_MAIN)],
     ])
 
