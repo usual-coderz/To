@@ -4,20 +4,21 @@ from aiogram.types import CallbackQuery, Message
 
 from app import db, keyboards as kb, pricing, seller
 from app.deps import lzt
+from app.handlers import state
 from app.handlers.menu import show
 from app.utils import tg
-from app.utils.texts import (prices_text, ready_detail_text, ready_list_text,
-                             ready_text)
+from app.utils.texts import (filter_name, prices_text, ready_detail_text,
+                             ready_list_text, ready_text)
 
 router = Router()
 
 
-async def _render(bot, chat_id: int, tg_id: int, edit=None):
-    s = await db.get_settings(tg_id)
-    count = await db.ready_count(tg_id)
-    stats = await db.sale_stats(tg_id)
-    text = ready_text(s, count, stats)
-    markup = kb.ready(s, count)
+async def _render(bot, chat_id: int, tg_id: int, fid: int, edit=None):
+    s = await db.get_settings(tg_id, fid)
+    count = await db.ready_count(tg_id, fid)
+    stats = await db.sale_stats(tg_id, fid)
+    text = ready_text(s, count, stats, fid)
+    markup = kb.ready(s, count, fid)
     if edit is not None:
         await show(edit, text, markup)
     else:
@@ -26,21 +27,32 @@ async def _render(bot, chat_id: int, tg_id: int, edit=None):
 
 @router.message(Command("ready"))
 async def cmd_ready(m: Message):
-    await _render(m.bot, m.chat.id, m.from_user.id)
+    fid = state.fid(m.from_user.id)
+    await _render(m.bot, m.chat.id, m.from_user.id, fid)
 
 
 @router.callback_query(F.data == "m:ready")
 async def cb_ready(cq: CallbackQuery):
-    await _render(cq.bot, cq.message.chat.id, cq.from_user.id, cq)
+    fid = state.fid(cq.from_user.id)
+    await _render(cq.bot, cq.message.chat.id, cq.from_user.id, fid, cq)
     await cq.answer()
+
+
+@router.callback_query(F.data.startswith("rs:"))
+async def cb_switch(cq: CallbackQuery):
+    fid = 2 if cq.data.endswith("2") else 1
+    state.set_fid(cq.from_user.id, fid)
+    await _render(cq.bot, cq.message.chat.id, cq.from_user.id, fid, cq)
+    await cq.answer(f"filter {fid}")
 
 
 @router.callback_query(F.data == "rd:list")
 async def cb_list(cq: CallbackQuery):
-    rows = await db.ready_purchases(cq.from_user.id, 30)
+    fid = state.fid(cq.from_user.id)
+    rows = await db.ready_purchases(cq.from_user.id, fid, 30)
     if not rows:
         return await cq.answer("nothing ready", show_alert=True)
-    await show(cq, ready_list_text(rows[:15]), kb.ready_list(rows))
+    await show(cq, ready_list_text(rows[:15], fid), kb.ready_list(rows))
     await cq.answer()
 
 
@@ -53,13 +65,14 @@ async def cb_prices(cq: CallbackQuery):
 
 @router.callback_query(F.data == "rd:all")
 async def cb_all(cq: CallbackQuery):
-    rows = await db.sell_queue(cq.from_user.id, 100)
+    fid = state.fid(cq.from_user.id)
+    rows = await db.sell_queue(cq.from_user.id, fid, 100)
     if not rows:
         return await cq.answer("nothing sellable", show_alert=True)
     for p in rows:
         await db.set_sell(p["_id"], "queued", 0)
     await cq.answer(f"queued {len(rows)}")
-    await _render(cq.bot, cq.message.chat.id, cq.from_user.id, cq)
+    await _render(cq.bot, cq.message.chat.id, cq.from_user.id, fid, cq)
 
 
 @router.callback_query(F.data.startswith("rd:"))
@@ -89,9 +102,10 @@ async def cb_sell(cq: CallbackQuery):
 
 @router.message(Command("sellall"))
 async def cmd_sellall(m: Message):
-    rows = await db.sell_queue(m.from_user.id, 100)
+    fid = state.fid(m.from_user.id)
+    rows = await db.sell_queue(m.from_user.id, fid, 100)
     if not rows:
         return await m.answer("nothing sellable")
     for p in rows:
         await db.set_sell(p["_id"], "queued", 0)
-    await m.answer(f"queued {len(rows)}")
+    await m.answer(f"queued {len(rows)} · {filter_name(fid)}")
