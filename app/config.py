@@ -36,6 +36,10 @@ USERBOT_PROXY: str = os.getenv("USERBOT_PROXY", "").strip()
 MONGO_URI: str = os.getenv("MONGO_URI", "mongodb://localhost:27017")
 MONGO_DB: str = os.getenv("MONGO_DB", "accstore")
 
+LOG_CHAT_ID: int = _int(os.getenv("LOG_CHAT_ID"), 0)
+LOG_QUEUE_TOPIC: int = _int(os.getenv("LOG_QUEUE_TOPIC"), 0)
+LOG_SOLD_TOPIC: int = _int(os.getenv("LOG_SOLD_TOPIC"), 0)
+
 LZT_BASE: str = "https://api.lzt.market"
 HTTP_TIMEOUT: int = 40
 HTTP_RETRIES: int = 3
@@ -85,6 +89,7 @@ SELL_OTP_TIMEOUT: int = _int(os.getenv("SELL_OTP_TIMEOUT"), 150)
 SELL_REPLY_TIMEOUT: int = _int(os.getenv("SELL_REPLY_TIMEOUT"), 180)
 SELL_CONFIRM_DEFAULT: int = _int(os.getenv("SELL_CONFIRM_DEFAULT"), 600)
 SELL_CONFIRM_MIN: int = _int(os.getenv("SELL_CONFIRM_MIN"), 60)
+SELL_CONFIRM_MAX: int = _int(os.getenv("SELL_CONFIRM_MAX"), 86400)
 SELL_MIN_PROFIT: float = _float(os.getenv("SELL_MIN_PROFIT"), 1.0)
 SELL_LOGOUT_DELAY: int = _int(os.getenv("SELL_LOGOUT_DELAY"), 120)
 SELL_VERDICT_WAIT: int = _int(os.getenv("SELL_VERDICT_WAIT"), 180)
@@ -92,10 +97,11 @@ SELL_QUEUE_TICK: float = _float(os.getenv("SELL_QUEUE_TICK"), 15.0)
 SELL_QUEUE_BATCH: int = _int(os.getenv("SELL_QUEUE_BATCH"), 5)
 SELL_RETRY_DELAY: int = _int(os.getenv("SELL_RETRY_DELAY"), 900)
 SELL_MAX_TRIES: int = _int(os.getenv("SELL_MAX_TRIES"), 1)
+SELL_MAX_RECEIVERS: int = _int(os.getenv("SELL_MAX_RECEIVERS"), 3)
 
 PROFIT_MIN: float = _float(os.getenv("PROFIT_MIN"), 1.0)
 PROFIT_MAX: float = _float(os.getenv("PROFIT_MAX"), 10.0)
-PROFIT_DEFAULT: float = _float(os.getenv("PROFIT_DEFAULT"), 1.0)
+PROFIT_DEFAULT: float = _float(os.getenv("PROFIT_DEFAULT"), 1.5)
 
 PRICE_TTL: float = _float(os.getenv("PRICE_TTL"), 900.0)
 PRICE_REFRESH: float = _float(os.getenv("PRICE_REFRESH"), 240.0)
@@ -124,3 +130,5 @@ LION_BOT: str = (os.getenv("LION_BOT", "TGLionAPI_bot").strip().lstrip("@") or "
 LION_START: str = (os.getenv("LION_START", "Prices").strip() or "Prices")
 TGGET_BOT: str = (os.getenv("TGGET_BOT", "tg_get2_bot").strip().lstrip("@") or "tg_get2_bot")
 CM_BOT: str = (os.getenv("CM_BOT", "CM_Receiver6_Bot").strip().lstrip("@") or "CM_Receiver6_Bot")
+
+FILTER_IDS: tuple[int, ...] = (1, 2)
