@@ -20,7 +20,7 @@ NUMERIC = {
     "daily_spend_cap": ("Daily spend cap", "0 = unlimited", 0.0, 100_000.0, 2),
     "sell_confirm_seconds": ("Confirm window", "60-7200 seconds", 60.0, 7200.0, 0),
     "sell_min_price": ("Min sell price", "0 = sell anything", 0.0, 10_000.0, 2),
-    "profit_mult": ("Profit multiplier", "1 = no margin · 1.2 = 20% margin", 1.0, 10.0, 2),
+    "profit_mult": ("Profit multiplier", "1.5 = buy only if bid ≥ 1.5×", 1.0, 10.0, 2),
 }
 
 TEXT_KEYS = {"twofa_password": "8-64 characters, used as the new cloud password"}
@@ -36,24 +36,16 @@ PROFIT_KEYS = {"profit_mult"}
 _SPLIT_RE = re.compile(r"[,\s;|]+")
 
 
-def screen_for(key: str) -> str:
-    if key == "auto_buy":
-        return "main"
-    if key in PROFIT_KEYS:
-        return "profit"
-    return "filters"
-
-
 async def render_screen(cq: CallbackQuery, key: str):
-    screen = screen_for(key)
-    if screen == "main":
+    fid = state.fid(cq.from_user.id)
+    s = await db.get_settings(cq.from_user.id, fid)
+    if key == "auto_buy":
         from app.handlers.menu import render_menu
         text, markup = await render_menu(cq.from_user.id)
         return await show(cq, text, markup)
-    s = await db.get_settings(cq.from_user.id)
-    if screen == "profit":
+    if key in PROFIT_KEYS:
         return await show(cq, profit_text(s), kb.profit(s))
-    return await show(cq, filters_text(s), kb.filters(s))
+    return await show(cq, filters_text(s, fid), kb.filters(s, fid))
 
 
 def _fmt(key: str, value: float) -> str:
@@ -84,12 +76,20 @@ def _country_note(stored: str) -> str:
             f"<code>{tg.esc(','.join(off))}</code>")
 
 
+@router.callback_query(F.data.startswith("fs:"))
+async def cb_filter_select(cq: CallbackQuery):
+    fid = 2 if cq.data.endswith("2") else 1
+    state.set_fid(cq.from_user.id, fid)
+    state.clear(cq.from_user.id)
+    s = await db.get_settings(cq.from_user.id, fid)
+    await show(cq, filters_text(s, fid), kb.filters(s, fid))
+    await cq.answer(f"filter {fid}")
+
+
 @router.callback_query(F.data == "m:filters")
 async def cb_filters(cq: CallbackQuery):
-    state.clear(cq.from_user.id)
-    s = await db.get_settings(cq.from_user.id)
-    await show(cq, filters_text(s), kb.filters(s))
-    await cq.answer()
+    from app.handlers.menu import cb_filters as menu_filters
+    await menu_filters(cq)
 
 
 @router.callback_query(F.data == "m:price")
@@ -101,7 +101,7 @@ async def cb_price(cq: CallbackQuery):
 @router.callback_query(F.data == "m:spam")
 async def cb_spam(cq: CallbackQuery):
     await show(cq, "<b>Spam filter</b>\n"
-                   "<i>no</i> — spam free, geo spam rejected too\n"
+                   "<i>no</i> — server filters spam out\n"
                    "<i>yes</i> — only spam-blocked accounts\n"
                    "<i>any</i> — no server filter",
                kb.pick("s:spam_mode", ["no", "yes", "any"]))
@@ -133,7 +133,8 @@ async def cb_set(cq: CallbackQuery):
     if len(parts) != 3:
         return await cq.answer("bad callback")
     _, key, value = parts
-    stored = await db.set_setting(cq.from_user.id, key, value)
+    fid = state.fid(cq.from_user.id)
+    stored = await db.set_setting(cq.from_user.id, key, value, fid)
     if stored is None:
         return await cq.answer("unknown setting", show_alert=True)
     await render_screen(cq, key)
@@ -166,22 +167,25 @@ async def cb_input(cq: CallbackQuery):
 @router.callback_query(F.data == "x")
 async def cb_cancel(cq: CallbackQuery):
     state.clear(cq.from_user.id)
-    s = await db.get_settings(cq.from_user.id)
-    await show(cq, filters_text(s), kb.filters(s))
+    fid = state.fid(cq.from_user.id)
+    s = await db.get_settings(cq.from_user.id, fid)
+    await show(cq, filters_text(s, fid), kb.filters(s, fid))
     await cq.answer("cancelled")
 
 
 @router.message(Command("cancel"))
 async def cmd_cancel(m: Message):
     state.clear(m.from_user.id)
-    s = await db.get_settings(m.from_user.id)
-    await m.answer("cancelled", reply_markup=kb.filters(s))
+    fid = state.fid(m.from_user.id)
+    s = await db.get_settings(m.from_user.id, fid)
+    await m.answer("cancelled", reply_markup=kb.filters(s, fid))
 
 
 async def on_value(m: Message, hit: dict):
     uid = m.from_user.id
     key = hit["key"]
     raw = (m.text or "").strip()
+    fid = state.fid(uid)
 
     if key in COUNTRY_KEYS:
         tokens = [t for t in _SPLIT_RE.split(raw) if t]
@@ -194,13 +198,13 @@ async def on_value(m: Message, hit: dict):
                 state.set(uid, "setting", key, hit["chat_id"], hit["message_id"])
                 return await m.answer("need ISO codes like AE,LY · /cancel")
             val = ",".join(dict.fromkeys(codes))
-        stored = await db.set_setting(uid, key, val)
+        stored = await db.set_setting(uid, key, val, fid)
     elif key in TEXT_KEYS:
         val = "".join(raw.split())
         if not 8 <= len(val) <= 64 or not val.isascii():
             state.set(uid, "setting", key, hit["chat_id"], hit["message_id"])
             return await m.answer("8-64 ascii characters · /cancel")
-        stored = await db.set_setting(uid, key, val)
+        stored = await db.set_setting(uid, key, val, fid)
     elif key in NUMERIC:
         label, _, lo, hi, _ = NUMERIC[key]
         try:
@@ -211,7 +215,7 @@ async def on_value(m: Message, hit: dict):
         if not lo <= number <= hi:
             state.set(uid, "setting", key, hit["chat_id"], hit["message_id"])
             return await m.answer(f"{label}: use {lo:g}-{hi:g} · /cancel")
-        stored = await db.set_setting(uid, key, _fmt(key, number))
+        stored = await db.set_setting(uid, key, _fmt(key, number), fid)
     else:
         state.clear(uid)
         return await m.answer("unknown setting")
@@ -220,18 +224,18 @@ async def on_value(m: Message, hit: dict):
         return await m.answer("unknown setting")
 
     if key in AGE_KEYS:
-        await db.reschedule(uid)
+        await db.reschedule(uid, fid)
 
     note = _country_note(stored) if key in COUNTRY_KEYS else ""
     if key == "session_min_hours" and 0 < db.num(stored) < 24:
         note = "\n⚠️ below 24h the market filter cannot apply — checked locally"
 
     state.clear(uid)
-    s = await db.get_settings(uid)
+    s = await db.get_settings(uid, fid)
     if key in PROFIT_KEYS:
         return await _replace(m.bot, hit["chat_id"], hit["message_id"],
                               f"✅ saved <code>x{stored}</code>{note}\n\n{profit_text(s)}",
                               kb.profit(s))
     await _replace(m.bot, hit["chat_id"], hit["message_id"],
-                   f"✅ saved <code>{tg.esc(stored or '-')}</code>{note}\n\n{filters_text(s)}",
-                   kb.filters(s))
+                   f"✅ saved <code>{tg.esc(stored or '-')}</code>{note}\n\n"
+                   f"{filters_text(s, fid)}", kb.filters(s, fid))
