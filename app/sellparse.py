@@ -3,9 +3,8 @@ import re
 CODE_REQUEST = re.compile(
     r"(code\s+(?:has\s+been\s+|was\s+|is\s+)?sent|sent\s+(?:the\s+)?(?:code|otp)"
     r"|enter\s+(?:the\s+)?(?:code|otp)|verification\s+code|send\s+(?:me\s+)?(?:the\s+)?code"
-    r"|отправ\w*\s+код|введите\s+код)", re.I)
-PASSWORD_REQUEST = re.compile(
-    r"(cloud\s+password|2fa|two[\s-]?step|password|пароль)", re.I)
+    r"|the\s+code\s+sent|отправ\w*\s+код|введите\s+код)", re.I)
+PASSWORD_REQUEST = re.compile(r"(cloud\s+password|2fa|two[\s-]?step|password|пароль)", re.I)
 ACCEPT = re.compile(
     r"(account\s+received|received\s+successfully|account\s+accepted"
     r"|account\s+will\s+be\s+(?:automatically\s+)?(?:verified|confirmed)"
@@ -15,17 +14,20 @@ REJECT = re.compile(
     r"|already\s+(?:sold|added)|blocked|try\s+again|cannot|can't|no\s+capacity|limit)", re.I)
 CODE_WRONG = re.compile(r"(code|otp|пароль|код)", re.I)
 PRICE = re.compile(r"price[^\d$]{0,12}\$?\s*(\d{1,6}(?:[.,]\d{1,3})?)", re.I)
+PRICE_BRACKET = re.compile(r"price\s*[\(\[]\s*\$?\s*(\d{1,6}(?:[.,]\d{1,3})?)\s*[\)\]]", re.I)
 SECONDS = re.compile(r"(\d{1,7})\s*(?:s\b|secs?\b|seconds?\b)", re.I)
 MINUTES = re.compile(r"(\d{1,5})\s*(?:mins?\b|minutes?\b)", re.I)
+VERIFY_AFTER = re.compile(r"after\s+(\d{2,7})\s*(?:s\b|secs?\b|seconds?\b|min)", re.I)
 OTP = re.compile(r"\b(\d{4,6})\b")
 PHONE = re.compile(r"(\+\d{7,16})")
 COUNTRY = re.compile(r"([A-Z]{2})")
+FLAG = re.compile("[\U0001F1E6-\U0001F1FF]{2}")
 
-SKIP_CC = {"OK", "TG", "ID", "PR", "OTP", "US", "AM", "PM", "NA", "BD"}
+SKIP_CC = {"OK", "TG", "ID", "PR", "OTP", "US", "AM", "PM", "NA"}
 
 
 def price_of(text: str) -> float:
-    m = PRICE.search(text or "")
+    m = PRICE_BRACKET.search(text or "") or PRICE.search(text or "")
     if not m:
         return 0.0
     try:
@@ -35,6 +37,12 @@ def price_of(text: str) -> float:
 
 
 def confirm_of(text: str) -> int:
+    m = VERIFY_AFTER.search(text or "")
+    if m:
+        value = int(m.group(1))
+        if "min" in m.group(0).lower():
+            value *= 60
+        return value
     m = MINUTES.search(text or "")
     if m:
         return int(m.group(1)) * 60
@@ -75,6 +83,9 @@ def phone_of(text: str) -> str:
 
 
 def country_of(text: str) -> str:
+    m = FLAG.search(text or "")
+    if m:
+        return "".join(chr(ord(ch) - 0x1F1E6 + 65) for ch in m.group(0))
     for m in COUNTRY.finditer(text or ""):
         if m.group(1) not in SKIP_CC:
             return m.group(1)
