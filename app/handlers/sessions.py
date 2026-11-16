@@ -3,11 +3,12 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from app import db, keyboards as kb, seller, session_export
+from app.handlers import state
 from app.handlers.menu import show
 from app.session_manager import check_session
 from app.utils import tg
-from app.utils.texts import (session_detail, session_file, session_list_text,
-                             session_stats_text)
+from app.utils.texts import (filter_name, session_detail, session_file,
+                             session_list_text, session_stats_text)
 from app.utils.timeutil import fmt_dt, now
 
 router = Router()
@@ -15,44 +16,43 @@ router = Router()
 PAGES = {"list": "queue", "over": "24h+", "ready": "ready"}
 
 
-async def _rows(tg_id: int, page: str) -> list[dict]:
+async def _rows(tg_id: int, fid: int, page: str) -> list[dict]:
     if page == "over":
-        rows = await db.over_age(tg_id)
+        rows = await db.over_age(tg_id, fid)
     elif page == "ready":
-        rows = await db.ready_purchases(tg_id)
+        rows = await db.ready_purchases(tg_id, fid)
     else:
-        rows = await db.queue_purchases(tg_id)
+        rows = await db.queue_purchases(tg_id, fid)
     stamp = now()
     for p in rows:
         p["_age"] = db.current_age(p, stamp)
     return rows
 
 
-async def _panel(bot, chat_id: int, tg_id: int, edit=None):
-    stats = await db.session_stats(tg_id)
-    text = (f"<b>Sessions</b>\n"
+async def _panel(bot, chat_id: int, tg_id: int, fid: int, edit=None):
+    stats = await db.session_stats(tg_id, fid)
+    text = (f"<b>Sessions</b> · {filter_name(fid)}\n"
             f"queue <code>{stats['queue']}</code>"
             f" · 24h+ <code>{stats['over']}</code>"
             f" · ready <code>{stats['ready']}</code>\n"
             f"live <code>{stats['live']}</code> · dead <code>{stats['dead']}</code>"
             f" · sold <code>{stats['sold']}</code>")
-    markup = kb.sessions(stats)
+    markup = kb.sessions(stats, fid)
     if edit is not None:
         await show(edit, text, markup)
     else:
         await tg.send(bot, chat_id, text, markup)
 
 
-async def _send_zip(bot, chat_id: int, tg_id: int, page: str) -> int:
-    rows = await _rows(tg_id, page)
+async def _send_zip(bot, chat_id: int, tg_id: int, fid: int, page: str) -> int:
+    rows = await _rows(tg_id, fid, page)
     if not rows:
         return 0
-    label = PAGES.get(page, page)
+    label = f"f{fid}_{PAGES.get(page, page)}"
     blob = session_export.zip_of(rows)
     if not blob:
         return -1
-    await tg.send_document(bot, chat_id, blob,
-                           f"{label.replace('+', 'p')}_{now()}.zip")
+    await tg.send_document(bot, chat_id, blob, f"{label}_{now()}.zip")
     return len(rows)
 
 
@@ -73,44 +73,58 @@ async def cmd_session(m: Message):
         if not p:
             return await m.answer("not found")
         return await tg.send(m.bot, m.chat.id, session_detail(p), kb.session_detail(p))
-    await _panel(m.bot, m.chat.id, m.from_user.id)
+    state.set_fid(m.from_user.id, 1)
+    await _panel(m.bot, m.chat.id, m.from_user.id, 1)
 
 
 @router.callback_query(F.data == "m:sessions")
 async def cb_sessions(cq: CallbackQuery):
-    await _panel(cq.bot, cq.message.chat.id, cq.from_user.id, cq)
+    await show(cq, "<b>Sessions</b>\nfilter chuno", kb.session_pick())
     await cq.answer()
+
+
+@router.callback_query(F.data.startswith("ss:"))
+async def cb_session_fid(cq: CallbackQuery):
+    fid = 2 if cq.data.endswith("2") else 1
+    state.set_fid(cq.from_user.id, fid)
+    await _panel(cq.bot, cq.message.chat.id, cq.from_user.id, fid, cq)
+    await cq.answer(f"filter {fid}")
 
 
 @router.callback_query(F.data.startswith("q:"))
 async def cb_page(cq: CallbackQuery):
     page = cq.data.split(":", 1)[1]
+    fid = state.fid(cq.from_user.id)
     if page == "stats":
-        st = await db.session_stats(cq.from_user.id)
-        sold = await db.sale_stats(cq.from_user.id)
+        st = await db.session_stats(cq.from_user.id, fid)
+        sold = await db.sale_stats(cq.from_user.id, fid)
         await show(cq, session_stats_text(st, sold), kb.back("m:sessions"))
         return await cq.answer()
     label = PAGES.get(page, page)
-    count = await _send_zip(cq.bot, cq.from_user.id, cq.from_user.id, page)
+    count = await _send_zip(cq.bot, cq.from_user.id, cq.from_user.id, fid, page)
     if count == 0:
-        await show(cq, f"<b>{label}</b>\nempty", kb.back("m:sessions"))
+        await show(cq, f"<b>{filter_name(fid)} · {label}</b>\nempty",
+                   kb.back("m:sessions"))
         return await cq.answer("empty", show_alert=True)
     if count == -1:
-        await show(cq, f"<b>{label}</b>\nno session stored", kb.back("m:sessions"))
+        await show(cq, f"<b>{filter_name(fid)} · {label}</b>\nno session stored",
+                   kb.back("m:sessions"))
         return await cq.answer("no session", show_alert=True)
-    await show(cq, f"<b>{label}</b> · {count} session(s) sent as <code>.session</code> zip",
-               kb.session_file_bar(page))
+    await show(cq, f"<b>{filter_name(fid)} · {label}</b> · {count} session(s) as "
+                   f"<code>.session</code> zip", kb.session_file_bar(page))
     await cq.answer(f"{count} sent")
 
 
 @router.callback_query(F.data.startswith("ql:"))
 async def cb_list(cq: CallbackQuery):
     page = cq.data.split(":", 1)[1]
-    rows = await _rows(cq.from_user.id, page)
+    fid = state.fid(cq.from_user.id)
+    rows = await _rows(cq.from_user.id, fid, page)
     if not rows:
-        await show(cq, f"<b>{PAGES.get(page, page)}</b>\nempty", kb.back("m:sessions"))
+        await show(cq, f"<b>{filter_name(fid)} · {PAGES.get(page, page)}</b>\nempty",
+                   kb.back("m:sessions"))
         return await cq.answer("empty", show_alert=True)
-    await show(cq, session_list_text(rows[:20], PAGES.get(page, page)),
+    await show(cq, session_list_text(rows[:20], f"{filter_name(fid)} · {PAGES.get(page, page)}"),
                kb.session_list(rows[:20], page))
     await cq.answer()
 
@@ -134,7 +148,7 @@ async def cb_check(cq: CallbackQuery):
         return await cq.answer("no session stored yet", show_alert=True)
 
     await cq.answer("checking…")
-    s = await db.get_settings(cq.from_user.id)
+    s = await db.get_settings(cq.from_user.id, p.get("fid") or 1)
     alive, me = await check_session(p["session_string"], s.get("proxy", ""))
 
     note = "session live" if alive else "session dead"
