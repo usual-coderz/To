@@ -17,9 +17,9 @@ SPACING = 1.4
 FLOOD_CAP = 600.0
 FLOOD_TRIES = 6
 
-_LOCKS: dict[int, asyncio.Lock] = {}
-_UNTIL: dict[int, float] = {}
-_LAST: dict[int, float] = {}
+_LOCKS: dict[tuple, asyncio.Lock] = {}
+_UNTIL: dict[tuple, float] = {}
+_LAST: dict[tuple, float] = {}
 
 
 def esc(value) -> str:
@@ -39,22 +39,28 @@ def pre(text: str, limit: int = LIMIT) -> str:
     return "<pre>" + esc(clip(text, limit)) + "</pre>"
 
 
-def _lock(chat_id) -> asyncio.Lock:
-    lock = _LOCKS.get(chat_id)
+def _key(chat_id, topic) -> tuple:
+    return (chat_id, int(topic or 0))
+
+
+def _lock(chat_id, topic) -> asyncio.Lock:
+    key = _key(chat_id, topic)
+    lock = _LOCKS.get(key)
     if lock is None:
         lock = asyncio.Lock()
-        _LOCKS[chat_id] = lock
+        _LOCKS[key] = lock
     return lock
 
 
-def flood_left(chat_id) -> float:
-    return max(0.0, _UNTIL.get(chat_id, 0.0) - time.time())
+def flood_left(chat_id, topic=0) -> float:
+    return max(0.0, _UNTIL.get(_key(chat_id, topic), 0.0) - time.time())
 
 
-def _flood(chat_id, seconds: float):
+def _flood(chat_id, topic, seconds: float):
+    key = _key(chat_id, topic)
     until = time.time() + min(max(1.0, seconds), FLOOD_CAP)
-    if until > _UNTIL.get(chat_id, 0.0):
-        _UNTIL[chat_id] = until
+    if until > _UNTIL.get(key, 0.0):
+        _UNTIL[key] = until
 
 
 def _retry_after(e) -> float:
@@ -66,25 +72,27 @@ def _retry_after(e) -> float:
         return float(m.group(1)) if m else 5.0
 
 
-async def _slot(chat_id):
-    left = flood_left(chat_id)
+async def _slot(chat_id, topic):
+    key = _key(chat_id, topic)
+    left = flood_left(chat_id, topic)
     if left:
         log.info(f"flood wait chat={chat_id} {left:.0f}s")
         await asyncio.sleep(left)
-    gap = SPACING - (time.time() - _LAST.get(chat_id, 0.0))
+    gap = SPACING - (time.time() - _LAST.get(key, 0.0))
     if gap > 0:
         await asyncio.sleep(gap)
 
 
-async def _call(chat_id, coro_factory):
-    async with _lock(chat_id):
-        await _slot(chat_id)
+async def _call(chat_id, topic, coro_factory):
+    key = _key(chat_id, topic)
+    async with _lock(chat_id, topic):
+        await _slot(chat_id, topic)
         try:
             result = await asyncio.wait_for(coro_factory(), SEND_TIMEOUT)
-            _LAST[chat_id] = time.time()
+            _LAST[key] = time.time()
             return "ok", result
         except TelegramRetryAfter as e:
-            _flood(chat_id, _retry_after(e))
+            _flood(chat_id, topic, _retry_after(e))
             return "flood", None
         except TelegramBadRequest as e:
             if "not modified" in str(e).lower():
@@ -96,20 +104,22 @@ async def _call(chat_id, coro_factory):
             return "err", None
 
 
-async def send(bot, chat_id, text, markup=None) -> bool:
+async def send(bot, chat_id, text, markup=None, topic: int = 0) -> bool:
     text = clip(text)
     for _ in range(FLOOD_TRIES):
         state, _r = await _call(
-            chat_id, lambda: bot.send_message(chat_id, text, reply_markup=markup,
-                                              link_preview_options=LP))
+            chat_id, topic, lambda: bot.send_message(
+                chat_id, text, reply_markup=markup, link_preview_options=LP,
+                message_thread_id=topic or None))
         if state == "ok":
             return True
         if state == "flood":
             continue
         if state == "bad":
             state, _r = await _call(
-                chat_id, lambda: bot.send_message(chat_id, clip(strip_tags(text)),
-                                                  reply_markup=markup, parse_mode=None))
+                chat_id, topic, lambda: bot.send_message(
+                    chat_id, clip(strip_tags(text)), reply_markup=markup,
+                    parse_mode=None, message_thread_id=topic or None))
             if state == "ok":
                 return True
             if state == "flood":
@@ -119,11 +129,13 @@ async def send(bot, chat_id, text, markup=None) -> bool:
     return False
 
 
-async def send_document(bot, chat_id, payload: bytes, filename: str) -> bool:
+async def send_document(bot, chat_id, payload: bytes, filename: str,
+                        topic: int = 0) -> bool:
     for _ in range(FLOOD_TRIES):
         state, _r = await _call(
-            chat_id, lambda: bot.send_document(
-                chat_id, BufferedInputFile(payload, filename=filename)))
+            chat_id, topic, lambda: bot.send_document(
+                chat_id, BufferedInputFile(payload, filename=filename),
+                message_thread_id=topic or None))
         if state == "ok":
             return True
         if state != "flood":
@@ -133,24 +145,25 @@ async def send_document(bot, chat_id, payload: bytes, filename: str) -> bool:
 
 async def edit(message, text, markup=None) -> bool:
     text = clip(text)
+    chat_id = message.chat.id
     for _ in range(FLOOD_TRIES):
         state, _r = await _call(
-            message.chat.id,
-            lambda: message.edit_text(text, reply_markup=markup,
-                                      link_preview_options=LP))
+            chat_id, 0, lambda: message.edit_text(text, reply_markup=markup,
+                                                  link_preview_options=LP))
         if state == "ok":
             return True
         if state == "flood":
             continue
         if state == "bad":
             state, _r = await _call(
-                message.chat.id,
-                lambda: message.edit_text(clip(strip_tags(text)), reply_markup=markup,
-                                          parse_mode=None, link_preview_options=LP))
+                chat_id, 0, lambda: message.edit_text(clip(strip_tags(text)),
+                                                      reply_markup=markup,
+                                                      parse_mode=None,
+                                                      link_preview_options=LP))
             if state == "ok":
                 return True
             if state == "flood":
                 continue
             break
         break
-    return await send(message.bot, message.chat.id, text, markup)
+    return await send(message.bot, chat_id, text, markup)
