@@ -10,7 +10,7 @@ from app.deps import lzt
 from app.handlers import state
 from app.utils import tg
 from app.utils import wallet as wallet_view
-from app.utils.texts import menu_text, profit_text, ready_text
+from app.utils.texts import filter_pick_text, menu_text, profit_text, ready_text
 from app.utils.timeutil import fmt_dt
 
 router = Router()
@@ -48,17 +48,19 @@ async def _last_line(tg_id: int) -> str:
         return ""
     r = rows[0]
     stamp = fmt_dt(r.get("ts"))
+    tag = f"f{r.get('fid') or 1}"
     if r.get("error"):
-        return f"last {stamp}: ⚠️ {r['error'][:60]}"
+        return f"last {stamp} {tag}: ⚠️ {r['error'][:60]}"
     if r.get("note"):
-        return f"last {stamp}: {r['note'][:60]}"
+        return f"last {stamp} {tag}: {r['note'][:60]}"
     if r.get("scanned"):
-        return f"last {stamp}: scan {r['scanned']} · buy {r.get('bought', 0)}"
+        return f"last {stamp} {tag}: scan {r['scanned']} · buy {r.get('bought', 0)}"
     return ""
 
 
 async def render_menu(tg_id: int) -> tuple[str, object]:
-    s = await db.get_settings(tg_id)
+    s = await db.get_settings(tg_id, 1)
+    s2 = await db.get_settings(tg_id, 2)
     snap = await _wallet(s["currency"])
     profile = await _profile()
 
@@ -69,20 +71,25 @@ async def render_menu(tg_id: int) -> tuple[str, object]:
     if snap["error"]:
         note = f"{note} · {snap['error'][:60]}" if note else snap["error"][:60]
 
-    queued = await db.queue_count(tg_id)
-    ready = await db.ready_count(tg_id)
+    queued = await db.queue_count(tg_id, 1)
+    ready = await db.ready_count(tg_id, 1)
+    q2 = await db.queue_count(tg_id, 2)
+    r2 = await db.ready_count(tg_id, 2)
     last = await _last_line(tg_id)
     if last:
         note = f"{note} · {last}" if note else last
 
-    return (menu_text(s, profile, snap["total"], snap["spendable"], queued, ready, note),
-            kb.main(s, ready))
+    return (menu_text(s, profile, snap["total"], snap["spendable"], queued, ready, note,
+                      "on" if s["auto_buy"] == "1" else "off",
+                      "on" if s2["auto_buy"] == "1" else "off", q2, r2),
+            kb.main(s, ready, s2, r2))
 
 
 @router.message(Command("start"))
 async def cmd_start(m: Message):
     await db.ensure_user(m.from_user.id, m.from_user.username or "")
     state.clear(m.from_user.id)
+    state.set_fid(m.from_user.id, 1)
     text, markup = await render_menu(m.from_user.id)
     await tg.send(m.bot, m.chat.id, text, markup)
 
@@ -95,9 +102,29 @@ async def cb_main(cq: CallbackQuery):
     await cq.answer()
 
 
+@router.callback_query(F.data.startswith("af:"))
+async def cb_auto(cq: CallbackQuery):
+    fid = 2 if cq.data.endswith("2") else 1
+    s = await db.get_settings(cq.from_user.id, fid)
+    await db.set_setting(cq.from_user.id, "auto_buy",
+                         "0" if s["auto_buy"] == "1" else "1", fid)
+    text, markup = await render_menu(cq.from_user.id)
+    await show(cq, text, markup)
+    await cq.answer(f"filter {fid}")
+
+
+@router.callback_query(F.data == "m:filters")
+async def cb_filters(cq: CallbackQuery):
+    state.clear(cq.from_user.id)
+    s1 = await db.get_settings(cq.from_user.id, 1)
+    s2 = await db.get_settings(cq.from_user.id, 2)
+    await show(cq, filter_pick_text(s1, s2), kb.filter_pick())
+    await cq.answer()
+
+
 @router.callback_query(F.data == "m:profit")
 async def cb_profit(cq: CallbackQuery):
-    s = await db.get_settings(cq.from_user.id)
+    s = await db.get_settings(cq.from_user.id, 1)
     await show(cq, profit_text(s), kb.profit(s))
     await cq.answer()
 
@@ -105,20 +132,21 @@ async def cb_profit(cq: CallbackQuery):
 @router.callback_query(F.data.startswith("t:"))
 async def cb_toggle(cq: CallbackQuery):
     key = cq.data.split(":", 1)[1]
-    s = await db.get_settings(cq.from_user.id)
+    fid = state.fid(cq.from_user.id)
+    s = await db.get_settings(cq.from_user.id, fid)
     if key not in s:
         return await cq.answer("unknown setting", show_alert=True)
-    await db.set_setting(cq.from_user.id, key, "0" if s[key] == "1" else "1")
+    await db.set_setting(cq.from_user.id, key, "0" if s[key] == "1" else "1", fid)
     if key == "auto_buy":
         text, markup = await render_menu(cq.from_user.id)
         await show(cq, text, markup)
     elif key == "auto_sell":
-        s = await db.get_settings(cq.from_user.id)
-        count = await db.ready_count(cq.from_user.id)
-        await show(cq, ready_text(s, count, await db.sale_stats(cq.from_user.id)),
-                   kb.ready(s, count))
+        count = await db.ready_count(cq.from_user.id, fid)
+        s = await db.get_settings(cq.from_user.id, fid)
+        await show(cq, ready_text(s, count, await db.sale_stats(cq.from_user.id, fid), fid),
+                   kb.ready(s, count, fid))
     else:
-        s = await db.get_settings(cq.from_user.id)
         from app.utils.texts import filters_text
-        await show(cq, filters_text(s), kb.filters(s))
+        s = await db.get_settings(cq.from_user.id, fid)
+        await show(cq, filters_text(s, fid), kb.filters(s, fid))
     await cq.answer("saved")
